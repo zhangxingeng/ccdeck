@@ -4,6 +4,8 @@ An offline desktop app for browsing, reading, and editing your [Claude Code](htt
 
 **Your conversations never leave your machine.** There is no server, no upload, and no telemetry. The app reads the JSONL files Claude Code already writes to `~/.claude/projects/` (or `$CLAUDE_CONFIG_DIR` if set). It is open source under the MIT license.
 
+![Claude Code Visualizer — session metadata, word-level version diff, edited message badge, collapsed tool group, and the save rail](docs/hero.png)
+
 ## Features
 
 ### Offline and private
