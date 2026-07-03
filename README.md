@@ -1,10 +1,10 @@
-# Claude Code Visualizer
+# Claude Code Studio
 
 An offline desktop app for browsing, reading, and editing your [Claude Code](https://claude.com/claude-code) chat history.
 
 **Your conversations never leave your machine.** There is no server, no upload, and no telemetry. The app reads the JSONL files Claude Code already writes to `~/.claude/projects/` (or `$CLAUDE_CONFIG_DIR` if set). It is open source under the MIT license.
 
-![Claude Code Visualizer — session metadata, word-level version diff, edited message badge, collapsed tool group, and the save rail](docs/hero.png)
+![Claude Code Studio — session metadata, word-level version diff, edited message badge, collapsed tool group, and the save rail](docs/hero.png)
 
 ## Features
 
@@ -61,7 +61,7 @@ There is no separate "edit mode" — **the view is the editor.** Open any sessio
 
 **Crash-safe drafts**
 
-- Every change is auto-saved to disk in `~/.claude/.ccviz-edits/` within ~300 ms.
+- Every change is auto-saved to disk in `~/.claude/.ccstudio-edits/` within ~300 ms.
 - If you close and reopen mid-edit, a "Resumed unsaved edits" banner appears with a Discard option to start fresh.
 - The draft is deleted automatically once you save.
 
@@ -76,7 +76,7 @@ There is no separate "edit mode" — **the view is the editor.** Open any sessio
 **Saving (floating right-edge bar)**
 
 - When you have unsaved changes, a save bar appears pinned to the right with the change count and three choices:
-  - **Save** — overwrites the original file. Gated by a confirmation; takes an automatic timestamped backup to `~/.claude/.ccviz-backups/` first.
+  - **Save** — overwrites the original file. Gated by a confirmation; takes an automatic timestamped backup to `~/.claude/.ccstudio-backups/` first.
   - **Save as copy** — writes a sibling file `<stem>-edited-<timestamp>.jsonl`, leaving the original untouched.
   - **Discard** — throws away all unsaved edits.
 - **History** (always available on the bar) lists every backup for the session and restores any of them.
@@ -84,7 +84,7 @@ There is no separate "edit mode" — **the view is the editor.** Open any sessio
 
 ## Install
 
-Download the installer for your platform from the [Releases page](https://github.com/zhangxingeng/claude-code-visualizer/releases):
+Download the installer for your platform from the [Releases page](https://github.com/zhangxingeng/claude-code-studio/releases):
 
 | Platform | Files |
 |----------|-------|

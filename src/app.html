@@ -4,12 +4,12 @@
     <meta charset="utf-8" />
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Claude Code Visualizer</title>
+    <title>Claude Code Studio</title>
     <script>
       // Apply saved theme before first paint to avoid a flash.
       (function () {
         try {
-          var t = localStorage.getItem('ccviz-theme');
+          var t = localStorage.getItem('ccstudio-theme');
           if (!t) t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
           document.documentElement.setAttribute('data-theme', t);
         } catch (e) {

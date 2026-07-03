@@ -1,10 +1,10 @@
 /**
- * Theme helpers — read/write the ccviz-theme preference that controls
+ * Theme helpers — read/write the ccstudio-theme preference that controls
  * the [data-theme] attribute on <html>.  The initial bootstrap is already
  * done by a tiny inline <script> in app.html so there is no FOUC.
  */
 
-const STORAGE_KEY = 'ccviz-theme';
+const STORAGE_KEY = 'ccstudio-theme';
 
 export type Theme = 'light' | 'dark';
 

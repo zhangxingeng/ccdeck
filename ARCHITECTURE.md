@@ -1,4 +1,4 @@
-# Claude Code Visualizer — Architecture & Contracts
+# Claude Code Studio — Architecture & Contracts
 
 Desktop app (Tauri v2 + SvelteKit static SPA, Svelte 5 + TS). Fully offline.
 Reads Claude Code chat history from `~/.claude/projects/`, renders it, allows
@@ -57,8 +57,8 @@ write_session(path, content) -> null
 
 snapshot(path) -> BackupVersion
     // Copy current on-disk file into the backup store BEFORE an override.
-    // Store: <projects-dir>/../.ccviz-backups/<sanitized session id>/vNNN-<unixsecs>.jsonl
-    //   (i.e. ~/.claude/.ccviz-backups/...). gzip optional; plain .jsonl is fine for v1.
+    // Store: <projects-dir>/../.ccstudio-backups/<sanitized session id>/vNNN-<unixsecs>.jsonl
+    //   (i.e. ~/.claude/.ccstudio-backups/...). gzip optional; plain .jsonl is fine for v1.
     BackupVersion { version: number, timestamp: number, path: string, size: number }
 
 list_backups(session_path) -> BackupVersion[]
@@ -70,11 +70,11 @@ restore_backup(backup_path) -> string
 
 read_edit_draft(session_path) -> string | null
     // Return the raw JSON of a saved edit draft for this session, or null if
-    // no draft file exists. Draft store: ~/.claude/.ccviz-edits/<sanitized_id>.json
+    // no draft file exists. Draft store: ~/.claude/.ccstudio-edits/<sanitized_id>.json
     // where sanitized_id = sanitize_id(relative path from projects dir).
 
 write_edit_draft(session_path, content) -> null
-    // Persist an edit draft (creates ~/.claude/.ccviz-edits/ if needed).
+    // Persist an edit draft (creates ~/.claude/.ccstudio-edits/ if needed).
     // content is the JSON.stringify of the Draft object (see editDraft.ts).
 
 delete_edit_draft(session_path) -> null

@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * +page.svelte — top-level SPA shell for Claude Code Visualizer.
+   * +page.svelte — top-level SPA shell for Claude Code Studio.
    *
    * States: browse | viewer
    * Orchestrates: session loading, subagent linking, HTML export, theme toggle.
@@ -139,7 +139,7 @@ ${contentHtml}
 <!-- ── header ──────────────────────────────────────────────────────────────── -->
 <header class="app-header">
   <div>
-    <h1>Claude Code Visualizer</h1>
+    <h1>Claude Code Studio</h1>
     {#if view === 'viewer' && current}
       <div class="subtitle">
         {current.meta.project} · {current.turns.length} turn{current.turns.length === 1 ? '' : 's'}
@@ -195,8 +195,8 @@ ${contentHtml}
 
 <!-- ── footer ──────────────────────────────────────────────────────────────── -->
 <footer class="app-footer">
-  <a href="https://github.com/zhangxingeng/claude-code-visualizer" target="_blank" rel="noopener noreferrer">
-    Claude Code Visualizer — offline, open-source chat history viewer
+  <a href="https://github.com/zhangxingeng/claude-code-studio" target="_blank" rel="noopener noreferrer">
+    Claude Code Studio — offline, open-source chat history viewer
   </a>
 </footer>
 

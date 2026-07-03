@@ -125,7 +125,7 @@ fn edit_draft_path(session_path: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| "Cannot determine home directory".to_string())?;
     Ok(home
         .join(".claude")
-        .join(".ccviz-edits")
+        .join(".ccstudio-edits")
         .join(format!("{}.json", session_id)))
 }
 
@@ -351,7 +351,7 @@ fn write_session(path: String, content: String) -> Result<(), String> {
 /// Copy the current on-disk file into the backup store before an override.
 ///
 /// Backup location:
-///   ~/.claude/.ccviz-backups/<sanitized_session_id>/vNNN-<unixsecs>.jsonl
+///   ~/.claude/.ccstudio-backups/<sanitized_session_id>/vNNN-<unixsecs>.jsonl
 ///
 /// NNN is 1-based and grows by counting existing *.jsonl files in the dir.
 #[tauri::command]
@@ -371,7 +371,7 @@ fn snapshot(path: String) -> Result<BackupVersion, String> {
         .ok_or_else(|| "Cannot determine home directory".to_string())?;
     let backup_root = home
         .join(".claude")
-        .join(".ccviz-backups")
+        .join(".ccstudio-backups")
         .join(&session_id);
 
     fs::create_dir_all(&backup_root).map_err(|e| e.to_string())?;
@@ -425,7 +425,7 @@ fn list_backups(session_path: String) -> Result<Vec<BackupVersion>, String> {
         .ok_or_else(|| "Cannot determine home directory".to_string())?;
     let backup_root = home
         .join(".claude")
-        .join(".ccviz-backups")
+        .join(".ccstudio-backups")
         .join(&session_id);
 
     if !backup_root.is_dir() {

@@ -73,7 +73,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
-          releaseName: 'Claude Code Visualizer ${{ github.event.inputs.tag || github.ref_name }}'
+          releaseName: 'Claude Code Studio ${{ github.event.inputs.tag || github.ref_name }}'
           releaseBody: 'Download the installer for your platform below. 100% offline — your chat history never leaves your machine. Unsigned builds: on first launch, Windows may show a SmartScreen prompt (More info → Run anyway) and macOS may require right-click → Open.'
           releaseDraft: false
           prerelease: false
