@@ -1,7 +1,19 @@
 # Search — Design & Implementation Plan
 
-Status: **planned, not yet built.** This is the spec we'll implement together (Rust-learning
-pass). Target release: **v0.3.0**.
+Status: **BUILT** (all 12 milestones, on `main`, uncommitted/unreleased as of 2026-07-03).
+Backend: `src-tauri/src/search/{db,extract,index,query,state}.rs` — 14 unit/integration tests green,
+release build clean. Frontend: `src/lib/search.svelte.ts` (store), `src/lib/components/SearchView.svelte`,
+wired into `src/routes/+page.svelte` (new **Search** view) with jump-to-hit in `SessionEditor.svelte`.
+
+**Deviations from the spec below (intentional):**
+- `blocks` gained a **`uuid`** column — the frontend regroups entries into turns and flattens blocks,
+  so raw `line_no` can't locate a hit; `(uuid, block_no)` survives regrouping and drives jump-to-hit.
+- The cold tier **scans** un-cached sessions for correctness but does **not** write the cache from the
+  read path (avoids write-lock contention); the background indexer warms the cache instead.
+- Search opens a dedicated **read** connection (`db::open_read`, no schema DDL) so it never contends
+  with the indexer's write transaction.
+
+Original spec follows.
 
 ## 1. Goal
 

@@ -76,6 +76,52 @@ export interface SessionMeta {
   cwd: string;              // first-seen "cwd" value ("" if none) — the real project path
 }
 
+// ---------------------------------------------------------------------------
+// Search (mirrors the Rust search module's camelCase-serialized structs)
+// ---------------------------------------------------------------------------
+
+/** VS Code-style search toggles. */
+export interface SearchOpts {
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  regex: boolean;
+}
+
+/** Query-time filters. Empty sources/projects mean "no restriction". */
+export interface SearchFilters {
+  sources: string[];             // low-level: user|assistant|thinking|tool_use|tool_result
+  from: number | null;           // inclusive epoch-ms lower bound
+  to: number | null;             // inclusive epoch-ms upper bound
+  projects: string[];            // home-relative project labels
+}
+
+/** One search result: a matched block + a snippet with char-offset match ranges. */
+export interface SearchHit {
+  sessionPath: string;
+  project: string;
+  ts: number | null;
+  lineNo: number;
+  blockNo: number;
+  uuid: string;
+  source: string;
+  snippet: string;
+  matchRanges: [number, number][];
+}
+
+/** Returned when a search finishes (or is superseded). */
+export interface SearchSummary {
+  hits: number;
+  scanned: number;
+  cancelled: boolean;
+}
+
+/** Cheap index status for the "indexing N/M…" indicator. */
+export interface IndexStatus {
+  totalSessions: number;
+  indexedSessions: number;
+  building: boolean;
+}
+
 /** Returned by Rust read_subagents. */
 export interface SubagentFile {
   name: string;

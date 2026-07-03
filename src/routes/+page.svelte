@@ -8,7 +8,7 @@
   import { onMount, tick } from 'svelte';
   import { getVersion } from '@tauri-apps/api/app';
   import { checkForUpdates } from '$lib/updater.svelte';
-  import type { Session, SessionMeta } from '$lib/types';
+  import type { Session, SessionMeta, SearchHit } from '$lib/types';
   import { readSession, readSubagents, openSessionFile } from '$lib/api';
   import { parseJsonl, decodeProject } from '$lib/parser';
   import { buildSession, linkSubagents } from '$lib/builder';
@@ -17,16 +17,24 @@
   import BrowseView from '$lib/components/BrowseView.svelte';
   import SessionView from '$lib/components/SessionView.svelte';
   import SessionEditor from '$lib/components/SessionEditor.svelte';
+  import SearchView from '$lib/components/SearchView.svelte';
 
   // Inline app.css for the standalone HTML export.
   import appCss from '../app.css?inline';
 
   // ── app state ─────────────────────────────────────────────────────────────
-  let view = $state<'browse' | 'viewer'>('browse');
+  let view = $state<'browse' | 'viewer' | 'search'>('browse');
+  // Where ← Back from the viewer returns to (browse, or back to search results).
+  let prevView = $state<'browse' | 'search'>('browse');
   let current = $state<Session | null>(null);
   let loading = $state(false);
   let loadError = $state<string | null>(null);
   let theme = $state(getTheme());
+
+  // Jump-to-hit: message uuid to scroll to in the editor, bumped per open so
+  // re-opening the same hit re-triggers the scroll.
+  let scrollToUuid = $state<string | undefined>(undefined);
+  let scrollNonce = $state(0);
 
   // App version for the footer — only available in the packaged desktop app.
   let appVersion = $state('');
@@ -58,19 +66,22 @@
   let requestEditorExit = $state<(() => void) | undefined>(undefined);
 
   // ── session opening ───────────────────────────────────────────────────────
-  async function openSession(meta: SessionMeta): Promise<void> {
+  async function loadSession(
+    path: string,
+    project: string,
+    scroll: string | undefined
+  ): Promise<void> {
     loading = true;
     loadError = null;
     try {
-      const text = await readSession(meta.path);
+      const text = await readSession(path);
       const entries = parseJsonl(text);
-      const session = buildSession(entries, {
-        project: decodeProject(meta.project_raw),
-        sourcePath: meta.path,
-      });
-      const subagentFiles = await readSubagents(meta.path);
+      const session = buildSession(entries, { project, sourcePath: path });
+      const subagentFiles = await readSubagents(path);
       linkSubagents(session, subagentFiles);
       current = session;
+      scrollToUuid = scroll;
+      scrollNonce++;
       view = 'viewer';
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
@@ -79,8 +90,24 @@
     }
   }
 
+  function openSession(meta: SessionMeta): void {
+    prevView = 'browse';
+    loadSession(meta.path, decodeProject(meta.project_raw), undefined);
+  }
+
+  // Open the session for a search hit and scroll to the matched message.
+  function openHit(hit: SearchHit): void {
+    prevView = 'search';
+    loadSession(hit.sessionPath, hit.project, hit.uuid);
+  }
+
+  function goSearch(): void {
+    view = 'search';
+    loadError = null;
+  }
+
   function backToBrowse(): void {
-    view = 'browse';
+    view = prevView;
     current = null;
     loadError = null;
     requestEditorExit = undefined;
@@ -169,7 +196,15 @@ ${contentHtml}
   </div>
 
   <div class="app-header__actions">
-    {#if view === 'viewer'}
+    {#if view === 'browse'}
+      <button class="btn btn--sm" onclick={goSearch} type="button">
+        Search
+      </button>
+    {:else if view === 'search'}
+      <button class="btn btn--ghost btn--sm" onclick={() => (view = 'browse')} type="button">
+        ← Browse
+      </button>
+    {:else if view === 'viewer'}
       <button class="btn btn--ghost btn--sm" onclick={handleBack} type="button">
         ← Back
       </button>
@@ -199,9 +234,13 @@ ${contentHtml}
     <div class="empty-state">Loading session...</div>
   {:else if view === 'browse'}
     <BrowseView onOpen={openSession} />
+  {:else if view === 'search'}
+    <SearchView onJump={openHit} />
   {:else if view === 'viewer' && current}
     <SessionEditor
       path={current.meta.sourcePath}
+      {scrollToUuid}
+      {scrollNonce}
       onExit={backToBrowse}
       bind:requestExit={requestEditorExit}
     />

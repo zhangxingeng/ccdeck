@@ -3,6 +3,10 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+use tauri::Manager;
+
+// Search: SQLite-backed extracted-text cache (built up over milestones 1–12).
+mod search;
 
 // ---------------------------------------------------------------------------
 // Return-type structs (must match the JS contract in ARCHITECTURE.md)
@@ -344,8 +348,16 @@ fn read_subagents(session_path: String) -> Result<Vec<SubagentFile>, String> {
 
 /// Overwrite the original .jsonl.  Caller MUST call snapshot(path) first.
 #[tauri::command]
-fn write_session(path: String, content: String) -> Result<(), String> {
-    fs::write(&path, content).map_err(|e| e.to_string())
+fn write_session(
+    state: tauri::State<'_, search::state::SearchState>,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    fs::write(&path, content).map_err(|e| e.to_string())?;
+    // Eager reindex so search reflects the edit immediately (the lazy sweep
+    // would catch it eventually, but this keeps results in step with Save).
+    state.indexer().reindex_one(&path);
+    Ok(())
 }
 
 /// Copy the current on-disk file into the backup store before an override.
@@ -507,7 +519,11 @@ fn delete_edit_draft(session_path: String) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    // Build the search state up front (opens the SQLite cache). If it fails
+    // (e.g. no home dir), the app still runs — search is just unavailable.
+    let search_state = search::state::SearchState::new(projects_dir_inner(), dirs::home_dir());
+
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -525,7 +541,27 @@ pub fn run() {
             read_edit_draft,
             write_edit_draft,
             delete_edit_draft,
-        ])
+            search::state::search,
+            search::state::refresh_index,
+            search::state::index_status,
+        ]);
+
+    match search_state {
+        Ok(state) => {
+            builder = builder.manage(state).setup(|app| {
+                // Build/refresh the index in the background so launch isn't blocked.
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let state = handle.state::<search::state::SearchState>();
+                    state.indexer().run_index();
+                });
+                Ok(())
+            });
+        }
+        Err(e) => eprintln!("[search] disabled ({e}); browse/edit still work"),
+    }
+
+    builder
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

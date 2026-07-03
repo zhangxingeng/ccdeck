@@ -21,7 +21,7 @@
    *   requestExit — $bindable; parent calls this (from the header ← Back) to ask
    *                 the editor to handle exit with a dirty-guard prompt.
    */
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import type { BackupVersion, Entry } from '$lib/types';
   import {
     readSession,
@@ -59,10 +59,14 @@
     path,
     onExit = () => {},
     requestExit = $bindable<() => void>(),
+    scrollToUuid = undefined,
+    scrollNonce = 0,
   }: {
     path: string;
     onExit?: () => void;
     requestExit?: () => void;
+    scrollToUuid?: string;
+    scrollNonce?: number;
   } = $props();
 
   // ── State ──────────────────────────────────────────────────────────────────
@@ -155,6 +159,34 @@
     groupDisplayItems(renderable.map((r) => ({ key: r.key, hasText: r.hasText })))
   );
   let visibleItems = $derived(displayItems.slice(0, visibleCount));
+
+  // ── Jump-to-hit (from search) ────────────────────────────────────────────
+  // Find the display-item index whose message uuid matches, ensure it's within
+  // the rendered window, then scroll its anchor into view and flash it.
+  async function jumpTo(uuid: string): Promise<void> {
+    if (!draft) return;
+    const rr = renderable.find((r) => r.entry.uuid === uuid);
+    if (!rr) return;
+    const idx = displayItems.findIndex((it) =>
+      it.kind === 'message' ? it.key === rr.key : it.keys.includes(rr.key)
+    );
+    if (idx < 0) return;
+    if (idx >= visibleCount) visibleCount = idx + 50;
+    await tick();
+    const anchors = document.querySelectorAll('.session-turns > .jump-anchor');
+    const el = anchors[idx] as HTMLElement | undefined;
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('jump-flash');
+    setTimeout(() => el.classList.remove('jump-flash'), 1800);
+  }
+
+  // Re-run whenever the target (or its nonce) changes and the draft is ready.
+  $effect(() => {
+    // Reference scrollNonce so repeat-clicks on the same hit re-trigger.
+    scrollNonce;
+    if (draft && scrollToUuid) jumpTo(scrollToUuid);
+  });
 
   // ── Load on mount ──────────────────────────────────────────────────────────
   onMount(() => {
@@ -452,34 +484,36 @@
   <!-- ── Messages + tool groups ─────────────────────────────────────────────── -->
   <div class="session-turns">
     {#each visibleItems as item (item.kind === 'message' ? item.key : 'g:' + item.keys[0])}
-      {#if item.kind === 'message'}
-        {@const rr = rmap.get(item.key)}
-        {#if rr}
-          <MessageCell
-            msgKey={item.key}
-            row={rr.row}
-            entry={rr.entry}
-            onBlockEdit={(o, t) => doBlockEdit(item.key, o, t)}
-            onDelete={() => doDelete(item.key)}
-            onRestore={() => doRestore(item.key)}
-            onRole={(role) => doRole(item.key, role)}
-            onMoveUp={() => moveMessage(item.key, -1)}
-            onMoveDown={() => moveMessage(item.key, 1)}
-            onRaw={() => openRawEdit(item.key)}
-            onSetVersion={(idx) => doSetActiveVersion(item.key, idx)}
+      <div class="jump-anchor">
+        {#if item.kind === 'message'}
+          {@const rr = rmap.get(item.key)}
+          {#if rr}
+            <MessageCell
+              msgKey={item.key}
+              row={rr.row}
+              entry={rr.entry}
+              onBlockEdit={(o, t) => doBlockEdit(item.key, o, t)}
+              onDelete={() => doDelete(item.key)}
+              onRestore={() => doRestore(item.key)}
+              onRole={(role) => doRole(item.key, role)}
+              onMoveUp={() => moveMessage(item.key, -1)}
+              onMoveDown={() => moveMessage(item.key, 1)}
+              onRaw={() => openRawEdit(item.key)}
+              onSetVersion={(idx) => doSetActiveVersion(item.key, idx)}
+            />
+          {/if}
+        {:else}
+          {@const groupItems = item.keys.map((k) => rmap.get(k)).filter((x) => x !== undefined)}
+          <ToolGroup
+            items={groupItems}
+            onDeleteGroup={() => deleteKeys(item.keys)}
+            onRestoreGroup={() => restoreKeys(item.keys)}
+            onRawLine={openRawEdit}
+            onDeleteLine={doDelete}
+            onRestoreLine={doRestore}
           />
         {/if}
-      {:else}
-        {@const groupItems = item.keys.map((k) => rmap.get(k)).filter((x) => x !== undefined)}
-        <ToolGroup
-          items={groupItems}
-          onDeleteGroup={() => deleteKeys(item.keys)}
-          onRestoreGroup={() => restoreKeys(item.keys)}
-          onRawLine={openRawEdit}
-          onDeleteLine={doDelete}
-          onRestoreLine={doRestore}
-        />
-      {/if}
+      </div>
     {/each}
 
     {#if renderable.length === 0}
@@ -603,6 +637,22 @@
 {/if}
 
 <style>
+  /* ── Jump-to-hit anchor (from search) ───────────────────────── */
+  /* A plain block wrapper (one per display item) so scrollIntoView has a real
+     box to target. It adds no margin of its own, and child margins collapse
+     through it, so vertical rhythm is unchanged. */
+  .jump-anchor { scroll-margin-top: 84px; }
+  /* jump-flash is toggled via JS (classList), so mark it :global to survive
+     Svelte's unused-selector pruning. */
+  .jump-anchor:global(.jump-flash) {
+    animation: jump-flash 1.8s ease-out;
+    border-radius: 0.5rem;
+  }
+  @keyframes jump-flash {
+    0%, 25% { background: color-mix(in srgb, var(--accent-user) 22%, transparent); }
+    100% { background: transparent; }
+  }
+
   /* ── Resume banner ──────────────────────────────────────────── */
   .resume-banner {
     display: flex; align-items: center; gap: 0.6rem;

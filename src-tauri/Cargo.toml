@@ -1,6 +1,6 @@
 [package]
 name = "ccstudio"
-version = "0.3.0"
+version = "0.4.0"
 description = "Offline desktop viewer and editor for Claude Code chat history"
 authors = ["zhangxingeng"]
 edition = "2021"
@@ -26,3 +26,14 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"
+# Search: SQLite-backed extracted-text cache. "bundled" compiles SQLite from
+# source into the binary (no system dependency). Plain tables, not FTS5.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# ISO-8601 timestamp -> epoch-ms parsing for date filtering. No "clock" feature
+# (we only parse strings, never read the wall clock), which drops the libc dep.
+chrono = { version = "0.4", default-features = false, features = ["std", "alloc"] }
+# Parallel parse fan-out for the indexer (parse in parallel, write serialized).
+rayon = "1"
+# The matcher. Same SIMD literal-prefiltering that makes ripgrep fast — this is
+# what makes the "scan text, no tokenizer" approach viable.
+regex = "1"

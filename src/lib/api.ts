@@ -3,7 +3,16 @@
  * fallback so the full UI can be exercised in a plain browser (Vite dev) using
  * bundled mock fixtures. No data ever leaves the machine in either mode.
  */
-import type { SessionMeta, SubagentFile, BackupVersion } from './types';
+import type {
+  SessionMeta,
+  SubagentFile,
+  BackupVersion,
+  SearchOpts,
+  SearchFilters,
+  SearchHit,
+  SearchSummary,
+  IndexStatus,
+} from './types';
 
 // Bundled mock fixtures for browser-dev mode (Vite ?raw import).
 import mockSession from '../../tests/mock_data/session.jsonl?raw';
@@ -134,4 +143,109 @@ export async function deleteEditDraft(path: string): Promise<void> {
     return;
   }
   await call<null>('delete_edit_draft', { sessionPath: path });
+}
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+/**
+ * Streaming search. Each hit is delivered to `onHit` as it's found (via a Tauri
+ * v2 Channel); the promise resolves with a summary when the scan completes or is
+ * superseded. In browser-dev mode, a small JS scan over the mock session stands
+ * in so the UI is exercisable without the native backend.
+ */
+export async function searchSessions(
+  query: string,
+  opts: SearchOpts,
+  filters: SearchFilters,
+  searchId: number,
+  onHit: (hit: SearchHit) => void
+): Promise<SearchSummary> {
+  if (!isTauri()) return devSearch(query, opts, filters, onHit);
+
+  const { invoke, Channel } = await import('@tauri-apps/api/core');
+  const channel = new Channel<SearchHit>();
+  channel.onmessage = onHit;
+  return invoke<SearchSummary>('search', {
+    query,
+    opts,
+    filters,
+    searchId,
+    onHit: channel,
+  });
+}
+
+/** Kick a background (re)index sweep. */
+export async function refreshIndex(): Promise<IndexStatus | null> {
+  if (!isTauri()) return null;
+  return call<IndexStatus>('refresh_index');
+}
+
+/** Cheap index status for the "indexing…" indicator. */
+export async function indexStatus(): Promise<IndexStatus | null> {
+  if (!isTauri()) return null;
+  return call<IndexStatus>('index_status');
+}
+
+// --- Browser-dev fallback: a minimal in-JS scan over the mock session. -------
+
+function buildDevRegex(query: string, opts: SearchOpts): RegExp | null {
+  let pattern = opts.regex ? query : query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (opts.wholeWord) pattern = `\\b${pattern}\\b`;
+  try {
+    return new RegExp(pattern, opts.caseSensitive ? 'g' : 'gi');
+  } catch {
+    return null;
+  }
+}
+
+async function devSearch(
+  query: string,
+  opts: SearchOpts,
+  filters: SearchFilters,
+  onHit: (hit: SearchHit) => void
+): Promise<SearchSummary> {
+  const summary: SearchSummary = { hits: 0, scanned: 0, cancelled: false };
+  if (!query) return summary;
+  const re = buildDevRegex(query, opts);
+  if (!re) return summary;
+
+  const { parseJsonl } = await import('./parser');
+  const entries = parseJsonl(mockSession);
+  const project = '~/dev/demo-project';
+  if (filters.projects.length && !filters.projects.includes(project)) return summary;
+
+  entries.forEach((entry, lineNo) => {
+    entry.blocks.forEach((b, blockNo) => {
+      const source =
+        b.blockType === 'text' ? entry.type
+        : b.blockType === 'thinking' ? 'thinking'
+        : b.blockType; // tool_use | tool_result
+      if (filters.sources.length && !filters.sources.includes(source)) return;
+      const text = b.text ?? b.thinking ?? b.toolOutput ?? b.toolName ?? '';
+      re.lastIndex = 0;
+      summary.scanned++;
+      const ranges: [number, number][] = [];
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text)) !== null) {
+        ranges.push([m.index, m.index + m[0].length]);
+        if (m[0].length === 0) re.lastIndex++;
+      }
+      if (!ranges.length) return;
+      onHit({
+        sessionPath: '/dev/mock/session.jsonl',
+        project,
+        ts: entry.timestamp ? Date.parse(entry.timestamp) : null,
+        lineNo,
+        blockNo,
+        uuid: entry.uuid,
+        source,
+        snippet: text.slice(0, 240),
+        matchRanges: ranges.filter(([s]) => s < 240) as [number, number][],
+      });
+      summary.hits++;
+    });
+  });
+  return summary;
 }

@@ -2,6 +2,8 @@
    Light/dark via [data-theme] on <html>. */
 
 :root {
+  color-scheme: light;
+
   --bg: #fafafa;
   --bg-card: #ffffff;
   --bg-subtle: #f1f5f9;
@@ -25,6 +27,8 @@
 }
 
 [data-theme='dark'] {
+  color-scheme: dark;
+
   --bg: #0f172a;
   --bg-card: #1e293b;
   --bg-subtle: #0f172a;
