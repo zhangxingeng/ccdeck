@@ -7,7 +7,7 @@
    */
   import { tick } from 'svelte';
   import type { Session, SessionMeta } from '$lib/types';
-  import { readSession, readSubagents } from '$lib/api';
+  import { readSession, readSubagents, openSessionFile } from '$lib/api';
   import { parseJsonl, decodeProject } from '$lib/parser';
   import { buildSession, linkSubagents } from '$lib/builder';
   import { getTheme, toggleTheme } from '$lib/theme';
@@ -119,6 +119,21 @@ ${contentHtml}
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }
+
+  // ── View raw file ─────────────────────────────────────────────────────────
+  let fileOpenError = $state<string | null>(null);
+  let fileOpenErrorTimer: ReturnType<typeof setTimeout> | null = null;
+
+  async function viewFile(): Promise<void> {
+    if (!current) return;
+    try {
+      await openSessionFile(current.meta.sourcePath);
+    } catch (e) {
+      fileOpenError = e instanceof Error ? e.message : String(e);
+      if (fileOpenErrorTimer) clearTimeout(fileOpenErrorTimer);
+      fileOpenErrorTimer = setTimeout(() => { fileOpenError = null; fileOpenErrorTimer = null; }, 3500);
+    }
+  }
 </script>
 
 <!-- ── header ──────────────────────────────────────────────────────────────── -->
@@ -139,6 +154,14 @@ ${contentHtml}
       </button>
       <button class="btn btn--sm" onclick={exportHtml} type="button">
         Export HTML
+      </button>
+      <button
+        class="btn btn--ghost btn--sm"
+        onclick={viewFile}
+        type="button"
+        title={current?.meta.sourcePath}
+      >
+        View File
       </button>
     {/if}
     <button class="btn btn--ghost btn--sm" onclick={handleToggleTheme} type="button">
@@ -176,3 +199,8 @@ ${contentHtml}
     Claude Code Visualizer — offline, open-source chat history viewer
   </a>
 </footer>
+
+<!-- ── View File error toast ──────────────────────────────────────────────── -->
+{#if fileOpenError}
+  <div class="toast" role="status">Couldn't open file: {fileOpenError}</div>
+{/if}

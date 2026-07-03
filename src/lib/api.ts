@@ -30,6 +30,19 @@ export async function findProjectsDir(): Promise<string | null> {
   return call<string | null>('find_projects_dir');
 }
 
+/** The user's home directory — used to render absolute paths as "~/...". */
+export async function homeDir(): Promise<string | null> {
+  if (!isTauri()) return '/dev/mock';
+  return call<string | null>('home_dir');
+}
+
+/** Open a file with the OS default app (e.g. "View file" on a session's .jsonl). */
+export async function openSessionFile(path: string): Promise<void> {
+  if (!isTauri()) return; // no-op in browser-dev mode
+  const { openPath } = await import('@tauri-apps/plugin-opener');
+  await openPath(path);
+}
+
 export async function listSessions(): Promise<SessionMeta[]> {
   if (!isTauri()) {
     return [
@@ -47,6 +60,7 @@ export async function listSessions(): Promise<SessionMeta[]> {
         models: ['claude-sonnet-4-6'],
         first_ts: '2025-06-01T10:00:00.000Z',
         last_ts: '2025-06-01T10:05:00.000Z',
+        cwd: '/dev/mock/demo-project',
       },
     ];
   }

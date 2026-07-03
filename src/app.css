@@ -123,6 +123,7 @@ a { color: var(--accent-user); }
 .project-group__name {
   font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
   color: var(--text-faint); margin-bottom: 0.4rem; padding: 0 0.25rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .session-card {
   display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;

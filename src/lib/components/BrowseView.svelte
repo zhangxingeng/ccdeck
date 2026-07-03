@@ -2,15 +2,16 @@
   /**
    * BrowseView.svelte — session browser.
    *
-   * Loads listSessions(), enriches with extractMeta(), groups by decoded
-   * project name, supports search (title/project) and sort (newest/oldest/title).
+   * Loads listSessions(), enriches with extractMeta(), groups by home-relative
+   * project path (from the session's real cwd — see projectLabel()), supports
+   * search (title/project) and sort (newest/oldest/title).
    * Calls onOpen(meta) when the user selects a session.
    * Provides a per-card Rename action (double-confirm, no backup).
    */
   import { onMount } from 'svelte';
   import type { SessionMeta } from '$lib/types';
-  import { listSessions } from '$lib/api';
-  import { extractMeta, decodeProject, cleanTitle } from '$lib/parser';
+  import { listSessions, homeDir as fetchHomeDir } from '$lib/api';
+  import { extractMeta, projectLabel, cleanTitle } from '$lib/parser';
   import { renameSession } from '$lib/sessionOps';
 
   let { onOpen }: { onOpen: (meta: SessionMeta) => void } = $props();
@@ -21,6 +22,8 @@
   let loading = $state(true);
   let search = $state('');
   let sortBy = $state<'newest' | 'oldest' | 'title'>('newest');
+  /** Home directory, used to render project paths as "~/...". Null until loaded. */
+  let homeDir = $state<string | null>(null);
 
   /** Per-id title overrides applied after a successful rename. */
   let renamedTitles = $state<Record<string, string>>({});
@@ -47,6 +50,12 @@
     } finally {
       loading = false;
     }
+    // Best-effort: falls back to decoded project names if this fails.
+    try {
+      homeDir = await fetchHomeDir();
+    } catch {
+      // ignore
+    }
   });
 
   // ── derived data ────────────────────────────────────────────────────────────
@@ -60,7 +69,7 @@
         title: renamedTitles[s.id] ?? cleanTitle(m.title),
         date: m.date,
         model: m.model,
-        project: decodeProject(s.project_raw),
+        project: projectLabel(s.cwd, s.project_raw, homeDir),
       };
     })
   );
@@ -234,7 +243,7 @@
 {:else}
   {#each groups as [project, items]}
     <div class="project-group">
-      <div class="project-group__name">{project}</div>
+      <div class="project-group__name" title={project} data-copy-text={project}>{project}</div>
 
       {#each items as s (s.meta.id)}
         <div class="session-card" class:session-card--editing={renamingId === s.meta.id}>
@@ -274,7 +283,7 @@
               type="button"
               onclick={() => onOpen(s.meta)}
             >
-              <span class="session-card__title">{s.title}</span>
+              <span class="session-card__title" title={s.title} data-copy-text={s.title}>{s.title}</span>
               <span class="session-card__stats">{sessionStats(s.meta, s.model, s.date)}</span>
             </button>
             <button

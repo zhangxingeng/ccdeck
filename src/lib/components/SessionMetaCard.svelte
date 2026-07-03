@@ -23,9 +23,13 @@
     <div class="meta-card__row">
       <div class="meta-card__item">
         <span class="meta-card__label">Project</span>
-        <span class="meta-card__value meta-card__value--mono">{info.cwd}</span>
+        <span
+          class="meta-card__value meta-card__value--mono"
+          title={info.cwd}
+          data-copy-text={info.cwd}
+        >{info.cwd}</span>
         {#if info.gitBranch}
-          <span class="meta-card__chip meta-card__chip--branch">{info.gitBranch}</span>
+          <span class="meta-card__chip meta-card__chip--branch" title={info.gitBranch} data-copy-text={info.gitBranch}>{info.gitBranch}</span>
         {/if}
       </div>
     </div>
@@ -37,7 +41,7 @@
         <span class="meta-card__label">Models</span>
         <span class="meta-card__chips">
           {#each info.models as m}
-            <span class="meta-card__chip meta-card__chip--model">{m}</span>
+            <span class="meta-card__chip meta-card__chip--model" title={m} data-copy-text={m}>{m}</span>
           {/each}
         </span>
       </div>
@@ -46,14 +50,14 @@
       <div class="meta-card__item">
         <span class="meta-card__label">CLI</span>
         <span class="meta-card__chips">
-          {#each info.versions as v}<span class="meta-card__chip">{v}</span>{/each}
+          {#each info.versions as v}<span class="meta-card__chip" title={v} data-copy-text={v}>{v}</span>{/each}
         </span>
       </div>
     {/if}
     {#if info.permissionMode}
       <div class="meta-card__item">
         <span class="meta-card__label">Permission</span>
-        <span class="meta-card__chip meta-card__chip--perm">{info.permissionMode}</span>
+        <span class="meta-card__chip meta-card__chip--perm" title={info.permissionMode} data-copy-text={info.permissionMode}>{info.permissionMode}</span>
       </div>
     {/if}
   </div>

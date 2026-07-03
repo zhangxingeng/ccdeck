@@ -519,7 +519,7 @@
     <div class="modal">
       <h3 id="save-title">Save to original file</h3>
       <div class="modal__warning">
-        This rewrites your real Claude chat history at:<br /><strong>{path}</strong>
+        This rewrites your real Claude chat history at:<br /><strong data-copy-text={path}>{path}</strong>
       </div>
       <p>A backup snapshot is created first — restore any time from History.</p>
       <div class="modal__actions">

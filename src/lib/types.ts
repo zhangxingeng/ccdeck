@@ -73,6 +73,7 @@ export interface SessionMeta {
   models: string[];         // distinct message.model values, first-seen order
   first_ts: string;         // first timestamp value seen ("" if none)
   last_ts: string;          // last timestamp value seen ("" if none)
+  cwd: string;              // first-seen "cwd" value ("" if none) — the real project path
 }
 
 /** Returned by Rust read_subagents. */

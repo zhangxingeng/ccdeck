@@ -24,6 +24,7 @@ pub struct SessionMeta {
     pub models: Vec<String>,     // distinct message.model values, first-seen order
     pub first_ts: String,        // first timestamp value seen ("" if none)
     pub last_ts: String,         // last timestamp value seen ("" if none)
+    pub cwd: String,             // first-seen "cwd" value ("" if none) — the real project path
 }
 
 #[derive(Serialize)]
@@ -138,6 +139,13 @@ fn find_projects_dir() -> Option<String> {
     projects_dir_inner().map(|p| p.to_string_lossy().into_owned())
 }
 
+/// Return the user's home directory, used by the frontend to render absolute
+/// paths (e.g. a session's cwd) home-relative as "~/...".
+#[tauri::command]
+fn home_dir() -> Option<String> {
+    dirs::home_dir().map(|p| p.to_string_lossy().into_owned())
+}
+
 /// Walk every immediate sub-directory of the projects dir.  For each *.jsonl
 /// that is NOT named agent-*.jsonl, emit one SessionMeta.
 /// Skips dirs named "subagents" and "tool-results".
@@ -196,6 +204,7 @@ fn list_sessions() -> Result<Vec<SessionMeta>, String> {
             let mut models: Vec<String> = Vec::new();
             let mut first_ts: String = String::new();
             let mut last_ts: String = String::new();
+            let mut cwd: String = String::new();
 
             for line in content.lines() {
                 if line.is_empty() {
@@ -223,6 +232,16 @@ fn list_sessions() -> Result<Vec<SessionMeta>, String> {
                             first_ts = ts.clone();
                         }
                         last_ts = ts;
+                    }
+                }
+
+                // The encoded project dir name is lossy ('/' -> '-'), so prefer the
+                // real cwd recorded on the JSONL lines themselves (first-seen).
+                if cwd.is_empty() {
+                    if let Some(c) = json_str_after(line, "\"cwd\":\"") {
+                        if !c.is_empty() {
+                            cwd = c;
+                        }
                     }
                 }
             }
@@ -269,6 +288,7 @@ fn list_sessions() -> Result<Vec<SessionMeta>, String> {
                 models,
                 first_ts,
                 last_ts,
+                cwd,
             });
         }
     }
@@ -491,6 +511,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             find_projects_dir,
+            home_dir,
             list_sessions,
             read_session,
             read_subagents,

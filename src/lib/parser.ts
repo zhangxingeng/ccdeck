@@ -344,3 +344,33 @@ export function decodeProject(raw: string): string {
   }
   return parts[0];
 }
+
+// ---------------------------------------------------------------------------
+// homeRelativePath / projectLabel — human-readable project path for a session
+// ---------------------------------------------------------------------------
+
+/**
+ * Render an absolute path relative to the home directory, e.g.
+ * "/home/user/workspace/foo" + "/home/user" -> "~/workspace/foo".
+ * Returns `path` unchanged if `homeDir` is unknown or not a prefix of it.
+ */
+export function homeRelativePath(path: string, homeDir: string | null): string {
+  if (!path || !homeDir) return path;
+  if (path === homeDir) return '~';
+  if (path.startsWith(homeDir + '/')) return '~' + path.slice(homeDir.length);
+  return path;
+}
+
+/**
+ * Best-effort human-readable project label for a session.
+ *
+ * The encoded project directory name (project_raw) is lossy — Claude Code
+ * replaces every '/' with '-', so "-home-user-my-app" is ambiguous between
+ * "user/my-app" and "user-my/app". The real `cwd` recorded on the session's
+ * JSONL lines is the reliable source of truth; only fall back to decoding
+ * the folder name when cwd is genuinely unavailable.
+ */
+export function projectLabel(cwd: string, projectRaw: string, homeDir: string | null): string {
+  if (cwd) return homeRelativePath(cwd, homeDir);
+  return decodeProject(projectRaw);
+}
