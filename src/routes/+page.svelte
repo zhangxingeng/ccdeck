@@ -9,11 +9,14 @@
   import { getVersion } from '@tauri-apps/api/app';
   import { checkForUpdates } from '$lib/updater.svelte';
   import type { Session, SessionMeta, SearchHit } from '$lib/types';
-  import { readSession, readSubagents, openSessionFile } from '$lib/api';
+  import { readSession, readSubagents, openSessionFile, resumeInTerminal } from '$lib/api';
   import { parseJsonl, decodeProject } from '$lib/parser';
   import { buildSession, linkSubagents } from '$lib/builder';
+  import { extractSessionInfo } from '$lib/editDraft';
   import { getTheme, toggleTheme } from '$lib/theme';
   import { cleanFilename } from '$lib/markdown';
+  import { sessionIdFromPath, resumeCommand } from '$lib/resume';
+  import { copyToClipboard } from '$lib/copy';
   import BrowseView from '$lib/components/BrowseView.svelte';
   import SessionView from '$lib/components/SessionView.svelte';
   import SessionEditor from '$lib/components/SessionEditor.svelte';
@@ -77,6 +80,7 @@
       const text = await readSession(path);
       const entries = parseJsonl(text);
       const session = buildSession(entries, { project, sourcePath: path });
+      session.meta.cwd = extractSessionInfo(text).cwd;
       const subagentFiles = await readSubagents(path);
       linkSubagents(session, subagentFiles);
       current = session;
@@ -182,6 +186,29 @@ ${contentHtml}
       fileOpenErrorTimer = setTimeout(() => { fileOpenError = null; fileOpenErrorTimer = null; }, 3500);
     }
   }
+
+  // ── Resume in claude --resume ───────────────────────────────────────────────
+  let resumeMsg = $state<string | null>(null);
+  let resumeMsgTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function showResumeMsg(msg: string): void {
+    resumeMsg = msg;
+    if (resumeMsgTimer) clearTimeout(resumeMsgTimer);
+    resumeMsgTimer = setTimeout(() => { resumeMsg = null; resumeMsgTimer = null; }, 3500);
+  }
+
+  async function resumeSession(): Promise<void> {
+    if (!current) return;
+    const id = sessionIdFromPath(current.meta.sourcePath);
+    const cwd = current.meta.cwd;
+    await copyToClipboard(resumeCommand(cwd, id));
+    try {
+      await resumeInTerminal(cwd, id);
+      showResumeMsg('Opened in a terminal — command also copied to clipboard');
+    } catch {
+      showResumeMsg('Could not open a terminal — command copied to clipboard instead');
+    }
+  }
 </script>
 
 <!-- ── header ──────────────────────────────────────────────────────────────── -->
@@ -210,6 +237,14 @@ ${contentHtml}
       </button>
       <button class="btn btn--sm" onclick={exportHtml} type="button">
         Export HTML
+      </button>
+      <button
+        class="btn btn--ghost btn--sm"
+        onclick={resumeSession}
+        type="button"
+        title={current ? resumeCommand(current.meta.cwd, sessionIdFromPath(current.meta.sourcePath)) : ''}
+      >
+        Resume
       </button>
       <button
         class="btn btn--ghost btn--sm"
@@ -266,4 +301,7 @@ ${contentHtml}
 <!-- ── View File error toast ──────────────────────────────────────────────── -->
 {#if fileOpenError}
   <div class="toast" role="status">Couldn't open file: {fileOpenError}</div>
+{/if}
+{#if resumeMsg}
+  <div class="toast" role="status">{resumeMsg}</div>
 {/if}

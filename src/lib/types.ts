@@ -54,6 +54,7 @@ export interface Session {
     model: string;
     project: string;
     sourcePath: string;
+    cwd: string; // real project cwd, for "resume from Claude Code" ('' if unknown)
   };
 }
 

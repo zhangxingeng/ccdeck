@@ -146,6 +146,27 @@ export async function deleteEditDraft(path: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Resume ("open in claude --resume")
+// ---------------------------------------------------------------------------
+
+export interface ForkResult {
+  path: string;
+  id: string;
+}
+
+/** Fork the session at `path`, keeping only lines 0..=uptoIndex, under a fresh session id. */
+export async function forkSession(path: string, uptoIndex: number): Promise<ForkResult> {
+  if (!isTauri()) return { path: `${path}.fork`, id: 'dev-mock-fork-id' };
+  return call<ForkResult>('fork_session', { path, uptoIndex });
+}
+
+/** Best-effort: open a terminal in `cwd` running `claude --resume <sessionId>`. */
+export async function resumeInTerminal(cwd: string, sessionId: string): Promise<void> {
+  if (!isTauri()) throw new Error('Not available outside the desktop app');
+  await call<null>('resume_in_terminal', { cwd, sessionId });
+}
+
+// ---------------------------------------------------------------------------
 // Search
 // ---------------------------------------------------------------------------
 

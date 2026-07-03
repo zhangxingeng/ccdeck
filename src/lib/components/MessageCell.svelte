@@ -32,6 +32,7 @@
     onMoveDown,
     onRaw,
     onSetVersion,
+    onResumeFrom,
   }: {
     msgKey: string;
     row: DraftRow;
@@ -44,6 +45,7 @@
     onMoveDown: () => void;
     onRaw: () => void;
     onSetVersion: (idx: number) => void;
+    onResumeFrom: () => void;
   } = $props();
 
   // ── Derived shape ──────────────────────────────────────────────────────────
@@ -167,6 +169,7 @@
       <button class="msg-tools__btn" onclick={onMoveUp} title="Move up" type="button">↑</button>
       <button class="msg-tools__btn" onclick={onMoveDown} title="Move down" type="button">↓</button>
       <button class="msg-tools__btn" onclick={onRaw} title="Edit raw JSON" type="button">{'{ }'}</button>
+      <button class="msg-tools__btn" onclick={onResumeFrom} title="Fork &amp; resume from here" type="button">⑂</button>
       <button class="msg-tools__btn msg-tools__btn--danger" onclick={onDelete} title="Delete message" type="button">✕</button>
     {:else}
       <button class="msg-tools__btn" onclick={onRestore} title="Restore message" type="button">Restore</button>

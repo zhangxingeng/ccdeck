@@ -32,7 +32,11 @@
     snapshot,
     listBackups,
     restoreBackup,
+    forkSession,
+    resumeInTerminal,
   } from '$lib/api';
+  import { copyToClipboard } from '$lib/copy';
+  import { resumeCommand } from '$lib/resume';
   import { parseJsonl } from '$lib/parser';
   import {
     buildDraft,
@@ -268,6 +272,24 @@
   function doRole(key: string, role: string) {
     if (draft) mutate(applyRoleEdit(draft, key, role));
   }
+  async function doResumeFrom(key: string) {
+    if (!draft) return;
+    const row = draft.rows[key];
+    if (!row) return;
+    try {
+      const forked = await forkSession(path, row.originalIndex);
+      const cwd = sessionInfo?.cwd ?? '';
+      await copyToClipboard(resumeCommand(cwd, forked.id));
+      try {
+        await resumeInTerminal(cwd, forked.id);
+        showToast('Forked session — opened in a terminal, command also copied to clipboard');
+      } catch {
+        showToast('Forked session — could not open a terminal, command copied to clipboard');
+      }
+    } catch (e) {
+      showToast(`Fork failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
   function deleteKeys(keys: string[]) {
     if (!draft) return;
     let d = draft;
@@ -500,6 +522,7 @@
               onMoveDown={() => moveMessage(item.key, 1)}
               onRaw={() => openRawEdit(item.key)}
               onSetVersion={(idx) => doSetActiveVersion(item.key, idx)}
+              onResumeFrom={() => doResumeFrom(item.key)}
             />
           {/if}
         {:else}

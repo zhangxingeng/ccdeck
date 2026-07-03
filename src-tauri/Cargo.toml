@@ -1,6 +1,6 @@
 [package]
 name = "ccstudio"
-version = "0.4.0"
+version = "0.5.0"
 description = "Offline desktop viewer and editor for Claude Code chat history"
 authors = ["zhangxingeng"]
 edition = "2021"
@@ -37,3 +37,5 @@ rayon = "1"
 # The matcher. Same SIMD literal-prefiltering that makes ripgrep fast — this is
 # what makes the "scan text, no tokenizer" approach viable.
 regex = "1"
+# Session-fork ids for "resume from here" (v4, randomly generated).
+uuid = { version = "1", features = ["v4"] }

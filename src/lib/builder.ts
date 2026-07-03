@@ -246,6 +246,7 @@ function _deriveSessionMeta(
     model,
     project: opts.project || '',
     sourcePath: opts.sourcePath || '',
+    cwd: '', // filled in by the caller from the raw text (see +page.svelte::loadSession)
   };
 }
 

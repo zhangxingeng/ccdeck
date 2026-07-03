@@ -12,6 +12,7 @@ A desktop app for browsing and editing your [Claude Code](https://claude.com/cla
 - **Renders conversations beautifully.** Markdown messages, collapsible thinking, tool calls and results, and nested subagent threads — laid out to read like a clean chat instead of raw JSON.
 - **Lets you edit in place.** The view *is* the editor: double-click any message to change it, flip who said it, reorder, or delete. Tool activity folds away by default so you just see the conversation.
 - **Keeps every version.** Each edit is tracked with a word-level diff and full history, so you can compare or roll back any message.
+- **Resumes where you left off.** Jump back into `claude --resume` for any session in one click, or fork from any single message to branch off a new session from that point.
 - **Never loses your work.** Edits auto-save as you type, every save is backed up first, and you can restore an earlier backup in one click.
 - **Stays out of the cloud.** Everything happens on your local filesystem. The only network it ever touches is checking for its own updates.
 - **Updates itself.** New versions download and install automatically — no reinstalling by hand.
@@ -39,8 +40,8 @@ These builds aren't code-signed — certificates are a paid, per-platform expens
 Requires [Node.js](https://nodejs.org), [Rust](https://rust-lang.org), and the [Tauri v2 prerequisites](https://tauri.app/start/prerequisites/) for your OS.
 
 ```bash
-npm install
-npm run tauri build
+pnpm install
+pnpm tauri build
 ```
 
 Curious how it works or want to contribute? See [ARCHITECTURE.md](ARCHITECTURE.md).

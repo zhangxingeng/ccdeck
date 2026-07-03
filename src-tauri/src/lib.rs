@@ -46,6 +46,12 @@ pub struct BackupVersion {
     pub size: u64,
 }
 
+#[derive(Serialize)]
+pub struct ForkResult {
+    pub path: String, // absolute path of the new forked session file
+    pub id: String,   // new session uuid (== file stem)
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -109,6 +115,32 @@ fn json_str_after(line: &str, key_token: &str) -> Option<String> {
         }
     }
     None // no closing quote found
+}
+
+/// Find `key_token` (e.g. `"\"sessionId\":\""`) in `line` and replace the quoted
+/// string value that follows it with `new_value`, leaving the rest of the line
+/// byte-identical. Assumes the value itself never contains an escaped quote —
+/// true for the UUID-shaped values this is used for. No-op if not found.
+fn json_replace_str_value(line: &str, key_token: &str, new_value: &str) -> String {
+    if let Some(start) = line.find(key_token) {
+        let value_start = start + key_token.len();
+        if let Some(rel_end) = line[value_start..].find('"') {
+            let value_end = value_start + rel_end;
+            let mut result = String::with_capacity(line.len());
+            result.push_str(&line[..value_start]);
+            result.push_str(new_value);
+            result.push_str(&line[value_end..]);
+            return result;
+        }
+    }
+    line.to_string()
+}
+
+/// Single-quote `s` for embedding in a POSIX shell script (used only for the
+/// macOS Terminal.app launch script).
+#[cfg(target_os = "macos")]
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Resolve the path to the edit draft file for a given session path.
@@ -513,6 +545,207 @@ fn delete_edit_draft(session_path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// "Resume from here": copy lines `0..=upto_index` of the session at `path`
+/// (same line-splitting rule as the frontend's `buildDraft`: split on '\n',
+/// drop a trailing empty element from the final newline) into a NEW file next
+/// to the original, under a fresh session uuid. Each kept line's `sessionId`
+/// field (if present) is rewritten to the new uuid so the fork reads as its
+/// own session; nothing else about the line is touched.
+#[tauri::command]
+fn fork_session(path: String, upto_index: usize) -> Result<ForkResult, String> {
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut lines: Vec<&str> = content.split('\n').collect();
+    if lines.last() == Some(&"") {
+        lines.pop();
+    }
+    if upto_index >= lines.len() {
+        return Err("Line index out of range".to_string());
+    }
+
+    let new_id = uuid::Uuid::new_v4().to_string();
+    let kept: Vec<String> = lines[..=upto_index]
+        .iter()
+        .map(|line| {
+            if line.trim().is_empty() {
+                line.to_string()
+            } else {
+                json_replace_str_value(line, "\"sessionId\":\"", &new_id)
+            }
+        })
+        .collect();
+    let mut new_content = kept.join("\n");
+    new_content.push('\n');
+
+    let source_file = Path::new(&path);
+    let parent = source_file
+        .parent()
+        .ok_or_else(|| "Cannot determine parent directory".to_string())?;
+    let new_path = parent.join(format!("{}.jsonl", new_id));
+    fs::write(&new_path, new_content).map_err(|e| e.to_string())?;
+
+    Ok(ForkResult {
+        path: new_path.to_string_lossy().into_owned(),
+        id: new_id,
+    })
+}
+
+/// Best-effort: open a terminal in `cwd` running `claude --resume <session_id>`.
+/// Platform-specific and inherently unreliable (depends on what's installed);
+/// callers should always pair this with a copy-to-clipboard fallback.
+#[tauri::command]
+fn resume_in_terminal(cwd: String, session_id: String) -> Result<(), String> {
+    if session_id.is_empty()
+        || !session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err("Invalid session id".to_string());
+    }
+    if !Path::new(&cwd).is_dir() {
+        return Err(format!("Directory not found: {cwd}"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "#!/bin/sh\ncd {} && exec claude --resume {}\n",
+            shell_quote(&cwd),
+            session_id
+        );
+        let tmp = std::env::temp_dir().join(format!("ccstudio-resume-{}.command", session_id));
+        fs::write(&tmp, script).map_err(|e| e.to_string())?;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&tmp).map_err(|e| e.to_string())?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&tmp, perms).map_err(|e| e.to_string())?;
+        }
+        std::process::Command::new("open")
+            .arg("-a")
+            .arg("Terminal")
+            .arg(&tmp)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let candidates: &[(&str, &[&str])] = &[
+            ("gnome-terminal", &["--"]),
+            ("ptyxis", &["--"]),
+            ("konsole", &["-e"]),
+            ("xfce4-terminal", &["-x"]),
+            ("alacritty", &["-e"]),
+            ("xterm", &["-e"]),
+            ("x-terminal-emulator", &["-e"]),
+        ];
+        for (term, prefix) in candidates {
+            let mut cmd = std::process::Command::new(term);
+            cmd.args(*prefix)
+                .arg("claude")
+                .arg("--resume")
+                .arg(&session_id)
+                .current_dir(&cwd);
+            if cmd.spawn().is_ok() {
+                return Ok(());
+            }
+        }
+        return Err("No supported terminal emulator found".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "start",
+                "Claude Resume",
+                "cmd",
+                "/K",
+                "claude",
+                "--resume",
+                &session_id,
+            ])
+            .current_dir(&cwd)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("Unsupported platform".to_string())
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+
+    #[test]
+    fn json_replace_str_value_swaps_only_the_target_field() {
+        let line = r#"{"type":"user","sessionId":"old-id","uuid":"u1","message":{"content":"hi"}}"#;
+        let out = json_replace_str_value(line, "\"sessionId\":\"", "new-id");
+        assert_eq!(
+            out,
+            r#"{"type":"user","sessionId":"new-id","uuid":"u1","message":{"content":"hi"}}"#
+        );
+    }
+
+    #[test]
+    fn json_replace_str_value_is_a_noop_when_key_absent() {
+        let line = r#"{"type":"user","uuid":"u1"}"#;
+        let out = json_replace_str_value(line, "\"sessionId\":\"", "new-id");
+        assert_eq!(out, line);
+    }
+
+    #[test]
+    fn fork_session_truncates_and_rewrites_session_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "ccstudio-fork-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("orig-session.jsonl");
+        let content = concat!(
+            r#"{"type":"user","sessionId":"orig-session","uuid":"u1","message":{"content":"hi"}}"#, "\n",
+            r#"{"type":"assistant","sessionId":"orig-session","uuid":"a1","message":{"content":"hello"}}"#, "\n",
+            r#"{"type":"user","sessionId":"orig-session","uuid":"u2","message":{"content":"third line, should be dropped"}}"#, "\n",
+        );
+        fs::write(&source, content).unwrap();
+
+        let result = fork_session(source.to_string_lossy().into_owned(), 1).unwrap();
+
+        assert_ne!(result.id, "orig-session");
+        assert!(result.path.ends_with(&format!("{}.jsonl", result.id)));
+
+        let written = fs::read_to_string(&result.path).unwrap();
+        let lines: Vec<&str> = written.lines().collect();
+        assert_eq!(lines.len(), 2, "third line must be dropped: {written}");
+        assert!(lines[0].contains(&format!("\"sessionId\":\"{}\"", result.id)));
+        assert!(lines[1].contains(&format!("\"sessionId\":\"{}\"", result.id)));
+        assert!(lines[0].contains("\"uuid\":\"u1\""), "message uuid must be untouched");
+        assert!(!written.contains("third line"));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn fork_session_rejects_out_of_range_index() {
+        let dir = std::env::temp_dir().join(format!(
+            "ccstudio-fork-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("orig-session.jsonl");
+        fs::write(&source, "{\"type\":\"user\"}\n").unwrap();
+
+        let result = fork_session(source.to_string_lossy().into_owned(), 5);
+        assert!(result.is_err());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // App entry point
 // ---------------------------------------------------------------------------
@@ -541,6 +774,8 @@ pub fn run() {
             read_edit_draft,
             write_edit_draft,
             delete_edit_draft,
+            fork_session,
+            resume_in_terminal,
             search::state::search,
             search::state::refresh_index,
             search::state::index_status,
