@@ -81,6 +81,12 @@ a { color: var(--accent-user); }
 }
 .app-footer a { color: var(--text-muted); text-decoration: none; }
 .app-footer a:hover { color: var(--text); }
+.app-footer__check {
+  display: block; margin: 0.4rem auto 0; padding: 0; background: none; border: 0;
+  font-family: inherit; font-size: inherit; color: var(--text-faint);
+  text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+}
+.app-footer__check:hover { color: var(--text-muted); }
 
 /* Buttons */
 .btn {

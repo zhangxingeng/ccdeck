@@ -5,7 +5,9 @@
    * States: browse | viewer
    * Orchestrates: session loading, subagent linking, HTML export, theme toggle.
    */
-  import { tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
+  import { getVersion } from '@tauri-apps/api/app';
+  import { checkForUpdates } from '$lib/updater.svelte';
   import type { Session, SessionMeta } from '$lib/types';
   import { readSession, readSubagents, openSessionFile } from '$lib/api';
   import { parseJsonl, decodeProject } from '$lib/parser';
@@ -25,6 +27,25 @@
   let loading = $state(false);
   let loadError = $state<string | null>(null);
   let theme = $state(getTheme());
+
+  // App version for the footer — only available in the packaged desktop app.
+  let appVersion = $state('');
+  const isTauri = () =>
+    typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+
+  onMount(async () => {
+    if (isTauri()) {
+      try {
+        appVersion = await getVersion();
+      } catch (e) {
+        console.error('[app] getVersion failed', e);
+      }
+    }
+  });
+
+  function handleCheckForUpdates(): void {
+    if (isTauri()) checkForUpdates(false);
+  }
 
   // DOM ref for the read-only export render — used by exportHtml().
   let exportEl: HTMLDivElement | undefined = $state(undefined);
@@ -196,8 +217,11 @@ ${contentHtml}
 <!-- ── footer ──────────────────────────────────────────────────────────────── -->
 <footer class="app-footer">
   <a href="https://github.com/zhangxingeng/claude-code-studio" target="_blank" rel="noopener noreferrer">
-    Claude Code Studio — offline, open-source chat history viewer
+    Claude Code Studio{appVersion ? ` v${appVersion}` : ''} — offline, open-source chat history viewer
   </a>
+  <button class="app-footer__check" onclick={handleCheckForUpdates} type="button">
+    Check for updates
+  </button>
 </footer>
 
 <!-- ── View File error toast ──────────────────────────────────────────────── -->
