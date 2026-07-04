@@ -262,8 +262,13 @@ function _deriveSessionMeta(
  * Non-meta files (is_meta=false) contain JSONL; meta files (is_meta=true)
  * contain JSON metadata.
  */
-export function linkSubagents(session: Session, subagentFiles: SubagentFile[]): void {
-  // Group files by stem (agent-xxx → {jsonl, meta})
+/**
+ * Parse subagent files into a stem → Session map ("agent-foo.jsonl" +
+ * "agent-foo.meta.json" → stem "agent-foo"). Split out from linkSubagents so
+ * callers that don't build a full turn-grouped Session (e.g. SessionEditor,
+ * which parses entries line-by-line) can still resolve subagent transcripts.
+ */
+export function buildSubagentSessions(subagentFiles: SubagentFile[]): Map<string, Session> {
   const byName = new Map<string, { jsonl?: string; meta?: string }>();
   for (const f of subagentFiles) {
     // Derive stem: "agent-foo.jsonl" → "agent-foo"
@@ -277,17 +282,14 @@ export function linkSubagents(session: Session, subagentFiles: SubagentFile[]): 
     }
   }
 
-  // Build a subagent Session for each agent file
   const subagentSessions = new Map<string, Session>();
   for (const [stem, { jsonl, meta }] of byName) {
     if (!jsonl) continue;
     const entries = parseJsonl(jsonl);
     if (!entries.length) continue;
 
-    // Build basic session
     const subSession = buildSession(entries, { sourcePath: stem });
 
-    // Overlay metadata from .meta.json if available
     if (meta) {
       try {
         const m = JSON.parse(meta) as Record<string, unknown>;
@@ -300,24 +302,53 @@ export function linkSubagents(session: Session, subagentFiles: SubagentFile[]): 
 
     subagentSessions.set(stem, subSession);
   }
+  return subagentSessions;
+}
+
+/** Resolve an agentId to its subagent Session, tolerating a fragment match
+ *  (agentId may be a prefix/substring of the file stem or vice versa). */
+export function resolveSubagentSession(
+  subagentSessions: Map<string, Session>,
+  agentId: string
+): Session | undefined {
+  const direct = subagentSessions.get(agentId);
+  if (direct) return direct;
+  for (const [stem, subSess] of subagentSessions) {
+    if (stem.includes(agentId) || agentId.includes(stem)) return subSess;
+  }
+  return undefined;
+}
+
+/**
+ * Map tool_use ids to the agentId of the subagent they spawned, by scanning
+ * user entries for the async_launched toolUseResult marker. Extracted out of
+ * buildSession's internal turn-assembly loop so callers that parse entries
+ * without turn-grouping (SessionEditor) can compute the same mapping.
+ */
+export function mapAgentIdsByToolId(entries: Entry[]): Map<string, string> {
+  const agentIdByToolId = new Map<string, string>();
+  for (const entry of entries) {
+    if (entry.type !== 'user') continue;
+    const tur = entry.toolUseResult;
+    if (tur && tur['status'] === 'async_launched' && tur['agentId']) {
+      const agentId = tur['agentId'] as string;
+      for (const { toolId } of extractToolResults(entry)) {
+        if (toolId) agentIdByToolId.set(toolId, agentId);
+      }
+    }
+  }
+  return agentIdByToolId;
+}
+
+export function linkSubagents(session: Session, subagentFiles: SubagentFile[]): void {
+  const subagentSessions = buildSubagentSessions(subagentFiles);
 
   // Walk ALL turns and blocks in the parent session; attach subagent by agentId
   for (const turn of session.turns) {
     for (const block of turn.blocks) {
       if (block.blockType === 'tool_use' && block.agentId) {
-        // agentId is the stem (e.g. "agent-audit-secret")
-        const sub = subagentSessions.get(block.agentId);
-        if (sub) {
-          block.subagent = sub;
-        } else {
-          // Try partial match (agent-id may be a fragment of the stem)
-          for (const [stem, subSess] of subagentSessions) {
-            if (stem.includes(block.agentId) || block.agentId.includes(stem)) {
-              block.subagent = subSess;
-              break;
-            }
-          }
-        }
+        const sub = resolveSubagentSession(subagentSessions, block.agentId);
+        if (sub) block.subagent = sub;
       }
     }
   }

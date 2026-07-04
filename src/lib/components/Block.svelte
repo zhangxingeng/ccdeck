@@ -3,20 +3,22 @@
    * Block.svelte — renders ONE ContentBlock.
    *
    * Handles: text | thinking | tool_use | tool_result
-   * Recursive: tool_use blocks with .subagent render nested turns via Turn.svelte.
+   * tool_use blocks with .subagent show an "Open →" affordance instead of
+   * rendering the nested transcript inline; onOpenSubagent bubbles up to
+   * whichever ancestor owns the stacked-navigation view (SessionEditor).
    */
-  import type { ContentBlock } from '$lib/types';
+  import type { ContentBlock, Session } from '$lib/types';
   import { renderMarkdown } from '$lib/markdown';
-  // Turn is imported for subagent nesting (creates a Block ↔ Turn circular dep
-  // that Svelte/Vite handles correctly at runtime).
-  import Turn from './Turn.svelte';
+  import { highlightJson, isLongMarkdownish } from '$lib/jsonHighlight';
 
   let {
     block,
     role = 'assistant',
+    onOpenSubagent,
   }: {
     block: ContentBlock;
     role?: 'user' | 'assistant';
+    onOpenSubagent?: (session: Session, label: string) => void;
   } = $props();
 
   // Collapsible state — collapsed by default per spec.
@@ -25,6 +27,24 @@
 
   let label = $derived(role === 'user' ? 'User' : 'Assistant');
   let msgClass = $derived(role === 'user' ? 'msg--user' : 'msg--assistant');
+
+  // Tool input: collapsed to key-name chips by default; a popover shows the
+  // full highlighted/prettified JSON on click. Scoped to inputs only — output
+  // stays a plain <pre> (results are often huge and already fine raw).
+  let inputKeys = $derived(block.toolInput ? Object.keys(block.toolInput) : []);
+  let inputPopoverOpen = $state(false);
+  let highlightedInput = $derived(block.toolInput ? highlightJson(block.toolInput) : '');
+  let longStringEntries = $derived.by<[string, string][]>(() => {
+    if (!block.toolInput) return [];
+    return Object.entries(block.toolInput).filter((e): e is [string, string] => isLongMarkdownish(e[1]));
+  });
+  let renderedKeys = $state<Set<string>>(new Set());
+  function toggleRendered(key: string) {
+    const next = new Set(renderedKeys);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    renderedKeys = next;
+  }
 </script>
 
 <!-- ── text block ───────────────────────────────────────────────────────── -->
@@ -92,11 +112,17 @@
 
       <!-- Collapsible body -->
       <div class="collapse-body" class:open={toolOpen}>
-        <!-- Input section -->
-        {#if block.toolInput && Object.keys(block.toolInput).length > 0}
+        <!-- Input section: collapsed to key chips, click for the full
+             highlighted JSON in a popover. -->
+        {#if block.toolInput && inputKeys.length > 0}
           <div class="tool-section">
             <div class="tool-section__heading">Input</div>
-            <pre class="tool-json">{JSON.stringify(block.toolInput, null, 2)}</pre>
+            <button type="button" class="tool-input-chips" onclick={() => (inputPopoverOpen = true)}>
+              {#each inputKeys as k (k)}
+                <span class="tool-input-chip">{k}</span>
+              {/each}
+              <span class="tool-input-chips__expand">Expand ⤢</span>
+            </button>
           </div>
         {/if}
 
@@ -110,16 +136,25 @@
           </div>
         {/if}
 
-        <!-- Subagent box (if this tool_use launched an agent) -->
+        <!-- Subagent affordance (if this tool_use launched an agent) — opens
+             the nested transcript in the stacked navigation view rather than
+             unspooling it inline. -->
         {#if block.subagent}
-          <div class="subagent">
-            <div class="subagent__header">
-              Subagent{block.subagent.meta.project ? ' · ' + block.subagent.meta.project : ''}
-            </div>
-            {#each block.subagent.turns as turn, i (i)}
-              <Turn {turn} />
-            {/each}
-          </div>
+          {@const label =
+            (typeof block.toolInput?.description === 'string' ? block.toolInput.description : null) ??
+            (block.subagent.meta.project || 'Subagent')}
+          <button
+            type="button"
+            class="subagent-open"
+            onclick={() => onOpenSubagent?.(block.subagent as Session, label)}
+          >
+            <span class="subagent-open__icon">▸</span>
+            <span class="subagent-open__label">Subagent · {label}</span>
+            <span class="subagent-open__meta">
+              {block.subagent.turns.length} turn{block.subagent.turns.length === 1 ? '' : 's'}
+            </span>
+            <span class="subagent-open__cta">Open →</span>
+          </button>
         {/if}
       </div>
     </div>
@@ -131,6 +166,36 @@
     <div class="msg__inner">
       <div class="msg__label">{block.isError ? 'Error' : 'Result'}</div>
       <pre class="tool-json">{block.toolOutput ?? block.text ?? ''}</pre>
+    </div>
+  </div>
+{/if}
+
+<!-- ── Tool input popover: read-only, prettified + highlighted. Editing still
+     goes through the existing raw-JSON-line editor (the row's own "{ }"
+     button) — this doesn't duplicate that mechanism. ──────────────────── -->
+{#if inputPopoverOpen}
+  <div class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="tool-input-title">
+    <div class="modal tool-input-modal">
+      <h3 id="tool-input-title">Input — {block.toolName ?? 'unknown'}</h3>
+      <pre class="tool-json">{@html highlightedInput}</pre>
+      {#each longStringEntries as [key, value] (key)}
+        <div class="tool-input-longstring">
+          <div class="tool-input-longstring__bar">
+            <span class="tool-input-longstring__key">{key}</span>
+            <button type="button" class="btn btn--ghost btn--sm" onclick={() => toggleRendered(key)}>
+              {renderedKeys.has(key) ? 'Show raw' : 'Show rendered'}
+            </button>
+          </div>
+          {#if renderedKeys.has(key)}
+            <div class="msg__body">{@html renderMarkdown(value)}</div>
+          {:else}
+            <pre class="tool-json">{value}</pre>
+          {/if}
+        </div>
+      {/each}
+      <div class="modal__actions">
+        <button type="button" class="btn btn--sm btn--ghost" onclick={() => (inputPopoverOpen = false)}>Close</button>
+      </div>
     </div>
   </div>
 {/if}

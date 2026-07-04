@@ -31,6 +31,11 @@
   --accent-interrupt: #f43f5e;
   --accent-subagent: #0d9488;
 
+  /* Tool-input JSON syntax highlighting (jt = "json token") */
+  --jt-str: #16a34a;
+  --jt-num: #2563eb;
+  --jt-bool: #9333ea;
+
   --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
 }
@@ -46,6 +51,10 @@
   --text: #e2e8f0;
   --text-muted: #94a3b8;
   --text-faint: #64748b;
+
+  --jt-str: #4ade80;
+  --jt-num: #60a5fa;
+  --jt-bool: #c084fc;
 }
 
 * { box-sizing: border-box; }
@@ -211,6 +220,34 @@ a { color: var(--accent-user); }
   line-height: 1.45; white-space: pre-wrap; word-break: break-word; max-height: 22em; overflow-y: auto; margin: 0;
 }
 
+/* JSON syntax token colors (see src/lib/jsonHighlight.ts) */
+.jt-key { color: var(--accent-tool); }
+.jt-str { color: var(--jt-str); }
+.jt-num { color: var(--jt-num); }
+.jt-bool { color: var(--jt-bool); }
+.jt-null { color: var(--text-faint); }
+
+/* Tool input: collapsed to key-name chips, click opens the popover with the
+   full highlighted JSON (Block.svelte). */
+.tool-input-chips {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; width: 100%;
+  padding: 0.4rem 0.55rem; background: var(--bg-subtle); border: 1px solid var(--border);
+  border-radius: 0.3rem; cursor: pointer; font-family: inherit; text-align: left;
+}
+.tool-input-chips:hover { border-color: var(--border-strong); }
+.tool-input-chip {
+  font-size: 0.68rem; font-family: var(--font-mono); color: var(--text-muted);
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 0.25rem;
+  padding: 0.08rem 0.4rem;
+}
+.tool-input-chips__expand { margin-left: auto; font-size: 0.68rem; color: var(--accent-tool); font-weight: 600; white-space: nowrap; }
+
+.tool-input-modal { max-width: 640px; }
+.tool-input-modal .tool-json { margin-bottom: 0.75rem; }
+.tool-input-longstring { margin-bottom: 0.75rem; }
+.tool-input-longstring__bar { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.3rem; }
+.tool-input-longstring__key { font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted); }
+
 .interrupt-banner {
   display: flex; align-items: center; gap: 0.4rem; padding: 0.4rem 0.75rem; margin: 0.75rem 0;
   background: color-mix(in srgb, var(--accent-interrupt) 8%, transparent);
@@ -218,9 +255,23 @@ a { color: var(--accent-user); }
   border-radius: 0.3rem; font-size: 0.75rem; color: var(--accent-interrupt); font-weight: 500;
 }
 
-/* Subagent nesting */
-.subagent { margin: 0.5rem 0 0.5rem 1rem; padding-left: 1rem; border-left: 2px solid var(--accent-subagent); }
-.subagent__header { font-size: 0.7rem; font-weight: 600; color: var(--accent-subagent); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.5rem; }
+/* Subagent open affordance — opens the nested transcript in the stacked
+   navigation view (SessionEditor's subagentStack) instead of rendering it
+   inline. */
+.subagent-open {
+  display: flex; align-items: center; gap: 0.5rem; width: 100%; margin-top: 0.5rem;
+  padding: 0.5rem 0.7rem; background: color-mix(in srgb, var(--accent-subagent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-subagent) 30%, transparent); border-radius: 0.4rem;
+  color: var(--text); font-family: inherit; font-size: 0.8rem; cursor: pointer; text-align: left;
+}
+.subagent-open:hover {
+  background: color-mix(in srgb, var(--accent-subagent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent-subagent) 45%, transparent);
+}
+.subagent-open__icon { color: var(--accent-subagent); font-size: 0.7rem; }
+.subagent-open__label { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-open__meta { color: var(--text-muted); font-size: 0.72rem; white-space: nowrap; }
+.subagent-open__cta { color: var(--accent-subagent); font-size: 0.72rem; font-weight: 600; white-space: nowrap; }
 
 .back-link { font-size: 0.8rem; color: var(--text-muted); cursor: pointer; display: inline-flex; align-items: center; gap: 0.3rem; margin-bottom: 1rem; background: none; border: 0; font-family: inherit; padding: 0; }
 .back-link:hover { color: var(--text); }

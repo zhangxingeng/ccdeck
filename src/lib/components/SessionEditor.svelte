@@ -22,7 +22,7 @@
    *                 the editor to handle exit with a dirty-guard prompt.
    */
   import { onMount, tick } from 'svelte';
-  import type { BackupVersion, Entry } from '$lib/types';
+  import type { BackupVersion, Entry, Session } from '$lib/types';
   import {
     readSession,
     writeSession,
@@ -34,11 +34,13 @@
     restoreBackup,
     forkSession,
     resumeInTerminal,
+    readSubagents,
   } from '$lib/api';
   import { copyToClipboard } from '$lib/copy';
   import { resumeCommand } from '$lib/resume';
   import { parseJsonl, extractMeta, extractCustomTitle } from '$lib/parser';
   import { renameSession } from '$lib/sessionOps';
+  import { buildSubagentSessions, mapAgentIdsByToolId, resolveSubagentSession } from '$lib/builder';
   import {
     buildDraft,
     serializeDraft,
@@ -59,6 +61,7 @@
   import SaveRail from './SaveRail.svelte';
   import RawJsonModal from './RawJsonModal.svelte';
   import InlineSearchPanel from './InlineSearchPanel.svelte';
+  import Turn from './Turn.svelte';
 
   // ── Props ──────────────────────────────────────────────────────────────────
   let {
@@ -94,6 +97,24 @@
 
   // Back-to-top — shown once the page has scrolled past the header.
   let showBackToTop = $state(false);
+
+  // Subagent stacked navigation — pushed when a tool_use's "Open →" affordance
+  // is clicked (Block.svelte), popped via Esc/← Back. Subagent transcripts
+  // aren't part of the editable Draft, so the top of the stack renders
+  // read-only (plain Turn loop, same as SessionView.svelte) instead of the
+  // MessageCell/ToolGroup editing UI.
+  let subagentStack = $state<{ session: Session; label: string }[]>([]);
+  // Resolved once per load (in parallel with the session/draft load below) —
+  // linkSubagents()'s buildSession()-based pipeline never runs for this
+  // editor's own line-by-line parsed entries, so `renderable` below does its
+  // own equivalent pass using these.
+  let subagentSessions = $state<Map<string, Session>>(new Map());
+  function pushSubagent(session: Session, label: string) {
+    subagentStack = [...subagentStack, { session, label }];
+  }
+  function popSubagentTo(depth: number) {
+    subagentStack = subagentStack.slice(0, depth);
+  }
 
   // Title + inline rename — same renameSession() BrowseView's list uses, applied
   // directly to this open file. Optimistic override avoids a full reparse.
@@ -164,6 +185,12 @@
   // Renderable rows (conversational lines with visible blocks). Pure meta/echo
   // lines parse to nothing here but stay preserved in the draft and pass through
   // untouched on save.
+  //
+  // Also links subagent transcripts onto Agent tool_use blocks. builder.ts's
+  // buildSession()+linkSubagents() normally do this, but only for the separate
+  // Session built for the hidden HTML-export view — this editor parses each
+  // line independently (no turn-grouping), so it re-derives the same
+  // toolId → agentId → subagent mapping over these entries instead.
   let renderable = $derived.by<RenderRow[]>(() => {
     if (!draft) return [];
     const out: RenderRow[] = [];
@@ -177,6 +204,17 @@
         entry,
         hasText: entry.blocks.some((b) => b.blockType === 'text'),
       });
+    }
+    if (subagentSessions.size > 0) {
+      const agentIdByToolId = mapAgentIdsByToolId(out.map((r) => r.entry));
+      for (const { entry } of out) {
+        for (const block of entry.blocks) {
+          if (block.blockType === 'tool_use' && block.toolId) {
+            const agentId = agentIdByToolId.get(block.toolId);
+            if (agentId) block.subagent = resolveSubagentSession(subagentSessions, agentId);
+          }
+        }
+      }
     }
     return out;
   });
@@ -224,6 +262,9 @@
       try {
         const raw = await readSession(path);
         rawText = raw;
+        readSubagents(path)
+          .then((files) => { subagentSessions = buildSubagentSessions(files); })
+          .catch(() => {});
 
         const existing = await readEditDraft(path);
         let resumed = false;
@@ -260,12 +301,48 @@
     };
   });
 
-  // Ctrl/Cmd+F opens find-in-chat instead of the browser's own find bar.
+  // Ctrl/Cmd+F opens find-in-chat instead of the browser's own find bar;
+  // Ctrl/Cmd+S saves (same confirm-then-write flow as the SaveRail's Save
+  // button — no new save logic here); Escape closes whichever of this editor's
+  // own modals is open (it does NOT drive the exit flow — attemptExit/
+  // requestExit above is the only path that leaves the editor).
   onMount(() => {
+    function closeTopModal(): boolean {
+      if (rawEditKey !== null) { rawEditKey = null; return true; }
+      if (titleRenameConfirming) { titleRenameConfirming = false; return true; }
+      if (showHistoryModal) { showHistoryModal = false; pendingRestore = null; return true; }
+      if (showDiscardModal) { showDiscardModal = false; return true; }
+      if (showSaveModal) { showSaveModal = false; return true; }
+      if (showExitModal) { showExitModal = false; return true; }
+      return false;
+    }
     function onKeydown(e: KeyboardEvent) {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
         e.preventDefault();
         searchOpen = true;
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        // Always prevent the browser/OS "Save Page" dialog; only actually pop
+        // the save-confirm modal when there's something to save and no other
+        // modal is already mid-flow.
+        e.preventDefault();
+        if (
+          !draft || !dirty ||
+          showSaveModal || showDiscardModal || showExitModal || showHistoryModal ||
+          rawEditKey !== null || renamingTitle
+        ) {
+          return;
+        }
+        showSaveModal = true;
+        return;
+      }
+      if (e.key === 'Escape') {
+        if (closeTopModal()) { e.preventDefault(); return; }
+        if (subagentStack.length > 0) {
+          e.preventDefault();
+          subagentStack = subagentStack.slice(0, -1);
+        }
       }
     }
     window.addEventListener('keydown', onKeydown);
@@ -527,6 +604,12 @@
 
   // ── Exit (dirty guard, driven by parent's ← Back) ───────────────────────────
   function attemptExit() {
+    // Back out of the subagent stack one level at a time before this ever
+    // reaches the real "leave the editor" flow below.
+    if (subagentStack.length > 0) {
+      subagentStack = subagentStack.slice(0, -1);
+      return;
+    }
     if (!draft || !isDirty(draft)) {
       cancelPersist();
       deleteEditDraft(path).catch(() => {});
@@ -575,6 +658,35 @@
 {:else if loadError}
   <div class="empty-state">{loadError}</div>
 {:else if draft}
+
+  {#if subagentStack.length > 0}
+    {@const top = subagentStack[subagentStack.length - 1]}
+    <!-- ── Subagent stacked navigation (read-only) ──────────────────────────── -->
+    <!-- No local "back" button here — the header's ← Back (and Esc) already
+         pop one stack level via attemptExit(); a second same-labeled button
+         here would just be confusing. Crumbs below jump directly to any level. -->
+    <div class="subagent-crumbs">
+      <span class="subagent-crumbs__trail">
+        <button type="button" class="crumb" onclick={() => popSubagentTo(0)}>Main session</button>
+        {#each subagentStack as level, i (i)}
+          <span class="crumb-sep">▸</span>
+          <button
+            type="button" class="crumb"
+            class:crumb--current={i === subagentStack.length - 1}
+            onclick={() => popSubagentTo(i + 1)}
+          >{level.label}</button>
+        {/each}
+      </span>
+    </div>
+    <div class="session-turns">
+      {#each top.session.turns as turn, i (i)}
+        <Turn {turn} onOpenSubagent={pushSubagent} />
+      {/each}
+      {#if top.session.turns.length === 0}
+        <div class="empty-state">No conversation turns found in this subagent.</div>
+      {/if}
+    </div>
+  {:else}
 
   <!-- ── Resume banner ──────────────────────────────────────────────────────── -->
   {#if resumedBanner}
@@ -654,6 +766,7 @@
               onRaw={() => openRawEdit(item.key)}
               onSetVersion={(idx) => doSetActiveVersion(item.key, idx)}
               onResumeFrom={() => doResumeFrom(item.key)}
+              onOpenSubagent={pushSubagent}
             />
           {/if}
         {:else}
@@ -665,6 +778,7 @@
             onRawLine={openRawEdit}
             onDeleteLine={doDelete}
             onRestoreLine={doRestore}
+            onOpenSubagent={pushSubagent}
           />
         {/if}
       </div>
@@ -699,6 +813,8 @@
     <button
       class="back-to-top" onclick={scrollToTop} type="button" aria-label="Back to top"
     >↑ Top</button>
+  {/if}
+
   {/if}
 
 {/if}
@@ -860,6 +976,25 @@
   /* ── Find-in-chat toggle ────────────────────────────────────── */
   .find-toggle-row { margin-bottom: 0.75rem; }
   .find-toggle-row__kbd { color: var(--text-faint); font-size: 0.7rem; margin-left: 0.3rem; }
+
+  /* ── Subagent stacked navigation breadcrumbs ─────────────────── */
+  .subagent-crumbs {
+    display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;
+    margin-bottom: 0.85rem; padding-bottom: 0.6rem; border-bottom: 1px solid var(--border);
+  }
+  .subagent-crumbs__trail {
+    display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap;
+    font-size: 0.8rem; color: var(--text-muted); min-width: 0;
+  }
+  .crumb-sep { color: var(--text-faint); font-size: 0.7rem; }
+  .crumb {
+    background: none; border: 0; padding: 0.1rem 0.3rem; border-radius: 0.25rem;
+    font-family: inherit; font-size: inherit; color: var(--text-muted); cursor: pointer;
+    max-width: 22rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .crumb:hover { background: var(--bg-subtle); color: var(--text); }
+  .crumb--current { color: var(--accent-subagent); font-weight: 600; cursor: default; }
+  .crumb--current:hover { background: none; }
 
   /* ── Back to top ──────────────────────────────────────────────  */
   /* Bottom-right, clear of SaveRail (which is vertically centered at the

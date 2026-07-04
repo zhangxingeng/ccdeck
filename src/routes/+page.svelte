@@ -71,6 +71,18 @@
     return () => ro.disconnect();
   });
 
+  // Ctrl/Cmd+K — global "go to search", from any view.
+  onMount(() => {
+    function onKeydown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        goToSearch();
+      }
+    }
+    window.addEventListener('keydown', onKeydown);
+    return () => window.removeEventListener('keydown', onKeydown);
+  });
+
   function handleCheckForUpdates(): void {
     if (isTauri()) checkForUpdates(false);
   }
@@ -84,6 +96,11 @@
   // Exit guard installed by SessionEditor — the header ← Back calls this so the
   // editor can prompt about unsaved edits before we navigate away.
   let requestEditorExit = $state<(() => void) | undefined>(undefined);
+
+  // Ctrl/Cmd+K "go to search" — set right before we ask to leave the viewer
+  // (which may show a dirty-guard prompt) or settings, then consumed by
+  // backToBrowse() once we actually land back on the browse view.
+  let focusSearchPending = false;
 
   // ── session opening ───────────────────────────────────────────────────────
   async function loadSession(
@@ -134,11 +151,34 @@
     current = null;
     loadError = null;
     requestEditorExit = undefined;
+    if (focusSearchPending) {
+      focusSearchPending = false;
+      tick().then(focusBrowseSearch);
+    }
   }
 
   // Header ← Back: let the editor handle unsaved-edit prompting first.
   function handleBack(): void {
     if (requestEditorExit) requestEditorExit();
+    else backToBrowse();
+  }
+
+  // ── Ctrl/Cmd+K: jump to Browse + focus its search input ─────────────────────
+  function focusBrowseSearch(): void {
+    const el = document.getElementById('browse-search-input') as HTMLInputElement | null;
+    el?.focus();
+    el?.select();
+  }
+  function goToSearch(): void {
+    if (view === 'browse') {
+      focusBrowseSearch();
+      return;
+    }
+    // Not on browse yet — flag it so whichever path lands us back on browse
+    // (dirty-guarded exit from the viewer, or a plain settings close) focuses
+    // the search input once it actually mounts.
+    focusSearchPending = true;
+    if (view === 'viewer') handleBack();
     else backToBrowse();
   }
 

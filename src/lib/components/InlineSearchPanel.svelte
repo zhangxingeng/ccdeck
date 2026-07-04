@@ -217,9 +217,23 @@
   .ics__status { font-size: 0.74rem; color: var(--text-muted); padding: 0.4rem 0.1rem 0; }
   .ics__status .err { color: var(--accent-result-err); }
 
+  /* Collapsed by default so the results list doesn't sit fully visible over
+     the transcript while the panel isn't in active use; revealed when the
+     input (or anything else in the panel) has focus, or on hover so a quick
+     glance doesn't require re-focusing the input. Hover is checked on the
+     whole `.ics` panel (not just `.ics__results`) so moving the mouse onto
+     the search bar itself reveals the list growing beneath it, and so the
+     list stays revealed for the whole mousedown→click sequence when a hit
+     is clicked (hover holds through the click even though the click also
+     blurs the input). */
   .ics__results {
-    display: flex; flex-direction: column; gap: 0; margin-top: 0.4rem;
-    max-height: 260px; overflow-y: auto; border-top: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 0; margin-top: 0; overflow-y: auto;
+    max-height: 0; opacity: 0; border-top: 1px solid transparent;
+    transition: max-height 0.18s ease, opacity 0.15s ease, margin-top 0.18s ease, border-color 0.18s ease;
+  }
+  .ics:hover .ics__results,
+  .ics:focus-within .ics__results {
+    margin-top: 0.4rem; max-height: 260px; opacity: 1; border-top-color: var(--border);
   }
   .ics-hit {
     display: flex; gap: 0.55rem; align-items: flex-start; text-align: left;

@@ -18,3 +18,8 @@ vite.config.ts.timestamp-*
 
 # Nested/embedded repo: personal ai-first-docs scaffolding cloned alongside this project
 /ai-first-docs/
+
+# Playwright E2E output
+/test-results/
+/playwright-report/
+/playwright/.cache/

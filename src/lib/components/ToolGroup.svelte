@@ -6,7 +6,7 @@
    * "just the chat"; expand to inspect/edit the underlying lines, or delete the
    * whole run in one go.
    */
-  import type { Entry } from '$lib/types';
+  import type { Entry, Session } from '$lib/types';
   import type { DraftRow } from '$lib/editDraft';
   import Block from './Block.svelte';
 
@@ -23,6 +23,7 @@
     onRawLine,
     onDeleteLine,
     onRestoreLine,
+    onOpenSubagent,
   }: {
     items: GroupItem[];
     onDeleteGroup: () => void;
@@ -30,6 +31,7 @@
     onRawLine: (key: string) => void;
     onDeleteLine: (key: string) => void;
     onRestoreLine: (key: string) => void;
+    onOpenSubagent?: (session: Session, label: string) => void;
   } = $props();
 
   let open = $state(false);
@@ -87,7 +89,7 @@
             {/if}
           </div>
           {#each it.entry.blocks as block, bi (bi)}
-            <Block {block} role={it.entry.type === 'user' ? 'user' : 'assistant'} />
+            <Block {block} role={it.entry.type === 'user' ? 'user' : 'assistant'} {onOpenSubagent} />
           {/each}
         </div>
       {/each}

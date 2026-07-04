@@ -86,10 +86,14 @@
     collapsed = next;
   }
   let focusedIdx = $state(-1);
+  /** Keyboard-highlighted card in browse mode (no query) — a separate index
+   *  from `focusedIdx` above, which walks search *hits*, not session cards. */
+  let browseFocusedIdx = $state(-1);
   $effect(() => {
     search.query;
     collapsed = new Set();
     focusedIdx = -1;
+    browseFocusedIdx = -1;
   });
 
   let isSearching = $derived(search.query.trim() !== '');
@@ -177,6 +181,16 @@
   // ── browse mode (no query): every session, grouped by project ───────────────
   let browseGroups = $derived.by(() =>
     groupByProject(sortItems(enriched.filter((e) => projectAllowed(e.project))))
+  );
+
+  // Flat, display-order view of browseGroups — what browse-mode Up/Down/Enter walks.
+  let flatBrowseItems = $derived.by<EnrichedSession[]>(() =>
+    browseGroups.flatMap((pg) => pg.items)
+  );
+  let browseFocusedPath = $derived(
+    browseFocusedIdx >= 0 && browseFocusedIdx < flatBrowseItems.length
+      ? flatBrowseItems[browseFocusedIdx].path
+      : null
   );
 
   // ── search mode (query typed): hits nested project -> session -> lines ──────
@@ -291,6 +305,50 @@
       document.getElementById(`hit-${focusedKey}`)?.scrollIntoView({ block: 'nearest' });
     });
   }
+
+  function scrollBrowseFocusedIntoView(): void {
+    tick().then(() => {
+      if (!browseFocusedPath) return;
+      document.getElementById(`browse-card-${browseFocusedPath}`)?.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  // Browse-mode (no query) session-list navigation — works from anywhere on the
+  // page as long as no text input has focus, so Up/Down don't require clicking
+  // into the search box first. Scoped to plain browse-mode cards; search-hit
+  // navigation (isSearching) stays on the input's own onSearchKeydown below.
+  onMount(() => {
+    function onKeydown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        if (confirmPendingPath) {
+          e.preventDefault();
+          confirmPendingPath = null;
+        } else if (browseFocusedIdx >= 0) {
+          browseFocusedIdx = -1;
+        }
+        return;
+      }
+      if (isSearching) return;
+      const active = document.activeElement as HTMLElement | null;
+      const tag = active?.tagName.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || active?.isContentEditable) return;
+      if (flatBrowseItems.length === 0) return;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        browseFocusedIdx = Math.min(browseFocusedIdx + 1, flatBrowseItems.length - 1);
+        scrollBrowseFocusedIntoView();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        browseFocusedIdx = Math.max(browseFocusedIdx - 1, 0);
+        scrollBrowseFocusedIntoView();
+      } else if (e.key === 'Enter' && browseFocusedIdx >= 0 && browseFocusedIdx < flatBrowseItems.length) {
+        e.preventDefault();
+        onOpen(flatBrowseItems[browseFocusedIdx].meta);
+      }
+    }
+    window.addEventListener('keydown', onKeydown);
+    return () => window.removeEventListener('keydown', onKeydown);
+  });
 
   function onSearchKeydown(e: KeyboardEvent): void {
     if (visibleHits.length === 0) return;
@@ -426,8 +484,9 @@
 <div class="search-bar">
   <div class="search-input">
     <input
+      id="browse-search-input"
       type="text"
-      placeholder="Search titles or type to search all your Claude Code history…"
+      placeholder="Search titles or type to search all your Claude Code history… (Ctrl/Cmd+K)"
       value={search.query}
       oninput={(e) => setQuery(e.currentTarget.value)}
       onkeydown={onSearchKeydown}
@@ -651,7 +710,12 @@
       </div>
 
       {#each pg.items as s (s.path)}
-        <div class="session-card" class:session-card--editing={renamingPath === s.path}>
+        <div
+          class="session-card"
+          class:session-card--editing={renamingPath === s.path}
+          class:focused={browseFocusedPath === s.path}
+          id="browse-card-{s.path}"
+        >
           {#if renamingPath === s.path}
             <div class="rename-editor">
               <input
@@ -836,8 +900,14 @@
   .load-more:hover { color: var(--text); border-color: var(--border-strong); }
 
   /* ── Browse mode cards ───────────────────────────────────────────────── */
+  /* .session-card's own box model (padding/border-radius/etc.) is global,
+     in app.css — only add to it here, don't restate/override it. */
   .session-card { display: flex; align-items: center; gap: 0.5rem; }
   .session-card--editing { cursor: default; }
+  .session-card.focused {
+    background: color-mix(in srgb, var(--accent-user) 16%, transparent);
+    border-color: color-mix(in srgb, var(--accent-user) 45%, transparent);
+  }
   .session-card__open {
     flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 0.15rem;
     background: none; border: 0; padding: 0; cursor: pointer; font-family: inherit; color: inherit; text-align: left;

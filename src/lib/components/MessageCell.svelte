@@ -12,7 +12,7 @@
    * Editing state is LOCAL to this component (self-contained); the parent only
    * receives committed mutations through the callback props.
    */
-  import type { Entry } from '$lib/types';
+  import type { Entry, Session } from '$lib/types';
   import type { DraftRow } from '$lib/editDraft';
   import { extractText, MESSAGE_ROLES } from '$lib/editDraft';
   import { availableTargets, targetIndex, targetLabel, type DiffTarget } from '$lib/diff';
@@ -33,6 +33,7 @@
     onRaw,
     onSetVersion,
     onResumeFrom,
+    onOpenSubagent,
   }: {
     msgKey: string;
     row: DraftRow;
@@ -46,6 +47,7 @@
     onRaw: () => void;
     onSetVersion: (idx: number) => void;
     onResumeFrom: () => void;
+    onOpenSubagent?: (session: Session, label: string) => void;
   } = $props();
 
   // ── Derived shape ──────────────────────────────────────────────────────────
@@ -230,7 +232,7 @@
         </div>
       </div>
     {:else}
-      <Block {block} {role} />
+      <Block {block} {role} {onOpenSubagent} />
     {/if}
   {/each}
 </div>
