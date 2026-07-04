@@ -28,7 +28,7 @@ serde_json = "1"
 dirs = "6"
 # Search: SQLite-backed extracted-text cache. "bundled" compiles SQLite from
 # source into the binary (no system dependency). Plain tables, not FTS5.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 # ISO-8601 timestamp -> epoch-ms parsing for date filtering. No "clock" feature
 # (we only parse strings, never read the wall clock), which drops the libc dep.
 chrono = { version = "0.4", default-features = false, features = ["std", "alloc"] }
