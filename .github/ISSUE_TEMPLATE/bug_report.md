@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Something in Deck isn't working right
+about: Something in CC Deck isn't working right
 title: ""
 labels: bug
 assignees: ""
@@ -17,7 +17,7 @@ A clear description of the bug.
 3.
 
 **Environment**
-- Deck version (see the footer of the app, or `Help → About` if present):
+- CC Deck version (see the footer of the app, or `Help → About` if present):
 - OS + version (e.g. Ubuntu 24.04, macOS 15, Windows 11):
 - Installed via: (.deb / .rpm / AppImage / built from source)
 

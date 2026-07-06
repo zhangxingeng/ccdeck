@@ -1,6 +1,6 @@
-# Deck — Roadmap
+# CC Deck — Roadmap
 
-Status: **Phases 1–6 shipped through v0.7.0**, committed on `main`. This doc replaces the
+Status: **Phases 1–7 shipped through v0.7.2**, committed on `main`. This doc replaces the
 open-ended "Search Phase 2" tail in `project_docs/search-design.md` (that doc's own Phase 2 section is now
 marked done and points here).
 
@@ -178,6 +178,27 @@ Ideas raised by the founder while using the app day-to-day (2026-07-04), all shi
    `resumeInTerminal`/clipboard-copy sequence the open viewer's header Resume button already used —
    no need to open the session first.
 
+## Phase 7 — Second rebrand: Deck → CC Deck (apt name collision) (DONE, 2026-07-05)
+
+Founder report: Ubuntu already has an unrelated `deck` apt package, and this app's own `.deb`
+(package name derived from `productName`) collided with it — installing/updating one could remove
+the other. Renamed the product-facing name from **Deck** to **CC Deck** to get a distinctive package
+name (`cc-deck`-shaped on Linux) that won't collide.
+
+- `tauri.conf.json`: `productName` → "CC Deck", window title → "CC Deck — Claude Code Control
+  Center", updater endpoint repointed at the renamed repo, bundle `longDescription` reworded.
+  `identifier` (`com.zhangxingeng.ccstudio`) and the `.ccstudio-*` on-disk paths **left unchanged
+  again**, same reasoning as Phase 1 — renaming those would strand existing installs' updates and
+  orphan search cache/backups/drafts. Cargo crate name (`ccstudio`/`ccstudio_lib`) and npm package
+  name (`claude-code-studio`) also left alone — internal only, same call as Phase 1.
+- Every user-visible string updated: `src/routes/+page.svelte` (h1, footer + link), `src/app.html`
+  title, `src/app.css` header comment, `ARCHITECTURE.md` title, `README.md`, `CONTRIBUTING.md`,
+  issue templates, `.github/workflows/release.yml` release name, `e2e/browse.spec.ts`'s heading
+  assertion, plus a handful of source comments referencing the product by name.
+- **GitHub repo renamed** `zhangxingeng/deck` → `zhangxingeng/ccdeck` (`gh repo rename`, confirmed
+  with the founder first). GitHub keeps a redirect from the old path. Local `origin` remote updated
+  to match.
+
 ## Verification performed
 
 - `cargo test --lib` (src-tauri): 30/30 passing.
@@ -194,7 +215,7 @@ Ideas raised by the founder while using the app day-to-day (2026-07-04), all shi
 
 ## Open follow-ups (not done here)
 
-- New app icon/logo art for "Deck" (needs founder-supplied art).
+- New app icon/logo art for "CC Deck" (needs founder-supplied art).
 - Guided onboarding / install-Claude-Code flow, for reaching truly non-technical users who don't
   yet have Claude Code installed.
 - Heavier JSON-Schema validation (`ajv` or similar) for the settings form, if silent type coercion

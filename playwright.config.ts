@@ -1,7 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
 /**
- * Playwright E2E config for Deck.
+ * Playwright E2E config for CC Deck.
  *
  * Drives the app the same way a user in a plain browser would: `src/lib/api.ts`
  * already has a complete browser-dev mock layer (see its module doc), so

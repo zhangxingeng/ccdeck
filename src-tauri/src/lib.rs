@@ -8,7 +8,7 @@ use tauri::Manager;
 // Search: SQLite-backed extracted-text cache (built up over milestones 1–12).
 mod search;
 
-// Deck's own preference store (terminal launcher choice + extra args).
+// CC Deck's own preference store (terminal launcher choice + extra args).
 mod appconfig;
 
 // Schema-driven Claude Code settings: read/merge/conflict across the three tiers.

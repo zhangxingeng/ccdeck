@@ -225,12 +225,12 @@ export async function writeClaudeSettings(
 }
 
 // ---------------------------------------------------------------------------
-// Deck app preferences (terminal launcher)
+// CC Deck app preferences (terminal launcher)
 // ---------------------------------------------------------------------------
 
 let devAppConfig: AppConfig = { terminal: '', terminalArgs: '' };
 
-/** Deck's own launcher preference (terminal choice + extra args). */
+/** CC Deck's own launcher preference (terminal choice + extra args). */
 export async function getAppConfig(): Promise<AppConfig> {
   if (!isTauri()) return devAppConfig;
   return call<AppConfig>('get_app_config');

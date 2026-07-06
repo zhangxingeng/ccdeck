@@ -182,7 +182,7 @@ export interface ClaudeSettings {
 }
 
 // ---------------------------------------------------------------------------
-// Deck's own app preferences (mirrors src-tauri/src/appconfig.rs)
+// CC Deck's own app preferences (mirrors src-tauri/src/appconfig.rs)
 // ---------------------------------------------------------------------------
 
 /** Terminal launcher preference, persisted at ~/.claude/.ccstudio-config.json. */

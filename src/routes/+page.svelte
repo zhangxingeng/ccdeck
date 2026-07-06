@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * +page.svelte — top-level SPA shell for Deck (Claude Code Control Center).
+   * +page.svelte — top-level SPA shell for CC Deck (Claude Code Control Center).
    *
    * States: browse | viewer | settings — search lives inside browse (BrowseView.svelte)
    * Orchestrates: session loading, subagent linking, HTML export, theme toggle.
@@ -273,7 +273,7 @@ ${contentHtml}
 <!-- ── header ──────────────────────────────────────────────────────────────── -->
 <header class="app-header" bind:this={headerEl}>
   <div>
-    <h1>Deck</h1>
+    <h1>CC Deck</h1>
     {#if view === 'viewer' && current}
       <div class="subtitle">
         {current.meta.project} · {current.turns.length} turn{current.turns.length === 1 ? '' : 's'}
@@ -349,8 +349,8 @@ ${contentHtml}
 
 <!-- ── footer ──────────────────────────────────────────────────────────────── -->
 <footer class="app-footer">
-  <a href="https://github.com/zhangxingeng/deck" target="_blank" rel="noopener noreferrer">
-    Deck{appVersion ? ` v${appVersion}` : ''} — offline, open-source control center for Claude Code
+  <a href="https://github.com/zhangxingeng/ccdeck" target="_blank" rel="noopener noreferrer">
+    CC Deck{appVersion ? ` v${appVersion}` : ''} — offline, open-source control center for Claude Code
   </a>
   <button
     class="app-footer__check"

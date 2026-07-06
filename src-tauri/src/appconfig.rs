@@ -1,4 +1,4 @@
-//! Deck's own small preference store — the one file the app owns for itself
+//! CC Deck's own small preference store — the one file the app owns for itself
 //! (as opposed to Claude Code's `settings.json`, which we only read/write on the
 //! user's behalf in `settings.rs`).
 //!
@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// User preferences for how Deck launches Claude Code. All fields are optional /
+/// User preferences for how CC Deck launches Claude Code. All fields are optional /
 /// default to "just works" — customization is a hidden advanced affordance.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -34,7 +34,7 @@ fn config_path() -> Result<PathBuf, String> {
 }
 
 /// Load the config, falling back to defaults on any error (missing file, bad
-/// JSON). Deck must always launch even if this file is absent or corrupt.
+/// JSON). CC Deck must always launch even if this file is absent or corrupt.
 pub fn load() -> AppConfig {
     config_path()
         .ok()

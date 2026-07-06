@@ -7,7 +7,7 @@
  * field this app invented. An earlier version of this function mutated a
  * fabricated `message.content` field on the `ai-title` line, which only
  * this app ever read back: the real `claude --resume` / `/resume` picker
- * reads `customTitle`, so those renames never showed up outside Deck. Always
+ * reads `customTitle`, so those renames never showed up outside CC Deck. Always
  * appending (never editing an earlier line) matches how the CLI itself
  * re-asserts the current title wherever the conversation currently is.
  */

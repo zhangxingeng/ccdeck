@@ -8,7 +8,7 @@ test.describe('Browse view', () => {
   test('loads and shows the one mock session', async ({ page }) => {
     await page.goto('/');
 
-    await expect(page.getByRole('heading', { name: 'Deck' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'CC Deck' })).toBeVisible();
 
     // Project group for the mock session's cwd ("/dev/mock/demo-project").
     await expect(page.locator('.project-group__name')).toContainText('demo-project');

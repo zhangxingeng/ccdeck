@@ -1,13 +1,13 @@
-# Contributing to Deck
+# Contributing to CC Deck
 
-Thanks for considering a contribution — Deck is a small open-source project and every bit of
+Thanks for considering a contribution — CC Deck is a small open-source project and every bit of
 help (code, bug reports, docs, design feedback) is welcome.
 
 ## Ways to help that aren't code
 
-- **Report a bug.** [Open an issue](https://github.com/zhangxingeng/deck/issues/new?template=bug_report.md)
-  with your OS, Deck version (shown in the footer), and steps to reproduce.
-- **Suggest a feature.** [Open a feature request](https://github.com/zhangxingeng/deck/issues/new?template=feature_request.md).
+- **Report a bug.** [Open an issue](https://github.com/zhangxingeng/ccdeck/issues/new?template=bug_report.md)
+  with your OS, CC Deck version (shown in the footer), and steps to reproduce.
+- **Suggest a feature.** [Open a feature request](https://github.com/zhangxingeng/ccdeck/issues/new?template=feature_request.md).
   Check `project_docs/roadmap.md` first — your idea might already be planned or explicitly deferred, in
   which case a 👍 on the existing note is more useful than a duplicate issue.
 - **Improve the docs.** README clarity, typos, a missing FAQ answer — all fair game, no issue
@@ -62,7 +62,7 @@ equivalent per-OS bundles elsewhere) if you want to test a real install.
 
 ## Design principle
 
-Deck's guiding rule is **simple by default, advanced on demand**: the common path should stay
+CC Deck's guiding rule is **simple by default, advanced on demand**: the common path should stay
 approachable for non-technical users, while power-user options (custom terminals, advanced
 settings, raw JSON) stay available but out of the way. When in doubt about where a new control
 should live, default to hiding it behind an "Advanced" toggle rather than surfacing it up front.

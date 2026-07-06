@@ -65,7 +65,7 @@ and richer filtering. Status of each:
      never actually populated yet in practice — the filter is correct and unit-tested, but no UI
      entry point passes a real session path in. See `project_docs/roadmap.md` §Phase 6, item 4.
 
-See `project_docs/roadmap.md` for what came after Search Phase 2 — the wider Deck rebrand, settings editor,
+See `project_docs/roadmap.md` for what came after Search Phase 2 — the wider CC Deck rebrand, settings editor,
 and terminal launcher.
 
 ## 1. Goal

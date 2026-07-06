@@ -1,4 +1,4 @@
-# Deck — Architecture & Contracts
+# CC Deck — Architecture & Contracts
 
 Desktop app (Tauri v2 + SvelteKit static SPA, Svelte 5 + TS) for Claude Code. Fully offline.
 Reads Claude Code chat history from `~/.claude/projects/`, renders it, allows

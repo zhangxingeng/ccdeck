@@ -6,7 +6,7 @@
    * vendored Claude Code settings schema (label + description + typed input),
    * and surfaces conflicts (same key, different value, in >1 tier) up front.
    * Simple/Advanced toggle keeps the ~120-property schema from overwhelming the
-   * common case. Global scope (no project) also shows Deck's own Terminal
+   * common case. Global scope (no project) also shows CC Deck's own Terminal
    * launcher preference, since that isn't a per-project Claude Code setting.
    */
   import { onMount } from 'svelte';
@@ -191,7 +191,7 @@
     fieldErrors = {};
   }
 
-  // ── Deck's own terminal preference (global scope only) ──────────────────
+  // ── CC Deck's own terminal preference (global scope only) ──────────────────
   let appConfig = $state<AppConfig>({ terminal: '', terminalArgs: '' });
   let appConfigDirty = $state(false);
   let showTerminalAdvanced = $state(false);
@@ -308,7 +308,7 @@
     {#if !projectCwd}
       <fieldset class="group terminal-group">
         <legend>Terminal</legend>
-        <p class="hint">How Deck launches Claude Code when you click Resume. Automatic works for most setups.</p>
+        <p class="hint">How CC Deck launches Claude Code when you click Resume. Automatic works for most setups.</p>
         <label class="radio-row">
           <input type="radio" name="terminal-mode" checked={isAuto(appConfig.terminal)}
             onchange={() => { appConfig.terminal = ''; appConfigDirty = true; }} />
