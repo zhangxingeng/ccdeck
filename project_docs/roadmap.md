@@ -240,8 +240,11 @@ none of these are committed work — each needs its own design pass before becom
   chunks of a long conversation rather than an all-or-nothing compact, aimed at complex sessions
   where blanket compaction loses detail that still matters. Founder is unsure this is worth the
   complexity ("actually that would be too complex... maybe not, I don't know yet") — flagged as
-  worth exploring, not worth building yet. Would likely build on the existing edit/undo/backup
-  infrastructure in `SessionEditor.svelte` rather than replacing it.
+  worth exploring, not worth building yet. **Now fleshed out in
+  `project_docs/future/conversation-compactor.md`** — the key unlock is that Claude Code's own
+  compaction keeps selected messages *verbatim* (a `preservedMessages` set) alongside the summary,
+  so a non-destructive, append-only selective compactor is simpler than it first looked (and does
+  *not* depend on the edit/undo/backup infrastructure the viewer-trim work removes).
 - Both ideas sit under the same theme as Phase 2/3: **embedding real AI assistance into the control
   center itself**, not just viewing/configuring Claude Code from the outside. Worth revisiting
   together once one of them gets a concrete design.
