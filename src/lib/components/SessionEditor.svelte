@@ -2,45 +2,40 @@
   /**
    * SessionEditor.svelte — the single-page session view *is* the editor.
    *
-   * This component is the orchestrator: it owns the byte-faithful edit Draft,
-   * crash-safe persistence, save/discard/history/exit flows, and turns the draft
-   * into a display model (one chat bubble per renderable row).
-   * All rendering lives in focused children:
-   *   SessionMetaCard · MessageCell · SaveRail · RawJsonModal
+   * This component is the orchestrator: it owns the byte-faithful edit Draft
+   * and the save/discard/restore-backup/exit flows, and turns the draft into a
+   * display model (one chat bubble per renderable row). All rendering lives in
+   * focused children: SessionMetaCard · MessageCell · SaveRail · RawJsonModal
    *
    * Safety model (JSON-safe by construction):
-   *   - The edit model owns every line; the UI only ever edits a message *string*
-   *     (per text block), the speaker, or a re-validated raw JSON line. Users can't
-   *     hand-corrupt the structure.
-   *   - Edits auto-persist to a crash-safe temp draft (resumed on reopen), deleted
-   *     on save. "Save" snapshots a backup before overwriting the original file.
+   *   - The edit model owns every line; the UI only ever edits a message
+   *     *string* (per text block), the speaker, or a re-validated raw JSON
+   *     line. Users can't hand-corrupt the structure.
+   *   - "Save" snapshots a single-slot backup before overwriting the original
+   *     file. There is no crash-safe autosave draft and no version history —
+   *     edit in place, then Save writes straight to disk.
    *
    * Props:
-   *   path        — source file path (read + save + backup + draft)
+   *   path        — source file path (read + save + backup)
    *   onExit      — perform the actual navigation back to the browser
    *   requestExit — $bindable; parent calls this (from the header ← Back) to ask
    *                 the editor to handle exit with a dirty-guard prompt.
    */
   import { onMount, tick } from 'svelte';
-  import type { BackupVersion, Entry, Session } from '$lib/types';
+  import type { BackupVersion, Entry } from '$lib/types';
   import {
     readSession,
     writeSession,
-    readEditDraft,
-    writeEditDraft,
-    deleteEditDraft,
     snapshot,
     listBackups,
     restoreBackup,
     forkSession,
     resumeInTerminal,
-    readSubagents,
   } from '$lib/api';
   import { copyToClipboard } from '$lib/copy';
   import { resumeCommand } from '$lib/resume';
   import { parseJsonl, extractMeta, extractCustomTitle } from '$lib/parser';
   import { renameSession } from '$lib/sessionOps';
-  import { buildSubagentSessions } from '$lib/builder';
   import {
     buildDraft,
     serializeDraft,
@@ -48,9 +43,6 @@
     applyBlockTextEdit,
     applyRoleEdit,
     applyRawEdit,
-    setActiveVersion,
-    deleteRow,
-    restoreRow,
     extractSessionInfo,
   } from '$lib/editDraft';
   import type { Draft, DraftRow } from '$lib/editDraft';
@@ -60,7 +52,6 @@
   import SaveRail from './SaveRail.svelte';
   import RawJsonModal from './RawJsonModal.svelte';
   import InlineSearchPanel from './InlineSearchPanel.svelte';
-  import Turn from './Turn.svelte';
 
   // ── Props ──────────────────────────────────────────────────────────────────
   let {
@@ -82,7 +73,6 @@
   let rawText = $state('');
   let loading = $state(true);
   let loadError = $state<string | null>(null);
-  let resumedBanner = $state(false);
 
   // Raw JSON escape hatch
   let rawEditKey = $state<string | null>(null);
@@ -97,23 +87,6 @@
   // Back-to-top — shown once the page has scrolled past the header.
   let showBackToTop = $state(false);
 
-  // Subagent stacked navigation — popped via Esc/← Back. Subagent transcripts
-  // aren't part of the editable Draft, so the top of the stack renders
-  // read-only (plain Turn loop, same as SessionView.svelte) instead of the
-  // MessageCell editing UI. Nothing currently pushes onto this stack: it was
-  // previously reached via a tool_use "Open →" affordance in Block.svelte,
-  // which was removed along with tool-call rendering.
-  let subagentStack = $state<{ session: Session; label: string }[]>([]);
-  // Resolved once per load (in parallel with the session/draft load below).
-  // Currently unconsumed — see subagentStack note above — kept alongside it.
-  let subagentSessions = $state<Map<string, Session>>(new Map());
-  function pushSubagent(session: Session, label: string) {
-    subagentStack = [...subagentStack, { session, label }];
-  }
-  function popSubagentTo(depth: number) {
-    subagentStack = subagentStack.slice(0, depth);
-  }
-
   // Title + inline rename — same renameSession() BrowseView's list uses, applied
   // directly to this open file. Optimistic override avoids a full reparse.
   let titleOverride = $state<string | null>(null);
@@ -126,17 +99,15 @@
   let showSaveModal = $state(false);
   let showDiscardModal = $state(false);
   let showExitModal = $state(false);
-  let showHistoryModal = $state(false);
-  let backups = $state<BackupVersion[]>([]);
-  let pendingRestore = $state<BackupVersion | null>(null);
+  // Single-slot restore-backup affordance: no history list, no version picker —
+  // there's only ever one backup file, so this holds at most one candidate.
+  let showRestoreModal = $state(false);
+  let restoreCandidate = $state<BackupVersion | null>(null);
   let saving = $state(false);
 
   // Toast
   let toastMsg = $state<string | null>(null);
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
-
-  // Persist debounce
-  let persistTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ── Derived ──────────────────────────────────────────────────────────────
   let sessionInfo = $derived(rawText ? extractSessionInfo(rawText) : null);
@@ -154,16 +125,8 @@
   let changeCount = $derived.by(() => {
     if (!draft) return 0;
     let n = 0;
-    for (const key of Object.keys(draft.rows)) {
-      const r = draft.rows[key];
-      if (r.deleted || r.active !== 0) n++;
-    }
-    // Reorder counts as one aggregate change.
-    const sortedByOriginal = [...draft.order].sort(
-      (a, b) => draft!.rows[a].originalIndex - draft!.rows[b].originalIndex
-    );
-    for (let i = 0; i < draft.order.length; i++) {
-      if (draft.order[i] !== sortedByOriginal[i]) { n++; break; }
+    for (const key of draft.order) {
+      if (draft.rows[key].value !== draft.rows[key].original) n++;
     }
     return n;
   });
@@ -187,7 +150,7 @@
     const out: RenderRow[] = [];
     for (const key of draft.order) {
       const row = draft.rows[key];
-      const entry = parseLine(row.versions[row.active]);
+      const entry = parseLine(row.value);
       if (!entry || entry.blocks.length === 0) continue;
       out.push({ key, row, entry });
     }
@@ -233,43 +196,13 @@
       try {
         const raw = await readSession(path);
         rawText = raw;
-        readSubagents(path)
-          .then((files) => { subagentSessions = buildSubagentSessions(files); })
-          .catch(() => {});
-
-        const existing = await readEditDraft(path);
-        let resumed = false;
-
-        if (existing) {
-          try {
-            const parsed = JSON.parse(existing) as Draft;
-            const joinedVersions = parsed.order
-              .map((k: string) => parsed.rows[k].versions[0])
-              .join('\n');
-            const rawJoined = raw.split('\n').filter((l: string) => l.trim() !== '').join('\n');
-            if (joinedVersions === rawJoined) {
-              draft = parsed;
-              resumed = true;
-              resumedBanner = true;
-            }
-          } catch {
-            // fall through to fresh build
-          }
-        }
-
-        if (!resumed) {
-          draft = buildDraft(raw, path, Math.floor(Date.now() / 1000));
-        }
+        draft = buildDraft(raw, path, Math.floor(Date.now() / 1000));
       } catch (e) {
         loadError = e instanceof Error ? e.message : String(e);
       } finally {
         loading = false;
       }
     })();
-
-    return () => {
-      if (persistTimer) clearTimeout(persistTimer);
-    };
   });
 
   // Ctrl/Cmd+F opens find-in-chat instead of the browser's own find bar;
@@ -281,7 +214,7 @@
     function closeTopModal(): boolean {
       if (rawEditKey !== null) { rawEditKey = null; return true; }
       if (titleRenameConfirming) { titleRenameConfirming = false; return true; }
-      if (showHistoryModal) { showHistoryModal = false; pendingRestore = null; return true; }
+      if (showRestoreModal) { showRestoreModal = false; restoreCandidate = null; return true; }
       if (showDiscardModal) { showDiscardModal = false; return true; }
       if (showSaveModal) { showSaveModal = false; return true; }
       if (showExitModal) { showExitModal = false; return true; }
@@ -300,7 +233,7 @@
         e.preventDefault();
         if (
           !draft || !dirty ||
-          showSaveModal || showDiscardModal || showExitModal || showHistoryModal ||
+          showSaveModal || showDiscardModal || showExitModal || showRestoreModal ||
           rawEditKey !== null || renamingTitle
         ) {
           return;
@@ -309,11 +242,7 @@
         return;
       }
       if (e.key === 'Escape') {
-        if (closeTopModal()) { e.preventDefault(); return; }
-        if (subagentStack.length > 0) {
-          e.preventDefault();
-          subagentStack = subagentStack.slice(0, -1);
-        }
+        if (closeTopModal()) e.preventDefault();
       }
     }
     window.addEventListener('keydown', onKeydown);
@@ -335,20 +264,8 @@
   // Expose the exit guard to the parent header's ← Back button.
   $effect(() => { requestExit = attemptExit; });
 
-  // ── Draft persistence (debounced) ───────────────────────────────────────────
-  function schedulePersist() {
-    if (persistTimer) clearTimeout(persistTimer);
-    persistTimer = setTimeout(() => {
-      if (draft) writeEditDraft(path, JSON.stringify(draft)).catch(() => {});
-      persistTimer = null;
-    }, 300);
-  }
-  function cancelPersist() {
-    if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
-  }
   function mutate(newDraft: Draft) {
     draft = newDraft;
-    schedulePersist();
   }
 
   // ── Toast ────────────────────────────────────────────────────────────────
@@ -361,11 +278,6 @@
   // ── Row mutations (wired to children) ────────────────────────────────────────
   function doBlockEdit(key: string, ordinal: number, text: string) {
     if (draft) mutate(applyBlockTextEdit(draft, key, ordinal, text));
-  }
-  function doDelete(key: string) { if (draft) mutate(deleteRow(draft, key)); }
-  function doRestore(key: string) { if (draft) mutate(restoreRow(draft, key)); }
-  function doSetActiveVersion(key: string, idx: number) {
-    if (draft) mutate(setActiveVersion(draft, key, idx));
   }
   function doRole(key: string, role: string) {
     if (draft) mutate(applyRoleEdit(draft, key, role));
@@ -389,25 +301,6 @@
     }
   }
 
-  // Move a chat bubble relative to the previous/next *chat bubble*, hopping over
-  // any collapsed tool group between them as a unit.
-  function moveMessage(key: string, dir: -1 | 1) {
-    if (!draft) return;
-    const msgKeys = displayItems
-      .filter((i) => i.kind === 'message')
-      .map((i) => (i as { key: string }).key);
-    const pos = msgKeys.indexOf(key);
-    if (pos < 0) return;
-    const targetKey = msgKeys[pos + dir];
-    if (targetKey === undefined) return; // already at an end
-
-    const order = [...draft.order];
-    order.splice(order.indexOf(key), 1);
-    const ti = order.indexOf(targetKey);
-    order.splice(dir === -1 ? ti : ti + 1, 0, key);
-    mutate({ ...draft, order });
-  }
-
   // ── Raw JSON escape hatch ───────────────────────────────────────────────────
   function openRawEdit(key: string) {
     if (!draft) return;
@@ -415,9 +308,9 @@
     if (!row) return;
     // Pretty-print for editing; applyRawEdit re-collapses to one line on save.
     try {
-      rawEditInitial = JSON.stringify(JSON.parse(row.versions[row.active]), null, 2);
+      rawEditInitial = JSON.stringify(JSON.parse(row.value), null, 2);
     } catch {
-      rawEditInitial = row.versions[row.active];
+      rawEditInitial = row.value;
     }
     rawEditKey = key;
   }
@@ -474,14 +367,6 @@
     }
   }
 
-  // ── Resume banner ─────────────────────────────────────────────────────────
-  async function discardResume() {
-    draft = buildDraft(rawText, path, Math.floor(Date.now() / 1000));
-    resumedBanner = false;
-    cancelPersist();
-    await deleteEditDraft(path).catch(() => {});
-  }
-
   // ── Save: overwrite original (with backup) ──────────────────────────────────
   async function confirmSave() {
     if (!draft) return;
@@ -491,8 +376,6 @@
       const bk = await snapshot(path);
       const content = serializeDraft(draft);
       await writeSession(path, content);
-      cancelPersist();
-      await deleteEditDraft(path);
       rawText = content;
       draft = buildDraft(content, path, Math.floor(Date.now() / 1000));
       showToast(`Saved. Backup v${bk.version} created.`);
@@ -525,35 +408,44 @@
   }
 
   // ── Discard all edits ───────────────────────────────────────────────────────
-  async function confirmDiscard() {
+  function confirmDiscard() {
     showDiscardModal = false;
     draft = buildDraft(rawText, path, Math.floor(Date.now() / 1000));
-    cancelPersist();
-    await deleteEditDraft(path).catch(() => {});
     showToast('Edits discarded.');
   }
 
-  // ── History / restore ───────────────────────────────────────────────────────
-  async function openHistory() {
-    backups = await listBackups(path);
-    pendingRestore = null;
-    showHistoryModal = true;
+  // ── Restore backup (single-slot: button + confirm, no history list) ────────
+  async function openRestoreBackup() {
+    try {
+      const list = await listBackups(path);
+      if (list.length === 0) {
+        showToast('No backup available yet.');
+        return;
+      }
+      restoreCandidate = list[0];
+      showRestoreModal = true;
+    } catch (e) {
+      showToast(`Could not check backups: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  function cancelRestoreBackup() {
+    showRestoreModal = false;
+    restoreCandidate = null;
   }
   async function confirmRestoreBackup() {
-    if (!pendingRestore) return;
-    const bk = pendingRestore;
-    pendingRestore = null;
-    showHistoryModal = false;
+    if (!restoreCandidate) return;
+    const bk = restoreCandidate;
+    showRestoreModal = false;
+    restoreCandidate = null;
     saving = true;
     try {
+      // Snapshot current state first, so restoring is itself reversible.
       await snapshot(path);
       const restored = await restoreBackup(bk.path);
       await writeSession(path, restored);
       rawText = restored;
       draft = buildDraft(restored, path, Math.floor(Date.now() / 1000));
-      cancelPersist();
-      await deleteEditDraft(path);
-      showToast(`Restored v${bk.version}`);
+      showToast(`Restored backup from ${formatTimestamp(bk.timestamp)}.`);
     } catch (e) {
       showToast(`Restore failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -563,15 +455,7 @@
 
   // ── Exit (dirty guard, driven by parent's ← Back) ───────────────────────────
   function attemptExit() {
-    // Back out of the subagent stack one level at a time before this ever
-    // reaches the real "leave the editor" flow below.
-    if (subagentStack.length > 0) {
-      subagentStack = subagentStack.slice(0, -1);
-      return;
-    }
     if (!draft || !isDirty(draft)) {
-      cancelPersist();
-      deleteEditDraft(path).catch(() => {});
       onExit();
       return;
     }
@@ -584,8 +468,6 @@
       const bk = await snapshot(path);
       const content = serializeDraft(draft!);
       await writeSession(path, content);
-      cancelPersist();
-      await deleteEditDraft(path);
       showToast(`Saved. Backup v${bk.version}.`);
       onExit();
     } catch (e) {
@@ -599,10 +481,8 @@
     await saveAsCopy();
     onExit();
   }
-  async function exitDiscard() {
+  function exitDiscard() {
     showExitModal = false;
-    cancelPersist();
-    await deleteEditDraft(path).catch(() => {});
     onExit();
   }
 
@@ -617,48 +497,6 @@
 {:else if loadError}
   <div class="empty-state">{loadError}</div>
 {:else if draft}
-
-  {#if subagentStack.length > 0}
-    {@const top = subagentStack[subagentStack.length - 1]}
-    <!-- ── Subagent stacked navigation (read-only) ──────────────────────────── -->
-    <!-- No local "back" button here — the header's ← Back (and Esc) already
-         pop one stack level via attemptExit(); a second same-labeled button
-         here would just be confusing. Crumbs below jump directly to any level. -->
-    <div class="subagent-crumbs">
-      <span class="subagent-crumbs__trail">
-        <button type="button" class="crumb" onclick={() => popSubagentTo(0)}>Main session</button>
-        {#each subagentStack as level, i (i)}
-          <span class="crumb-sep">▸</span>
-          <button
-            type="button" class="crumb"
-            class:crumb--current={i === subagentStack.length - 1}
-            onclick={() => popSubagentTo(i + 1)}
-          >{level.label}</button>
-        {/each}
-      </span>
-    </div>
-    <div class="session-turns">
-      {#each top.session.turns as turn, i (i)}
-        <Turn {turn} onOpenSubagent={pushSubagent} />
-      {/each}
-      {#if top.session.turns.length === 0}
-        <div class="empty-state">No conversation turns found in this subagent.</div>
-      {/if}
-    </div>
-  {:else}
-
-  <!-- ── Resume banner ──────────────────────────────────────────────────────── -->
-  {#if resumedBanner}
-    <div class="resume-banner">
-      <span>Resumed unsaved edits</span>
-      <button class="btn btn--sm btn--ghost" onclick={discardResume} type="button">Discard</button>
-      <button
-        class="btn btn--sm btn--ghost resume-banner__dismiss"
-        onclick={() => (resumedBanner = false)}
-        type="button"
-      >×</button>
-    </div>
-  {/if}
 
   <!-- ── Title + inline rename ──────────────────────────────────────────────── -->
   <div class="viewer-title-row">
@@ -712,19 +550,12 @@
       <div class="jump-anchor">
         {#if rr}
           <MessageCell
-            msgKey={item.key}
             row={rr.row}
             entry={rr.entry}
             onBlockEdit={(o, t) => doBlockEdit(item.key, o, t)}
-            onDelete={() => doDelete(item.key)}
-            onRestore={() => doRestore(item.key)}
             onRole={(role) => doRole(item.key, role)}
-            onMoveUp={() => moveMessage(item.key, -1)}
-            onMoveDown={() => moveMessage(item.key, 1)}
             onRaw={() => openRawEdit(item.key)}
-            onSetVersion={(idx) => doSetActiveVersion(item.key, idx)}
             onResumeFrom={() => doResumeFrom(item.key)}
-            onOpenSubagent={pushSubagent}
           />
         {/if}
       </div>
@@ -751,7 +582,7 @@
     onSave={() => (showSaveModal = true)}
     onSaveCopy={saveAsCopy}
     onDiscard={() => (showDiscardModal = true)}
-    onHistory={openHistory}
+    onRestoreBackup={openRestoreBackup}
   />
 
   <!-- ── Back to top ─────────────────────────────────────────────────────────── -->
@@ -759,8 +590,6 @@
     <button
       class="back-to-top" onclick={scrollToTop} type="button" aria-label="Back to top"
     >↑ Top</button>
-  {/if}
-
   {/if}
 
 {/if}
@@ -793,7 +622,7 @@
       <div class="modal__warning">
         This rewrites your real Claude chat history at:<br /><strong data-copy-text={path}>{path}</strong>
       </div>
-      <p>A backup snapshot is created first — restore any time from History.</p>
+      <p>A backup snapshot is created first — restore any time with "Restore backup".</p>
       <div class="modal__actions">
         <button class="btn btn--sm btn--ghost" onclick={() => (showSaveModal = false)} type="button">Cancel</button>
         <button class="btn btn--sm btn--primary" onclick={confirmSave} type="button">Save (backup first)</button>
@@ -807,7 +636,7 @@
   <div class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="discard-title">
     <div class="modal">
       <h3 id="discard-title">Discard all edits?</h3>
-      <p>This throws away every unsaved change and clears the draft. The original file is untouched.</p>
+      <p>This throws away every unsaved change. The original file is untouched.</p>
       <div class="modal__actions">
         <button class="btn btn--sm btn--ghost" onclick={() => (showDiscardModal = false)} type="button">Keep editing</button>
         <button class="btn btn--sm btn--danger" onclick={confirmDiscard} type="button">Discard edits</button>
@@ -832,38 +661,19 @@
   </div>
 {/if}
 
-<!-- ── History modal ─────────────────────────────────────────────────────────── -->
-{#if showHistoryModal}
-  <div class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="history-title">
-    <div class="modal" style="max-width:520px;">
-      <h3 id="history-title">Backup</h3>
-      <p>A backup is taken before every save. Restoring also backs up first.</p>
-      {#if backups.length === 0}
-        <div class="empty-state" style="padding:1rem 0;">No backups yet.</div>
-      {:else}
-        <div class="history-list">
-          {#each backups as bk (bk.version)}
-            <div class="history-item">
-              <div class="history-item__info">
-                <strong>v{bk.version}</strong>
-                <span style="color:var(--text-muted);font-size:0.78rem;">{formatTimestamp(bk.timestamp)}</span>
-                <span style="color:var(--text-faint);font-size:0.72rem;">{(bk.size / 1024).toFixed(1)} KB</span>
-              </div>
-              {#if pendingRestore?.version === bk.version}
-                <div class="history-item__confirm">
-                  <span style="font-size:0.78rem;color:var(--accent-result-err);">Snapshot current, then restore?</span>
-                  <button class="btn btn--sm btn--danger" onclick={confirmRestoreBackup} type="button">Yes, restore</button>
-                  <button class="btn btn--sm btn--ghost" onclick={() => (pendingRestore = null)} type="button">Cancel</button>
-                </div>
-              {:else}
-                <button class="btn btn--sm" onclick={() => (pendingRestore = bk)} type="button">Restore</button>
-              {/if}
-            </div>
-          {/each}
-        </div>
-      {/if}
+<!-- ── Restore backup modal (single-slot — button + confirm, no history list) ── -->
+{#if showRestoreModal && restoreCandidate}
+  <div class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="restore-title">
+    <div class="modal">
+      <h3 id="restore-title">Restore last backup?</h3>
+      <p>
+        Backup from {formatTimestamp(restoreCandidate.timestamp)}
+        ({(restoreCandidate.size / 1024).toFixed(1)} KB).
+        Your current file is snapshotted first, so this is reversible.
+      </p>
       <div class="modal__actions">
-        <button class="btn btn--sm btn--ghost" onclick={() => { showHistoryModal = false; pendingRestore = null; }} type="button">Close</button>
+        <button class="btn btn--sm btn--ghost" onclick={cancelRestoreBackup} type="button">Cancel</button>
+        <button class="btn btn--sm btn--danger" onclick={confirmRestoreBackup} type="button">Restore</button>
       </div>
     </div>
   </div>
@@ -891,18 +701,6 @@
     100% { background: transparent; }
   }
 
-  /* ── Resume banner ──────────────────────────────────────────── */
-  .resume-banner {
-    display: flex; align-items: center; gap: 0.6rem;
-    padding: 0.5rem 0.85rem; margin-bottom: 0.75rem;
-    background: color-mix(in srgb, var(--accent-user) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent-user) 30%, transparent);
-    border-radius: 0.4rem; font-size: 0.8rem; color: var(--accent-user);
-  }
-  .resume-banner span:first-child { flex: 1; font-weight: 500; }
-  .resume-banner__dismiss { font-size: 0.75rem; padding: 0.15rem 0.4rem; opacity: 0.6; }
-  .resume-banner__dismiss:hover { opacity: 1; }
-
   /* ── Title + inline rename ─────────────────────────────────────────── */
   .viewer-title-row { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.85rem; }
   .viewer-title {
@@ -923,25 +721,6 @@
   .find-toggle-row { margin-bottom: 0.75rem; }
   .find-toggle-row__kbd { color: var(--text-faint); font-size: 0.7rem; margin-left: 0.3rem; }
 
-  /* ── Subagent stacked navigation breadcrumbs ─────────────────── */
-  .subagent-crumbs {
-    display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;
-    margin-bottom: 0.85rem; padding-bottom: 0.6rem; border-bottom: 1px solid var(--border);
-  }
-  .subagent-crumbs__trail {
-    display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap;
-    font-size: 0.8rem; color: var(--text-muted); min-width: 0;
-  }
-  .crumb-sep { color: var(--text-faint); font-size: 0.7rem; }
-  .crumb {
-    background: none; border: 0; padding: 0.1rem 0.3rem; border-radius: 0.25rem;
-    font-family: inherit; font-size: inherit; color: var(--text-muted); cursor: pointer;
-    max-width: 22rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .crumb:hover { background: var(--bg-subtle); color: var(--text); }
-  .crumb--current { color: var(--accent-subagent); font-weight: 600; cursor: default; }
-  .crumb--current:hover { background: none; }
-
   /* ── Back to top ──────────────────────────────────────────────  */
   /* Bottom-right, clear of SaveRail (which is vertically centered at the
      same right edge) so the two floating controls never overlap. */
@@ -960,19 +739,6 @@
     border-top: 1px solid var(--border); font-size: 0.78rem; color: var(--text-muted); flex-wrap: wrap;
   }
   .load-more span { flex: 1; }
-
-  /* ── History list ───────────────────────────────────────────── */
-  .history-list {
-    display: flex; flex-direction: column; gap: 0.4rem; max-height: 320px; overflow-y: auto;
-    margin: 0.75rem 0; padding-right: 0.25rem;
-  }
-  .history-item {
-    display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
-    padding: 0.45rem 0.65rem; border: 1px solid var(--border); border-radius: 0.35rem;
-    background: var(--bg-subtle); flex-wrap: wrap;
-  }
-  .history-item__info { display: flex; align-items: center; gap: 0.6rem; flex: 1; min-width: 0; }
-  .history-item__confirm { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
 
   /* ── Modal column actions ───────────────────────────────────── */
   .modal__actions--col { flex-direction: column; align-items: stretch; gap: 0.4rem; }

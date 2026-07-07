@@ -13,7 +13,7 @@
     "tauri": "tauri",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
-    "test:smoke": "tsx tests/smoke.mjs && tsx tests/edit_smoke.mjs && tsx tests/title_smoke.mjs && tsx tests/diff_group_smoke.mjs"
+    "test:smoke": "tsx tests/smoke.mjs && tsx tests/edit_smoke.mjs && tsx tests/title_smoke.mjs && tsx tests/group_smoke.mjs"
   },
   "license": "MIT",
   "dependencies": {
@@ -22,7 +22,6 @@
     "@tauri-apps/plugin-opener": "^2.5.4",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
-    "diff": "^9.0.0",
     "dompurify": "^3.4.11",
     "marked": "^18.0.5"
   },

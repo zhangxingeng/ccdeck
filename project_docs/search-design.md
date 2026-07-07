@@ -106,7 +106,7 @@ changes from "FTS5 inverted index" to **"extracted-text cache"**:
 
 ## 4. Data model (SQLite, NOT FTS5)
 
-DB at `~/.claude/.ccstudio-index/search.db` (same convention as `.ccstudio-edits` / `.ccstudio-backups`).
+DB at `~/.claude/.ccstudio-index/search.db` (same convention as `.ccstudio-backups`).
 The DB is a **disposable cache** — always rebuildable from source JSONL — so we use aggressive,
 non-durable pragmas for speed: `journal_mode=WAL`, `synchronous=OFF` during bulk build
 (checkpoint at end), large transaction batches.

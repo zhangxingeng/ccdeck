@@ -71,19 +71,15 @@ list_backups(session_path) -> BackupVersion[]
 restore_backup(backup_path) -> string
     // Return the raw contents of the backup (frontend decides what to do:
     // it will snapshot current state, then write this content back).
-
-read_edit_draft(session_path) -> string | null
-    // Return the raw JSON of a saved edit draft for this session, or null if
-    // no draft file exists. Draft store: ~/.claude/.ccstudio-edits/<sanitized_id>.json
-    // where sanitized_id = sanitize_id(relative path from projects dir).
-
-write_edit_draft(session_path, content) -> null
-    // Persist an edit draft (creates ~/.claude/.ccstudio-edits/ if needed).
-    // content is the JSON.stringify of the Draft object (see editDraft.ts).
-
-delete_edit_draft(session_path) -> null
-    // Delete the edit draft for this session. No-op if already absent.
 ```
+
+As of issue #6 (Phase B: plain edit surface), there is no crash-safe autosave
+draft. Editing is plain edit-in-place -> Save: `editDraft.ts`'s `Draft` holds
+each row's original line plus its current (possibly edited) value entirely
+in memory, and `write_session` is the only path that touches disk for an
+edit. The editor's "Restore backup" affordance is a single button + confirm
+(no version picker, no history list) backed by `list_backups`/`restore_backup`
+above — there is only ever one backup file per session.
 
 Rust crates to add: `dirs` (home dir), `serde`/`serde_json` (already present),
 `walkdir` optional. Register all commands in `invoke_handler`. Capabilities:

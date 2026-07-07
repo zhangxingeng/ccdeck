@@ -42,7 +42,7 @@ CREATE INDEX IF NOT EXISTS blocks_source  ON blocks(source);
 ";
 
 /// Where the search cache lives: `~/.claude/.ccstudio-index/search.db`
-/// (same convention as `.ccstudio-edits` / `.ccstudio-backups`).
+/// (same convention as `.ccstudio-backups`).
 /// Creates the parent directory if it doesn't exist yet.
 fn db_path() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or("could not resolve home directory")?;

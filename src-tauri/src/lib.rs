@@ -222,28 +222,6 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Resolve the path to the edit draft file for a given session path.
-fn edit_draft_path(session_path: &str) -> Result<PathBuf, String> {
-    let file_path = Path::new(session_path);
-
-    let session_id = if let Some(projects) = projects_dir_inner() {
-        if let Ok(rel) = file_path.strip_prefix(&projects) {
-            sanitize_id(&rel.to_string_lossy())
-        } else {
-            sanitize_id(session_path)
-        }
-    } else {
-        sanitize_id(session_path)
-    };
-
-    let home = dirs::home_dir()
-        .ok_or_else(|| "Cannot determine home directory".to_string())?;
-    Ok(home
-        .join(".claude")
-        .join(".ccstudio-edits")
-        .join(format!("{}.json", session_id)))
-}
-
 // ---------------------------------------------------------------------------
 // Tauri commands
 // ---------------------------------------------------------------------------
@@ -567,37 +545,6 @@ fn write_session(
 #[tauri::command]
 fn restore_backup(backup_path: String) -> Result<String, String> {
     fs::read_to_string(&backup_path).map_err(|e| e.to_string())
-}
-
-/// Return the raw JSON string of a saved edit draft for this session, or None if absent.
-#[tauri::command]
-fn read_edit_draft(session_path: String) -> Result<Option<String>, String> {
-    let draft_path = edit_draft_path(&session_path)?;
-    if !draft_path.exists() {
-        return Ok(None);
-    }
-    let content = fs::read_to_string(&draft_path).map_err(|e| e.to_string())?;
-    Ok(Some(content))
-}
-
-/// Persist an edit draft for this session (creates parent dirs as needed).
-#[tauri::command]
-fn write_edit_draft(session_path: String, content: String) -> Result<(), String> {
-    let draft_path = edit_draft_path(&session_path)?;
-    if let Some(parent) = draft_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    fs::write(&draft_path, content).map_err(|e| e.to_string())
-}
-
-/// Delete the edit draft for this session; ok if already gone.
-#[tauri::command]
-fn delete_edit_draft(session_path: String) -> Result<(), String> {
-    let draft_path = edit_draft_path(&session_path)?;
-    if draft_path.exists() {
-        fs::remove_file(&draft_path).map_err(|e| e.to_string())?;
-    }
-    Ok(())
 }
 
 /// "Resume from here": copy lines `0..=upto_index` of the session at `path`
@@ -1008,9 +955,6 @@ pub fn run() {
             snapshot,
             list_backups,
             restore_backup,
-            read_edit_draft,
-            write_edit_draft,
-            delete_edit_draft,
             fork_session,
             resume_in_terminal,
             search::state::search,

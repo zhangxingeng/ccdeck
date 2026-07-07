@@ -1,8 +1,9 @@
 <script lang="ts">
   /**
    * SaveRail.svelte — the floating right-edge save bar. Shows the unsaved-change
-   * count and Save / Save-as-copy / Discard when dirty; History is always
-   * available. Pure controls — all side effects run in the parent's callbacks.
+   * count and Save / Save-as-copy / Discard when dirty; Restore backup is
+   * always available (single-slot backup — no version picker). Pure controls —
+   * all side effects run in the parent's callbacks.
    */
   let {
     dirty,
@@ -11,7 +12,7 @@
     onSave,
     onSaveCopy,
     onDiscard,
-    onHistory,
+    onRestoreBackup,
   }: {
     dirty: boolean;
     changeCount: number;
@@ -19,7 +20,7 @@
     onSave: () => void;
     onSaveCopy: () => void;
     onDiscard: () => void;
-    onHistory: () => void;
+    onRestoreBackup: () => void;
   } = $props();
 </script>
 
@@ -32,7 +33,7 @@
       <button class="btn btn--sm btn--ghost" onclick={onDiscard} disabled={saving} type="button">Discard</button>
     </div>
   {/if}
-  <button class="save-rail__history" onclick={onHistory} disabled={saving} type="button" title="Backup">History</button>
+  <button class="save-rail__history" onclick={onRestoreBackup} disabled={saving} type="button" title="Restore the last backup">Restore backup</button>
 </div>
 
 <style>

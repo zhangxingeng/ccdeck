@@ -34,8 +34,6 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 // In-memory backup store for browser-dev mode only.
 const devBackups: Record<string, BackupVersion[]> = {};
 const devContent: Record<string, string> = {};
-// In-memory edit draft store for browser-dev mode only.
-const devDrafts = new Map<string, string>();
 
 export async function findProjectsDir(): Promise<string | null> {
   if (!isTauri()) return '/dev/mock/.claude/projects';
@@ -127,27 +125,6 @@ export async function listBackups(sessionPath: string): Promise<BackupVersion[]>
 export async function restoreBackup(backupPath: string): Promise<string> {
   if (!isTauri()) return mockSession;
   return call<string>('restore_backup', { backupPath });
-}
-
-export async function readEditDraft(path: string): Promise<string | null> {
-  if (!isTauri()) return devDrafts.get(path) ?? null;
-  return call<string | null>('read_edit_draft', { sessionPath: path });
-}
-
-export async function writeEditDraft(path: string, content: string): Promise<void> {
-  if (!isTauri()) {
-    devDrafts.set(path, content);
-    return;
-  }
-  await call<null>('write_edit_draft', { sessionPath: path, content });
-}
-
-export async function deleteEditDraft(path: string): Promise<void> {
-  if (!isTauri()) {
-    devDrafts.delete(path);
-    return;
-  }
-  await call<null>('delete_edit_draft', { sessionPath: path });
 }
 
 // ---------------------------------------------------------------------------
