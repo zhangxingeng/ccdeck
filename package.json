@@ -12,7 +12,8 @@
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
     "test:e2e": "playwright test",
-    "test:e2e:ui": "playwright test --ui"
+    "test:e2e:ui": "playwright test --ui",
+    "test:smoke": "tsx tests/smoke.mjs && tsx tests/edit_smoke.mjs && tsx tests/title_smoke.mjs && tsx tests/diff_group_smoke.mjs"
   },
   "license": "MIT",
   "dependencies": {
@@ -33,6 +34,7 @@
     "@tauri-apps/cli": "^2.11.4",
     "svelte": "^5.56.4",
     "svelte-check": "^4.7.1",
+    "tsx": "^4.23.0",
     "typescript": "~6.0.3",
     "vite": "^8.1.3"
   }

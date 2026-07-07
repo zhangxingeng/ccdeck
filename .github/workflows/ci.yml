@@ -29,6 +29,9 @@ jobs:
       - name: Type-check (svelte-check)
         run: pnpm check
 
+      - name: Smoke tests
+        run: pnpm test:smoke
+
       - name: Build
         run: pnpm build
 

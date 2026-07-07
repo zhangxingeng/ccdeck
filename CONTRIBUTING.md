@@ -42,6 +42,7 @@ Before opening a PR, please run:
 
 ```bash
 pnpm check                       # svelte-check, must be 0 errors/warnings
+pnpm test:smoke                  # tests/*.mjs smoke suite, must pass
 cd src-tauri && cargo test --lib # Rust unit tests, must pass
 pnpm build                       # production frontend build
 ```
