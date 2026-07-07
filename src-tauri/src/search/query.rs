@@ -18,7 +18,7 @@ use tantivy::schema::{document::Value, IndexRecordOption};
 use tantivy::snippet::SnippetGenerator;
 use tantivy::{Index, Searcher, TantivyDocument, Term};
 
-use super::index::SearchSchema;
+use super::index::{SearchSchema, TEXT_TOKENIZER};
 
 /// Boost applied to an exact-term clause over its sibling fuzzy clause, so an
 /// exact/near-exact match ranks above a loosely-fuzzy one (tantivy's fuzzy hits
@@ -26,6 +26,14 @@ use super::index::SearchSchema;
 const EXACT_BOOST: f32 = 3.0;
 /// Levenshtein distance tolerated by the fuzzy clause (typo tolerance).
 const FUZZY_DISTANCE: u8 = 1;
+/// Minimum token length (in chars) before a fuzzy sibling clause is added.
+/// Below this, edit-distance-1 matches too large a fraction of any real
+/// vocabulary to be useful — empirically, a 2-char query fuzzy-matched nearly
+/// every other short word in a small test corpus (found in the issue #5
+/// Gate-2 audit). Tokens under the floor get exact-only matching. Mirrors
+/// Elasticsearch's `fuzziness: "AUTO"` floor (0 edits below length 3, 1 edit
+/// at length 3+).
+const MIN_FUZZY_TOKEN_LEN: usize = 3;
 const SNIPPET_MAX_CHARS: usize = 240;
 
 /// Query-time filters. Empty `sources`/`projects` mean "no restriction".
@@ -84,14 +92,14 @@ pub struct SearchHit {
     pub score: f32,
 }
 
-/// Tokenize a query string with the index's default analyzer — the same
-/// analyzer that indexed the `text` field, so query tokens line up with the
-/// terms in the index.
+/// Tokenize a query string with the same named analyzer that indexed the
+/// `text` field (see `index::TEXT_TOKENIZER`), so query tokens line up with
+/// the terms actually stored in the index.
 pub(crate) fn tokenize(index: &Index, text: &str) -> Result<Vec<String>, String> {
     let mut analyzer = index
         .tokenizers()
-        .get("default")
-        .ok_or("default tokenizer not registered")?;
+        .get(TEXT_TOKENIZER)
+        .ok_or("search tokenizer not registered")?;
     let mut stream = analyzer.token_stream(text);
     let mut tokens = Vec::new();
     while stream.advance() {
@@ -135,6 +143,11 @@ pub fn build_query(
                 Box::new(TermQuery::new(term.clone(), IndexRecordOption::WithFreqsAndPositions)),
                 EXACT_BOOST,
             ));
+            // Below the floor, a fuzzy sibling clause matches too much of any
+            // real vocabulary to be useful — exact-only for short tokens.
+            if tok.chars().count() < MIN_FUZZY_TOKEN_LEN {
+                return exact;
+            }
             let fuzzy: Box<dyn Query> =
                 Box::new(FuzzyTermQuery::new(term, FUZZY_DISTANCE, true));
             should_group(vec![exact, fuzzy])
@@ -202,11 +215,15 @@ fn get_i64(doc: &TantivyDocument, field: tantivy::schema::Field) -> i64 {
 /// `limit` hits by relevance plus the total match count, and build a
 /// highlighted snippet for each. Hits come back already sorted by score desc
 /// (tantivy's `TopDocs` collector sorts internally) — no separate buffering
-/// step needed for relevance ordering.
+/// step needed for relevance ordering. `tokens` are the same query tokens
+/// `build_query` was built from — needed for the fuzzy-only highlight
+/// fallback below, since the compiled `query` object alone doesn't expose
+/// them cheaply.
 pub fn search_warm(
     searcher: &Searcher,
     schema: &SearchSchema,
     query: &dyn Query,
+    tokens: &[String],
     limit: usize,
 ) -> Result<(usize, Vec<SearchHit>), String> {
     let top = searcher
@@ -224,7 +241,7 @@ pub fn search_warm(
         let text = get_str(&doc, schema.text);
         let snippet = snippet_gen.snippet_from_doc(&doc);
         let fragment = snippet.fragment();
-        let match_ranges: Vec<(u32, u32)> = snippet
+        let mut match_ranges: Vec<(u32, u32)> = snippet
             .highlighted()
             .iter()
             .map(|r| {
@@ -242,6 +259,16 @@ pub fn search_warm(
         } else {
             fragment.to_string()
         };
+        // The snippet generator only highlights a literal substring, so a
+        // fuzzy-only hit (the term the user typed isn't literally in the
+        // text) leaves match_ranges empty — the user gets zero visual
+        // explanation of why a fuzzy result surfaced, which undercuts the
+        // point of a fuzzy engine being legible. Best-effort fallback: scan
+        // for a word within edit distance of a query token and highlight that
+        // instead.
+        if match_ranges.is_empty() {
+            match_ranges = fuzzy_highlight(&snippet_text, tokens);
+        }
 
         let ts_val = get_i64(&doc, schema.ts);
         hits.push(SearchHit {
@@ -259,6 +286,73 @@ pub fn search_warm(
     }
 
     Ok((total, hits))
+}
+
+/// Cheap bounded edit-distance check — a full Levenshtein DP is fine at this
+/// scale (single words, `max_dist` is always small), and the length-diff
+/// early-exit skips the DP entirely for the common non-match case.
+fn within_edit_distance(a: &str, b: &str, max_dist: usize) -> bool {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.len().abs_diff(b.len()) > max_dist {
+        return false;
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for i in 1..=a.len() {
+        let mut cur = vec![0usize; b.len() + 1];
+        cur[0] = i;
+        for j in 1..=b.len() {
+            cur[j] = if a[i - 1] == b[j - 1] {
+                prev[j - 1]
+            } else {
+                1 + prev[j - 1].min(prev[j]).min(cur[j - 1])
+            };
+        }
+        prev = cur;
+    }
+    prev[b.len()] <= max_dist
+}
+
+/// Word-level fallback highlight for a fuzzy-only hit: scan `text` for any
+/// word within [`FUZZY_DISTANCE`] edits of one of the query `tokens` (only
+/// tokens at or above [`MIN_FUZZY_TOKEN_LEN`] — shorter tokens never went
+/// through a fuzzy clause, so a "close" word for one would be a false
+/// explanation) and return its char range. Best-effort only — used solely
+/// when the literal snippet path found nothing to highlight.
+fn fuzzy_highlight(text: &str, tokens: &[String]) -> Vec<(u32, u32)> {
+    fn is_match(word: &str, tokens: &[String]) -> bool {
+        let lower = word.to_lowercase();
+        tokens
+            .iter()
+            .filter(|t| t.chars().count() >= MIN_FUZZY_TOKEN_LEN)
+            .any(|t| within_edit_distance(&lower, t, FUZZY_DISTANCE as usize))
+    }
+
+    let mut ranges = Vec::new();
+    let mut char_idx: u32 = 0;
+    let mut word_start: Option<u32> = None;
+    let mut word = String::new();
+
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            if word_start.is_none() {
+                word_start = Some(char_idx);
+            }
+            word.push(ch);
+        } else if let Some(start) = word_start.take() {
+            if is_match(&word, tokens) {
+                ranges.push((start, char_idx));
+            }
+            word.clear();
+        }
+        char_idx += 1;
+    }
+    if let Some(start) = word_start {
+        if is_match(&word, tokens) {
+            ranges.push((start, char_idx));
+        }
+    }
+    ranges
 }
 
 fn floor_boundary(s: &str, mut i: usize) -> usize {
@@ -284,20 +378,34 @@ fn ceil_boundary(s: &str, mut i: usize) -> usize {
 const COLD_WINDOW_BEFORE: usize = 60;
 const COLD_WINDOW_AFTER: usize = 180;
 
-/// Cold-path match: every query token must appear as a case-insensitive
-/// substring (a simpler, non-fuzzy stand-in used only for session files not
-/// yet reflected in the tantivy index — see `state.rs`'s cold tier). Returns
-/// a windowed snippet around the earliest token match, with char-offset
-/// ranges for every token occurrence inside that window.
-pub fn cold_match(text: &str, tokens: &[String]) -> Option<(String, Vec<(u32, u32)>)> {
+/// Cold-path match: at least one query token appears as a case-insensitive
+/// substring — an OR/partial-credit match (a simpler, non-fuzzy stand-in used
+/// only for session files not yet reflected in the tantivy index — see
+/// `state.rs`'s cold tier). Previously required ALL tokens (an AND), which
+/// gave the exact same query a stricter, different result set purely because
+/// a file hadn't been swept into the tantivy index yet — the warm tier is
+/// OR-across-tokens by design (see `build_query`), so the cold tier now
+/// matches that recall shape (found in the issue #5 Gate-2 audit). Returns a
+/// windowed snippet around the earliest match, char-offset ranges for every
+/// matched token's occurrences inside that window, and the count of distinct
+/// tokens matched — a coarse relevance proxy so more-tokens-matched still
+/// ranks higher, mirroring (without a full BM25 recompute) the warm tier's
+/// "more matched tokens accumulate more score" behavior.
+pub fn cold_match(text: &str, tokens: &[String]) -> Option<(String, Vec<(u32, u32)>, usize)> {
     if tokens.is_empty() {
         return None;
     }
     let lower = text.to_lowercase();
     let mut first = usize::MAX;
+    let mut matched = 0usize;
     for tok in tokens {
-        let pos = lower.find(tok.as_str())?;
-        first = first.min(pos);
+        if let Some(pos) = lower.find(tok.as_str()) {
+            matched += 1;
+            first = first.min(pos);
+        }
+    }
+    if matched == 0 {
+        return None;
     }
 
     let win_start = floor_boundary(&lower, first.saturating_sub(COLD_WINDOW_BEFORE));
@@ -334,7 +442,7 @@ pub fn cold_match(text: &str, tokens: &[String]) -> Option<(String, Vec<(u32, u3
     }
     ranges.sort_unstable();
 
-    Some((snippet, ranges))
+    Some((snippet, ranges, matched))
 }
 
 #[cfg(test)]
@@ -388,15 +496,75 @@ mod tests {
         let reader = index.reader().unwrap();
         let searcher = reader.searcher();
 
+        let tokens = tokenize(&index, "parser").unwrap();
         let query = build_query(&index, &schema, "parser", &SearchFilters::default())
             .unwrap()
             .expect("non-empty query");
-        let (total, hits) = search_warm(&searcher, &schema, &query, 10).unwrap();
+        let (total, hits) = search_warm(&searcher, &schema, &query, &tokens, 10).unwrap();
 
         assert_eq!(total, 2, "exact + typo variant both match");
         assert_eq!(hits.len(), 2);
         // Exact match ("parser") must outrank the fuzzy typo match ("parsr").
         assert!(hits[0].snippet.contains("parser"));
+        assert!(hits[0].score > hits[1].score);
+    }
+
+    #[test]
+    fn fuzzy_only_hit_gets_a_best_effort_highlight() {
+        let (index, schema) = tmp_index("fuzzy_highlight");
+        let mut writer = index.writer(15_000_000).unwrap();
+        add_block(&writer, &schema, "/a.jsonl", "~/app", "assistant", "the parsr looked fine to me");
+        writer.commit().unwrap();
+
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+
+        let tokens = tokenize(&index, "parser").unwrap();
+        let query = build_query(&index, &schema, "parser", &SearchFilters::default())
+            .unwrap()
+            .expect("non-empty query");
+        let (_, hits) = search_warm(&searcher, &schema, &query, &tokens, 10).unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert!(
+            !hits[0].match_ranges.is_empty(),
+            "a fuzzy-only hit should still get a best-effort highlight"
+        );
+        let (s, e) = hits[0].match_ranges[0];
+        let highlighted: String = hits[0]
+            .snippet
+            .chars()
+            .skip(s as usize)
+            .take((e - s) as usize)
+            .collect();
+        assert_eq!(highlighted, "parsr");
+    }
+
+    #[test]
+    fn multi_token_query_ranks_both_tokens_matched_above_one_token_matched() {
+        let (index, schema) = tmp_index("multi_token");
+        let mut writer = index.writer(15_000_000).unwrap();
+        add_block(&writer, &schema, "/both.jsonl", "~/app", "user", "the parser bug is fixed");
+        add_block(&writer, &schema, "/one.jsonl", "~/app", "user", "parser was never the problem");
+        writer.commit().unwrap();
+
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+
+        let tokens = tokenize(&index, "parser fixed").unwrap();
+        let query = build_query(&index, &schema, "parser fixed", &SearchFilters::default())
+            .unwrap()
+            .expect("non-empty query");
+        let (total, hits) = search_warm(&searcher, &schema, &query, &tokens, 10).unwrap();
+
+        assert_eq!(
+            total, 2,
+            "OR-across-tokens: a doc matching only one of two tokens still counts"
+        );
+        assert_eq!(
+            hits[0].session_path, "/both.jsonl",
+            "matching both query tokens ranks first"
+        );
         assert!(hits[0].score > hits[1].score);
     }
 
@@ -412,12 +580,14 @@ mod tests {
         let reader = index.reader().unwrap();
         let searcher = reader.searcher();
 
+        let tokens = tokenize(&index, "bug").unwrap();
+
         let filters = SearchFilters {
             sources: vec!["assistant".into()],
             ..Default::default()
         };
         let query = build_query(&index, &schema, "bug", &filters).unwrap().unwrap();
-        let (total, hits) = search_warm(&searcher, &schema, &query, 10).unwrap();
+        let (total, hits) = search_warm(&searcher, &schema, &query, &tokens, 10).unwrap();
         assert_eq!(total, 1);
         assert_eq!(hits[0].source, "assistant");
 
@@ -426,9 +596,37 @@ mod tests {
             ..Default::default()
         };
         let query = build_query(&index, &schema, "bug", &filters).unwrap().unwrap();
-        let (total, hits) = search_warm(&searcher, &schema, &query, 10).unwrap();
+        let (total, hits) = search_warm(&searcher, &schema, &query, &tokens, 10).unwrap();
         assert_eq!(total, 1);
         assert_eq!(hits[0].project, "~/lib");
+    }
+
+    #[test]
+    fn long_tokens_survive_tokenization_and_are_findable() {
+        // tantivy's built-in "default" tokenizer keeps a token only if
+        // `token.len() < limit`, so `RemoveLongFilter::limit(40)` drops any
+        // token AT OR OVER 40 chars — exactly a git SHA-1's length, routine
+        // content in this app's domain. Locks in the fix: our own
+        // TEXT_TOKENIZER raises that ceiling, both at index time and here at
+        // query time (found in the issue #5 Gate-2 audit).
+        let sha = "9fceb02d0ae598e95dc970b74767f19372d61af8"; // a real 40-char SHA-1
+        assert_eq!(sha.len(), 40);
+
+        let (index, schema) = tmp_index("long_token");
+        let tokens = tokenize(&index, sha).unwrap();
+        assert_eq!(tokens, vec![sha.to_string()], "a 40-char token must survive tokenization");
+
+        let mut writer = index.writer(15_000_000).unwrap();
+        add_block(&writer, &schema, "/a.jsonl", "~/app", "user", &format!("fixed in commit {sha}"));
+        writer.commit().unwrap();
+
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let query = build_query(&index, &schema, sha, &SearchFilters::default())
+            .unwrap()
+            .expect("non-empty query");
+        let (total, _hits) = search_warm(&searcher, &schema, &query, &tokens, 10).unwrap();
+        assert_eq!(total, 1, "the long token must be findable, not silently dropped");
     }
 
     #[test]
@@ -440,12 +638,23 @@ mod tests {
     }
 
     #[test]
-    fn cold_match_requires_all_tokens_and_returns_snippet() {
+    fn cold_match_matches_any_token_and_returns_snippet() {
         let tokens = vec!["fix".to_string(), "parser".to_string()];
-        let (snippet, ranges) = cold_match("please fix the parser bug today", &tokens).unwrap();
+        let (snippet, ranges, matched) =
+            cold_match("please fix the parser bug today", &tokens).unwrap();
         assert!(snippet.contains("fix"));
         assert!(snippet.contains("parser"));
         assert_eq!(ranges.len(), 2);
+        assert_eq!(matched, 2);
+
+        // Partial match (only one of the two tokens present) still counts —
+        // OR, not AND, consistent with the warm tier's relevance-not-boolean-
+        // gate philosophy (previously this returned None).
+        let (_, partial_ranges, partial_matched) =
+            cold_match("please fix this today", &tokens).unwrap();
+        assert_eq!(partial_matched, 1);
+        assert_eq!(partial_ranges.len(), 1);
+
         assert!(cold_match("nothing relevant here", &tokens).is_none());
     }
 }

@@ -11,14 +11,20 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension};
 
-/// Bump this whenever the tantivy schema or matching semantics change shape.
-/// A mismatch forces one full rebuild (see [`ensure_engine_version`]) rather
-/// than carrying incremental-migration logic for a disposable, always-
-/// rebuildable cache — this app already ships to real users with a populated
-/// v1 (SQLite `blocks` + regex scan) cache on disk, so silently reusing their
-/// stale `session_files` fingerprints would skip re-extraction into the new
-/// tantivy index and they'd upgrade into an empty search with nothing to
-/// trigger a rebuild.
+/// Manual bump for a change `index::schema_fingerprint` can't see on its own —
+/// a tokenizer *parameter* tweak (e.g. `index::MAX_TOKEN_LEN`) or a matching-
+/// semantics change that doesn't alter the tantivy `Schema`'s field shape.
+/// Field/type/tokenizer-*name* changes are caught automatically: the caller
+/// (`state.rs`) combines this constant with `index::schema_fingerprint()` (a
+/// hash of the schema's serialized field definitions) into the effective
+/// version passed to [`ensure_engine_version`] — so most schema changes need
+/// no manual bump at all, only this narrower class does. A mismatch on the
+/// combined version forces one full rebuild rather than carrying incremental-
+/// migration logic for a disposable, always-rebuildable cache — this app
+/// already ships to real users with a populated v1 (SQLite `blocks` + regex
+/// scan) cache on disk, so silently reusing their stale `session_files`
+/// fingerprints would skip re-extraction into the new tantivy index and
+/// they'd upgrade into an empty search with nothing to trigger a rebuild.
 pub const ENGINE_VERSION: &str = "2";
 
 /// The schema. `session_files` is one row per session file, used for
@@ -65,10 +71,15 @@ fn index_root() -> Result<PathBuf, String> {
 }
 
 /// Reset `session_files` and wipe the tantivy index directory when the
-/// on-disk engine version doesn't match [`ENGINE_VERSION`] — forcing exactly
-/// one full rebuild into the current engine. A no-op once the version
-/// matches, so this is safe to call on every startup.
-pub fn ensure_engine_version(conn: &Connection, tantivy_dir: &Path) -> Result<(), String> {
+/// on-disk engine version doesn't match `effective_version` (see
+/// [`ENGINE_VERSION`] for how the caller composes it) — forcing exactly one
+/// full rebuild into the current engine. A no-op once the version matches, so
+/// this is safe to call on every startup.
+pub fn ensure_engine_version(
+    conn: &Connection,
+    tantivy_dir: &Path,
+    effective_version: &str,
+) -> Result<(), String> {
     let current: Option<String> = conn
         .query_row(
             "SELECT value FROM search_meta WHERE key = 'engine_version'",
@@ -77,7 +88,7 @@ pub fn ensure_engine_version(conn: &Connection, tantivy_dir: &Path) -> Result<()
         )
         .optional()
         .map_err(|e| e.to_string())?;
-    if current.as_deref() == Some(ENGINE_VERSION) {
+    if current.as_deref() == Some(effective_version) {
         return Ok(());
     }
 
@@ -96,7 +107,7 @@ pub fn ensure_engine_version(conn: &Connection, tantivy_dir: &Path) -> Result<()
     conn.execute(
         "INSERT INTO search_meta (key, value) VALUES ('engine_version', ?1)
          ON CONFLICT(key) DO UPDATE SET value = ?1",
-        [ENGINE_VERSION],
+        [effective_version],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -162,6 +173,12 @@ mod tests {
         assert_eq!(project, "proj");
     }
 
+    /// A throwaway tantivy-dir path, tagged to avoid collisions with other
+    /// tests — same convention as `index.rs`'s/`query.rs`'s tagged temp dirs.
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("ccstudio_test_engine_version_{tag}"))
+    }
+
     /// A stale/legacy engine version wipes fingerprints + any old `blocks`
     /// table and re-stamps the current version; a matching version is a no-op
     /// that leaves data alone.
@@ -179,10 +196,10 @@ mod tests {
         )
         .unwrap();
 
-        let dir = std::env::temp_dir().join("ccstudio_test_engine_version_reset");
+        let dir = tmp_dir("reset");
         let _ = std::fs::remove_dir_all(&dir);
 
-        ensure_engine_version(&conn, &dir).expect("first call resets stale v1 state");
+        ensure_engine_version(&conn, &dir, "test-version").expect("first call resets stale v1 state");
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM session_files", [], |r| r.get(0))
             .unwrap();
@@ -200,7 +217,7 @@ mod tests {
             [],
         )
         .unwrap();
-        ensure_engine_version(&conn, &dir).expect("second call is a no-op");
+        ensure_engine_version(&conn, &dir, "test-version").expect("second call is a no-op");
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM session_files", [], |r| r.get(0))
             .unwrap();

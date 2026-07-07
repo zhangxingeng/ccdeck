@@ -93,6 +93,13 @@ impl Indexer {
             return;
         };
         self.set_building(true);
+        // Compute counts up front too, not just after: `total_sessions`
+        // otherwise stayed at its zero default for the whole build, and
+        // combined with the frontend's `total_sessions > 0` gate, the
+        // "indexing N/M…" indicator never appeared during exactly the
+        // first-launch window it matters most (found in the issue #5 Gate-2
+        // audit).
+        self.update_counts();
         {
             let (Ok(mut conn), Ok(mut writer)) = (self.conn.lock(), self.tantivy_writer.lock())
             else {
@@ -169,7 +176,8 @@ impl SearchState {
     pub fn new(projects_dir: Option<PathBuf>, home: Option<PathBuf>) -> Result<Self, String> {
         let conn = db::open_db()?;
         let tantivy_dir = db::tantivy_index_dir()?;
-        db::ensure_engine_version(&conn, &tantivy_dir)?;
+        let effective_version = format!("{}-{}", db::ENGINE_VERSION, index::schema_fingerprint());
+        db::ensure_engine_version(&conn, &tantivy_dir, &effective_version)?;
 
         let schema = SearchSchema::build();
         let tantivy_index = index::open_index(&tantivy_dir, &schema.schema)?;
@@ -283,7 +291,7 @@ pub async fn search(
 
         // --- Warm tier: query the tantivy index. ---
         let searcher = indexer.tantivy_reader.searcher();
-        let (total, hits) = query::search_warm(&searcher, &indexer.schema, &built_query, limit)?;
+        let (total, hits) = query::search_warm(&searcher, &indexer.schema, &built_query, &tokens, limit)?;
         summary.scanned = total;
         for hit in &hits {
             if cancelled() {
@@ -342,7 +350,7 @@ pub async fn search(
                 if !passes_cold_filters(&b.source, &b.text, b.ts, &filters) {
                     continue;
                 }
-                if let Some((snippet, match_ranges)) = query::cold_match(&b.text, &tokens) {
+                if let Some((snippet, match_ranges, matched)) = query::cold_match(&b.text, &tokens) {
                     let _ = on_hit.send(SearchHit {
                         session_path: sp.clone(),
                         project: project.clone(),
@@ -353,7 +361,11 @@ pub async fn search(
                         source: b.source.clone(),
                         snippet,
                         match_ranges,
-                        score: 0.0,
+                        // Count of matched tokens, not a real BM25 score —
+                        // see `cold_match`'s doc comment. A coarse but
+                        // meaningful proxy, rather than a flat 0.0 that would
+                        // make every cold hit indistinguishable.
+                        score: matched as f32,
                     });
                     summary.hits += 1;
                     summary.scanned += 1;

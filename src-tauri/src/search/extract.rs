@@ -1,9 +1,18 @@
-//! Extract searchable text from a session JSONL, mirroring the semantics of
-//! `src/lib/parser.ts` (`parseJsonl` + `extractContentBlocks`) so that
-//! `block_no` lines up with the blocks the editor actually renders.
+//! Extract searchable text from a session JSONL, mirroring the entry/block
+//! classification semantics of `src/lib/parser.ts` (`parseJsonl` +
+//! `extractContentBlocks`). `block_no` does **not** line up with the editor's
+//! block numbering: this extractor still counts across all four historical
+//! block types (thinking/text/tool_use/tool_result), while the frontend
+//! (post the Phase-A render-trim, see `ARCHITECTURE.md`) only ever produces
+//! `'text'` blocks. Nothing in the app relies on `block_no` for cross-
+//! referencing or positioning today — jump-to-hit navigates by `uuid` alone,
+//! and `line_no`/`block_no` are only ever used as dedup-key strings — but a
+//! future feature reaching for real block-level positioning should not
+//! assume the two numbering schemes agree.
 //!
 //! The output is a flat list of [`ExtractedBlock`]s — one per searchable
-//! content block — which the indexer bulk-inserts into the `blocks` table.
+//! content block — which the indexer stages into the tantivy full-text index
+//! (see `index.rs`; the extracted text no longer goes into a SQLite table).
 
 use serde_json::Value;
 
@@ -126,8 +135,9 @@ fn extract_tool_result_text(content: Option<&Value>) -> String {
 
 /// Port of `extractContentBlocks`. `text_source` is the entry type ('user' or
 /// 'assistant') used for plain text blocks; thinking/tool_use/tool_result carry
-/// their own source. `block_no` is the index in the *output* block list (only
-/// the four known block types advance it), matching the frontend exactly.
+/// their own source. `block_no` is the index in this extractor's *own* output
+/// block list (all four block types advance it) — see the module doc for why
+/// that no longer matches the frontend's block numbering.
 fn extract_content_blocks(arr: &[Value], text_source: &str) -> Vec<(i64, String, String)> {
     let mut out = Vec::new();
     let mut block_no: i64 = 0;

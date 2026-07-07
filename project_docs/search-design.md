@@ -14,8 +14,12 @@ direction (tracked as issue #5) — it supersedes §2, §9, and parts of §12/§
 that follows it.**
 
 **Deviations from the Phase 1/2 spec below (intentional):**
-- `blocks` gained a **`uuid`** column — the frontend regroups entries into turns and flattens blocks,
-  so raw `line_no` can't locate a hit; `(uuid, block_no)` survives regrouping and drives jump-to-hit.
+- `blocks` gained a **`uuid`** column (historical — the `blocks` table itself is gone as of the v2
+  tantivy rewrite; `uuid` lives on the tantivy schema now, see the v2 section's "Schema" subsection) —
+  the frontend regroups entries into turns and flattens blocks, so raw `line_no` can't locate a hit.
+  **Correction (found in the issue #5 Gate-2 audit):** jump-to-hit actually navigates by `uuid` alone
+  today — `line_no`/`block_no` are only ever used as dedup-key strings, never for positioning, and
+  `block_no`'s own numbering has since diverged from the frontend's (see `extract.rs`'s module doc).
 - The cold tier **scans** un-cached sessions for correctness but does **not** write the cache from the
   read path (avoids write-lock contention); the background indexer warms the cache instead.
 - Search opens a dedicated **read** connection (`db::open_read`, no schema DDL) so it never contends
@@ -62,34 +66,60 @@ distance=1, transposition=true))`, then every token's group is itself OR'd (`Sho
 wrapped in a top-level `BooleanQuery` `Must` alongside the filter clauses (source/tool-name/project as
 `Should`-groups, `ts` as a `RangeQuery`, `session_path` as an exact `TermQuery`). The boost keeps
 exact/near-exact term hits ranked above loosely-fuzzy ones per token, while more matched tokens still
-accumulate more BM25 score than fewer — both properties covered by
-`query::tests::fuzzy_query_finds_typo_and_ranks_exact_above_it`.
+accumulate more BM25 score than fewer — covered by
+`query::tests::fuzzy_query_finds_typo_and_ranks_exact_above_it` (single-token) and
+`query::tests::multi_token_query_ranks_both_tokens_matched_above_one_token_matched` (the multi-token
+case; the single-token test alone couldn't and didn't cover this — the earlier version of this doc
+overclaimed that, found in the issue #5 Gate-2 audit).
 
-**Schema (as built)**: `session_path`/`project`/`uuid`/`source` are `STRING | STORED` (single indexed
-term, exact-match filterable); `text` is `TEXT | STORED` (tokenized, the fuzzy-matched field); `ts` is
-`INDEXED | STORED | FAST`; `line_no`/`block_no` are `STORED` only. A `tool_name` field (`STRING |
+**Short-token fuzzy noise (found + fixed in the Gate-2 audit)**: `FUZZY_DISTANCE=1` applied uniformly to
+every token meant a short/common token (2-3 chars) fuzzy-matched a huge fraction of any real vocabulary
+— empirically, a 2-char query matched nearly every unrelated short word in a small test corpus, all
+bunched at the same low score. Fixed with `query::MIN_FUZZY_TOKEN_LEN = 3`: tokens shorter than that get
+exact-only matching (no fuzzy sibling clause at all), mirroring Elasticsearch's `fuzziness: "AUTO"` floor.
+
+**Schema (as built, tokenizer updated in the Gate-2 audit)**: `session_path`/`project`/`uuid`/`source`
+are `STRING | STORED` (single indexed term, exact-match filterable); `text` is tokenized + `STORED` with
+its own registered tokenizer (`index::TEXT_TOKENIZER = "ccstudio_text"`, `WithFreqsAndPositions`) rather
+than tantivy's built-in `"default"` — **because the built-in `"default"` applies
+`RemoveLongFilter::limit(40)`, silently dropping any token 40+ characters at index time (a git SHA, a
+long hash, a long identifier — routine content in Claude Code chat history) with zero error surfaced
+anywhere.** Our own copy of the same pipeline (`SimpleTokenizer` → `RemoveLongFilter::limit(200)` →
+`LowerCaser`) raises that ceiling to 200 — comfortably past a SHA-256 hex digest (64) or a UUID (36).
+`ts` is `INDEXED | STORED | FAST`; `line_no`/`block_no` are `STORED` only. A `tool_name` field (`STRING |
 STORED`, the first line of a `tool_use` block's text, `""` otherwise) was added so the tool-name filter
 is an exact `TermQuery` instead of emulating the old `LIKE 'name\n%'` prefix scan.
 
-**Migration (as built, not in the original v2 note above — a real gap this build closed)**: this app
-already ships to users with a populated v1 (`blocks` SQLite table + regex scan) cache on disk. Silently
-swapping the matcher would leave their `session_files` fingerprints pointing at files the *new* tantivy
-index has never seen, and the invalidation sweep would treat those fingerprints as "already indexed" and
-skip re-extraction — users would upgrade into an empty search index with nothing to trigger a rebuild.
-Fixed with an `ENGINE_VERSION` marker (`db.rs`) in a new `search_meta` key/value table: on mismatch (or
-on a fresh v1 install with no marker at all), `db::ensure_engine_version` drops the legacy `blocks`
-table, clears every `session_files` fingerprint, and wipes the tantivy index directory — forcing exactly
-one full rebuild into the fresh engine on next launch. A no-op once the marker matches. Simple-and-total
-was chosen deliberately over incremental migration logic, since this cache was always documented as a
-disposable, fully-rebuildable-from-source-JSONL artifact.
+**Migration (as built, updated in the Gate-2 audit)**: this app already ships to users with a populated
+v1 (`blocks` SQLite table + regex scan) cache on disk. Silently swapping the matcher would leave their
+`session_files` fingerprints pointing at files the *new* tantivy index has never seen, and the
+invalidation sweep would treat those fingerprints as "already indexed" and skip re-extraction — users
+would upgrade into an empty search index with nothing to trigger a rebuild. Fixed with an
+`ENGINE_VERSION` marker (`db.rs`) in a new `search_meta` key/value table: on mismatch (or on a fresh v1
+install with no marker at all), `db::ensure_engine_version` drops the legacy `blocks` table, clears every
+`session_files` fingerprint, and wipes the tantivy index directory — forcing exactly one full rebuild
+into the fresh engine on next launch. A no-op once the marker matches. Simple-and-total was chosen
+deliberately over incremental migration logic, since this cache was always documented as a disposable,
+fully-rebuildable-from-source-JSONL artifact. **Gate-2 audit finding closed:** the version string
+`ensure_engine_version` compares is no longer just the hand-maintained `db::ENGINE_VERSION` constant —
+the caller (`state.rs`) now combines it with `index::schema_fingerprint()`, a hash of the tantivy
+schema's serialized field definitions (names, types, indexing options, tokenizer *name*), so most schema
+changes force a rebuild automatically instead of depending on a human remembering to bump
+`ENGINE_VERSION` by hand. `ENGINE_VERSION` itself still needs a manual bump only for the narrower class
+the fingerprint can't see — a tokenizer *parameter* tweak (e.g. changing `MAX_TOKEN_LEN`'s value without
+renaming `TEXT_TOKENIZER`) or a matching-semantics change with no schema-shape footprint at all.
 
-**Cold-tier compromise (as built)**: the cold tier (session files not yet reflected in the tantivy
-index — first launch, or right after an engine-version rebuild) does **not** build a throwaway tantivy
-index per uncached file. It falls back to a simpler case-insensitive substring match requiring every
-query token present (`query::cold_match`) over freshly-extracted blocks, reusing the old windowed-
-snippet/char-boundary logic. This is a deliberately narrower guarantee than the warm tier's fuzzy
-ranking — acceptable because the cold tier is normally empty (the background indexer catches up fast)
-and only a stand-in for "correctness never waits on the index," not a second full matching engine.
+**Cold-tier compromise (as built, semantics fixed in the Gate-2 audit)**: the cold tier (session files
+not yet reflected in the tantivy index — first launch, or right after an engine-version rebuild) does
+**not** build a throwaway tantivy index per uncached file. It falls back to a simpler case-insensitive
+substring match (`query::cold_match`) over freshly-extracted blocks, reusing the old windowed-
+snippet/char-boundary logic. **Gate-2 audit finding closed:** this used to require *every* query token
+present (an AND) while the warm tier is OR-across-tokens by design — same query, a stricter and
+inconsistent result set purely because a file hadn't been swept into the index yet. `cold_match` now
+matches on *any* token present (OR/partial-credit, consistent with the warm tier's philosophy) and
+returns a matched-token count used as the hit's `score` (a coarse relevance proxy, not a real BM25
+recompute — cold hits still stream in file-walk order rather than being re-sorted, an accepted
+simplification since the cold tier is normally empty and the background indexer catches up fast).
 
 **Frontend contract (as built)**: the `search` Tauri command drops the `opts` parameter entirely (no
 `SearchOpts`, no case/whole-word/regex fields anywhere in the Rust API) — not a geek-mode toggle, just
@@ -100,6 +130,23 @@ alongside `TopDocs`) — same field name, an evolved meaning that fits the new e
 always applied (`DEFAULT_LIMIT = 500` when the caller passes `None`), since tantivy's `TopDocs` collector
 needs a concrete top-k rather than the old unbounded regex-scan-and-emit; the frontend already paginates
 in pages of 100, so this was never actually surfaced as unlimited.
+
+**Fuzzy-hit legibility (found + fixed in the Gate-2 audit)**: `search_warm`'s snippet generator only
+highlights a literal substring match, so a fuzzy-only hit (the query term isn't literally in the text —
+e.g. "parser" matching stored "parsr") left `match_ranges` empty: zero visual explanation of why the
+result surfaced, undercutting the point of a fuzzy engine being legible. Fixed with a best-effort
+fallback (`query::fuzzy_highlight`) that scans the excerpt's words for one within edit distance of a
+query token (only tokens at/above `MIN_FUZZY_TOKEN_LEN`, since shorter tokens never went through a fuzzy
+clause) and highlights that instead.
+
+**Indexing indicator under-firing (found + fixed in the Gate-2 audit)**: the frontend's "indexing N/M…"
+indicator (`BrowseView.svelte`) requires `total_sessions > 0`, but `total_sessions` used to stay at its
+zero default for the *entire* first-launch build — `Indexer::update_counts` only ran once, at the end of
+`run_index()`. So the indicator never appeared during exactly the window it matters most (the first
+build, however long it takes for a large corpus). Fixed backend-side: `run_index()` now also calls
+`update_counts()` immediately after marking `building = true`, so `total_sessions` reflects the on-disk
+file count from the very start of a build. No frontend change was needed — the existing condition was
+already correct once the backend actually populated the count it depends on.
 
 **Shared-engine question (prompt library, issue #7)**: prompt-library search has a different tradeoff
 profile (small volume, quality/intent over performance) and is **not** sharing this tantivy engine —

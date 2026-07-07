@@ -16,7 +16,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::Connection;
 use tantivy::directory::MmapDirectory;
-use tantivy::schema::{Field, Schema, FAST, INDEXED, STORED, STRING, TEXT};
+use tantivy::schema::{
+    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, INDEXED, STORED, STRING,
+};
+use tantivy::tokenizer::{LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer};
 use tantivy::{doc, Index, IndexWriter, TantivyDocument, Term};
 
 use super::extract::{extract_blocks, ExtractedBlock};
@@ -24,6 +27,61 @@ use super::extract::{extract_blocks, ExtractedBlock};
 /// Heap budget handed to a tantivy `IndexWriter`. Generous enough for this
 /// app's ~1GB-max corpus without tuning; tantivy spills to disk as needed.
 pub const WRITER_HEAP_BYTES: usize = 50_000_000;
+
+/// Name under which we register our own copy of tantivy's built-in "default"
+/// tokenizer pipeline (`SimpleTokenizer` -> `RemoveLongFilter` -> `LowerCaser`),
+/// with a higher length ceiling — see `MAX_TOKEN_LEN`. Query-side tokenizing
+/// (`query.rs::tokenize`) must look up this same name, or query tokens won't
+/// line up with the terms the index actually stored.
+pub const TEXT_TOKENIZER: &str = "ccstudio_text";
+
+/// tantivy's built-in "default" tokenizer applies `RemoveLongFilter::limit(40)`,
+/// silently dropping — at INDEX time, so no query-time fuzziness can recover it
+/// — any token 40+ characters long. That's routine content for this app's
+/// domain (a git SHA, a long hash, a long identifier pasted into chat), so the
+/// default ceiling made that content permanently unsearchable with no error
+/// surfaced anywhere (caught in the issue #5 Gate-2 audit). 200 comfortably
+/// covers a SHA-256 hex digest (64 chars) or a UUID (36) while still bounding
+/// a pathological single "token" (e.g. a minified blob with no whitespace)
+/// from bloating the index.
+const MAX_TOKEN_LEN: usize = 200;
+
+/// Register [`TEXT_TOKENIZER`] on `index` — every place that opens or creates
+/// an `Index` must do this, since tokenizer *implementations* (unlike the
+/// schema itself) aren't persisted to disk; only the tokenizer *name* is
+/// stored per-field, and the actual pipeline has to be re-registered in
+/// memory each time the process starts. Centralized in `open_index` below so
+/// every caller (production and tests) gets it for free.
+fn register_tokenizer(index: &Index) {
+    let analyzer = TextAnalyzer::builder(SimpleTokenizer::default())
+        .filter(RemoveLongFilter::limit(MAX_TOKEN_LEN))
+        .filter(LowerCaser)
+        .build();
+    index.tokenizers().register(TEXT_TOKENIZER, analyzer);
+}
+
+/// A structural fingerprint of the current [`SearchSchema`] — every field's
+/// name, type, and indexing options (including the tokenizer *name*, so
+/// renaming `TEXT_TOKENIZER` or changing a field's shape both register here)
+/// serialize deterministically, so hashing that catches most schema changes
+/// automatically rather than relying on a human remembering to bump
+/// `db::ENGINE_VERSION` by hand (the actual gap an issue #5 Gate-2 audit
+/// found: nothing tied the version bump to the schema actually changing
+/// shape). This does NOT see a tokenizer *parameter* tweak (e.g. changing
+/// `MAX_TOKEN_LEN`'s value without renaming `TEXT_TOKENIZER`) — the tokenizer
+/// pipeline itself isn't part of the serialized `Schema`, only its name is —
+/// so `db::ENGINE_VERSION` still needs a manual bump for that narrower class
+/// of change.
+pub fn schema_fingerprint() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let schema = SearchSchema::build().schema;
+    let json = serde_json::to_string(&schema).unwrap_or_default();
+    let mut hasher = DefaultHasher::new();
+    json.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
 
 /// Result of an index pass.
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -62,7 +120,16 @@ impl SearchSchema {
         let uuid = b.add_text_field("uuid", STRING | STORED);
         let source = b.add_text_field("source", STRING | STORED);
         let tool_name = b.add_text_field("tool_name", STRING | STORED);
-        let text = b.add_text_field("text", TEXT | STORED);
+        // Same shape as the `TEXT` constant (tokenized, `WithFreqsAndPositions`,
+        // stored) but naming our own tokenizer instead of "default" — see
+        // `TEXT_TOKENIZER`/`MAX_TOKEN_LEN` above.
+        let text_indexing = TextFieldIndexing::default()
+            .set_tokenizer(TEXT_TOKENIZER)
+            .set_index_option(IndexRecordOption::WithFreqsAndPositions);
+        let text_options = TextOptions::default()
+            .set_indexing_options(text_indexing)
+            .set_stored();
+        let text = b.add_text_field("text", text_options);
         let schema = b.build();
         Self {
             schema,
@@ -83,7 +150,9 @@ impl SearchSchema {
 /// [`SearchSchema`]. `dir` must already exist (see `db::tantivy_index_dir`).
 pub fn open_index(dir: &Path, schema: &Schema) -> Result<Index, String> {
     let directory = MmapDirectory::open(dir).map_err(|e| e.to_string())?;
-    Index::open_or_create(directory, schema.clone()).map_err(|e| e.to_string())
+    let index = Index::open_or_create(directory, schema.clone()).map_err(|e| e.to_string())?;
+    register_tokenizer(&index);
+    Ok(index)
 }
 
 fn unix_secs(t: SystemTime) -> i64 {
