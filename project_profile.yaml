@@ -1,0 +1,47 @@
+# project_profile.yaml — Per-project bindings that keep the shared docs neutral.
+#
+# Each key is a value the methodology docs reference in prose as:
+#   "… your <concept> (profile: `<key>`) …"
+# A reader in this project looks the key up here and substitutes the real value.
+# The schema is documented in the corpus:
+#   ai-first-docs/craft/docs/project_profile_reference.mdx
+#
+# FLAT-DOCS MODE. This project mounts the methodology corpus as a FLAT clone at
+# `ai-first-docs/` (craft/, orchestration/, stack/, scripts/ directly under it —
+# no Astro site, no docs/generic_docs/ wrapper). The get-context router reads this
+# file from the repo root; `docs_regen_cmd` below points at the layout-agnostic
+# catalog generator run against that flat content root.
+#
+# Do NOT commit secrets here.
+
+# ── LLM providers ──────────────────────────────────────────────
+build_provider: "" # The default LLM provider for dispatched build sessions
+audited_providers: [] # Providers approved for repo-mutating dispatch (security boundary)
+cold_audit_provider: "" # Provider used for cold-audit / adversarial-review passes
+
+# ── Git / workspace ────────────────────────────────────────────
+integration_branch: "main" # The branch PRs target; the merge-base for worktrees
+check_cmd: "pnpm check && cargo test --lib --manifest-path src-tauri/Cargo.toml" # Full verify suite: SvelteKit type-check (frontend) + Rust unit tests (src-tauri backend)
+lint_fix_cmd: "" # The command that runs the auto-fixer (lint --fix, format, generate types)
+generate_types_cmd: "" # The command that regenerates API types from the backend schema
+docs_regen_cmd: 'python3 "$CLAUDE_PROJECT_DIR/ai-first-docs/.setup/site/mcp_servers/docs_catalog.py" regen --content-root "$CLAUDE_PROJECT_DIR/ai-first-docs"' # Regenerates the flat-mode doc catalog into ai-first-docs/craft/docs/generated_essential_docs.json
+runner_cmd: "" # The project's task-runner prefix (e.g. "uv run cmd", "just")
+vendor_dir: "" # The directory where third-party vendor source lives (e.g. "vendor/")
+workspace_policy: "" # "worktrees" or "in-tree" — how feature work is isolated per session
+worktree_root: "" # Parent directory for worktrees (if workspace_policy=worktrees)
+
+# ── Infrastructure (OPTIONAL — recursive-dispatch infra the kit ships no server for) ──
+# These keys describe an optional self-hosted dispatch MCP server. The kit ships
+# NO dispatch server, so a docs-only adopter can ignore this whole section and
+# leave the values as-is; they apply only if your project runs its own dispatch.
+dispatch_port: 18684 # OPTIONAL. Port a self-hosted dispatch MCP server listens on (one per project). Applies only if your project runs one; pick a free port per project to avoid collisions.
+systemd_unit_name: "" # OPTIONAL. systemd user unit name for a self-hosted dispatch MCP service (e.g. "dispatch-mcp").
+github_repos: # Project source repos available to <GithubLink> and prose citations (profile: `github_repos`)
+  ccdeck: { url: "https://github.com/zhangxingeng/ccdeck", defaultBranch: "main" }
+
+# ── Methodology toggles ───────────────────────────────────────
+# These keys are "applicable-when" — they signal which optional methodology
+# features are active in this project. Docs that describe the feature cite
+# the key as a gating condition.
+venture_phase_active: false # Whether the venture-build phase overlay is in effect
+seam_marker_convention: "SEAM:" # The deferred-integration marker convention string

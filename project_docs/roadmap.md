@@ -198,6 +198,95 @@ name (`cc-deck`-shaped on Linux) that won't collide.
   with the founder first). GitHub keeps a redirect from the old path. Local `origin` remote updated
   to match.
 
+## Phase 8 — get-context docs-routing infra + backend/repo cleanup campaign (DONE, 2026-07-07)
+
+A code-review sweep (svelte-check / cargo check / cargo test / Playwright e2e all green, no TODO
+markers — so findings had to come from an actual read, not tooling) surfaced four groups of real
+issues, filed as **#8-11** and built the same session. Before building them, the **get-context**
+docs-routing subagent was migrated into this repo and wired to actually function.
+
+### get-context infra (flat-docs mode)
+
+- `project_profile.yaml` added at the repo root (previously missing) — `docs_regen_cmd`,
+  `check_cmd`, `github_repos`. Points at a **flat-mode** doc catalog: the corpus at `ai-first-docs/`
+  (a separate git repo, gitignored from ccdeck) has no Astro site wrapper, so the catalog generator
+  (`ai-first-docs/.setup/site/mcp_servers/docs_catalog.py`) and the enrichment util
+  (`ai-first-docs/scripts/get_context_enrich.py`) were made **content-root-aware** (root-cause fix,
+  not a ccdeck-only fork) so both flat and the kit's default nested-Astro layout work off one code
+  path. `.claude/agents/get-context.md` was migrated/adapted to this project (juror_fullstack's
+  paths remapped to the flat layout) — **a Claude Code session restart is required** to register a
+  project-level agent; `/reload-plugins` alone does not.
+- Verified end-to-end by actually dispatching `get-context` on this campaign's own build work — it
+  correctly inferred the manager/worker roles, returned real doc picks, and caught a genuine
+  scheduling bug in the initial plan (see below) — stronger proof than the script-level catalog
+  checks alone.
+- The doc's own now-outdated "blocking dispatch" guidance (claimed no lever forces a synchronous
+  subagent wait, so treat `background: false`/`TaskOutput` as tested-broken workarounds) was
+  corrected in `ai-first-docs/craft/docs/get_context_usage_protocol.mdx`: the real mechanism is
+  simpler — dispatch, **end your turn**, and the subagent's completion fires an inbound event that
+  wakes the caller in a later turn. No trick, no per-call lever needed.
+
+### The cleanup campaign — sequencing
+
+`get-context`'s own routing caught that the naive "4 parallel workers" plan violated the
+file-disjoint parallelism rule (`orchestration/fix_campaign_manager_protocol`): #10 and #11 both
+touch `src-tauri/src/lib.rs`. Regrouped into two file-disjoint streams, run sequentially (not
+worktree-isolated, to respect the pre-commit-stash trap) rather than concurrently:
+
+- **`fix(#8, 360e2b9)`** — stale `roadmap.md` note (Phase 4's "no live entry point" gap was closed by
+  Phase 6 — see above), a dead `toggleSessionOnly()` export in `search.svelte.ts`, and a transitive
+  `cookie@0.6.0` advisory. **Decision:** the fix moved from `package.json`'s `"pnpm"` key (as
+  originally suggested) to `pnpm-workspace.yaml`'s `overrides`, because pnpm 11.9 dropped support
+  for the old location — caught live rather than silently targeting stale syntax.
+- **`test(#9, 1b6ee27)`** — the `tests/*.mjs` smoke suite (~200 assertions, `parser.ts`/`builder.ts`/
+  `sessionOps.ts`/`diff.ts`/`displayModel.ts`) previously only ran via manual `npx tsx`, invisible to
+  CI. Added a `pnpm test:smoke` script (+ pinned `tsx` devDependency), a CI step, and a
+  `CONTRIBUTING.md` checklist line.
+- **`fix(#10, 2e35c44)`** — `list_sessions`'s hand-rolled JSONL scanner (`json_str_after`) mangled
+  `\uXXXX`/`\/` escapes and wasn't scoped to the top level (a nested `"type":"..."` substring could
+  misclassify a line). **Decision: replaced with `serde_json`** (already a direct dependency) parsing
+  each line once into a small `#[serde(default)]` struct — fixes both bugs in one idiomatic move.
+  The write-side `json_replace_str_value` was deliberately left as a surgical string edit (round-
+  tripping through serde would reformat lines the real Claude Code CLI also reads).
+- **`fix(#11, 8f5105f)`** — two unenforced behavioral contracts: `write_claude_settings` had no
+  read-modify-write guard (a concurrent external write got silently clobbered); `write_session`'s
+  "caller MUST snapshot first" doc comment was never checked. **Decision: fix both.** Added an
+  optimistic RMW guard (base-version = the tier's last-read raw text; a mismatch returns a
+  `CONFLICT:`-prefixed error, surfaced in `SettingsView.svelte` as a dismissible reload banner) and
+  `ensure_snapshotted` (a smart no-op-if-already-backed-up guard inside `write_session`).
+
+### Backup simplification (founder request, same session, `refactor`, `ab69b17`)
+
+The founder asked to simplify session-file backups from an unbounded version history (`vNNN-*.jsonl`
+per edit, forever) to **exactly one overwritten backup slot per session**, refreshed **only** on an
+explicit Save-confirm in `SessionEditor.svelte` — not automatically from any other write path. This
+**reverted part of #11**: `ensure_snapshotted`'s automatic call inside `write_session` had
+unintentionally given `sessionOps.ts`'s `renameSession` a backup it deliberately never wanted
+("low-stakes", per its own comment). `ensure_snapshotted` was removed entirely; `snapshot_at` now
+clears the session's backup directory before writing the single new file, so `list_backups`
+naturally returns 0 or 1 entries with **no type/API change** (the frontend's existing `{#each}` loop
+handles that generically). The settings RMW guard from #11 is unrelated and was left untouched.
+
+**This also corrected issue #6** (chat-viewer trim), which had specced *removing* the backup
+mechanism entirely — now updated to say keep the single-slot backup (already implemented, not part
+of that future teardown), with one open call flagged for whoever picks up #6: whether
+`SessionEditor.svelte`'s restore-UI (`showHistoryModal`) survives as a user-facing affordance, or the
+backup becomes a purely silent safety net.
+
+### Standing preference (recorded in `.claude/memory/MEMORY.md`)
+
+Always target the latest toolchain/dependency versions — fix forward (`pnpm upgrade --latest`,
+`cargo update`, `rustup update`), don't code around an older one. A broad dependency bump is still
+its own reviewable change, confirmed before running unprompted mid-task.
+
+### Verification (Phase 8)
+
+`cargo test --lib`: 39/39 (net of removing 4 now-obsolete tests, adding 6 new ones across the
+campaign). `cargo check` clean. `pnpm check`: 0 errors/warnings. `pnpm exec playwright test`: 7/7.
+`pnpm test:smoke`: 200/200 assertions. Every commit's file scope was independently re-verified
+(re-running the tests myself, not just trusting each build agent's own report) before being counted
+done.
+
 ## Verification performed
 
 - `cargo test --lib` (src-tauri): 30/30 passing.

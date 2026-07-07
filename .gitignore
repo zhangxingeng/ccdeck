@@ -9,8 +9,12 @@ node_modules
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
-# Local Claude session data accidentally inside the repo dir
-.claude/
+# Claude Code project config: track settings.json + memory/MEMORY.md (they travel with the
+# repo); ignore local overrides and ephemeral/session state.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/memory/*
+!.claude/memory/MEMORY.md
 
 # Real chat history must never be committed (mock fixtures under tests/ are fine)
 *.jsonl
