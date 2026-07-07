@@ -47,7 +47,7 @@ pub struct SubagentFile {
     pub is_meta: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct BackupVersion {
     pub version: u32,
     pub timestamp: u64,
@@ -421,45 +421,29 @@ fn read_subagents(session_path: String) -> Result<Vec<SubagentFile>, String> {
     Ok(files)
 }
 
-/// Overwrite the original .jsonl.  Caller MUST call snapshot(path) first.
-#[tauri::command]
-fn write_session(
-    state: tauri::State<'_, search::state::SearchState>,
-    path: String,
-    content: String,
-) -> Result<(), String> {
-    fs::write(&path, content).map_err(|e| e.to_string())?;
-    // Eager reindex so search reflects the edit immediately (the lazy sweep
-    // would catch it eventually, but this keeps results in step with Save).
-    state.indexer().reindex_one(&path);
-    Ok(())
+/// Resolve `<backup-root>/<sanitized-session-id>` for `path`, requiring it be
+/// under `projects`. Shared by [`snapshot_at`] and [`list_backups_at`].
+fn backup_root_for(projects: &Path, home: &Path, path: &str) -> Result<PathBuf, String> {
+    let file_path = Path::new(path);
+    let rel = file_path
+        .strip_prefix(projects)
+        .map_err(|_| "Session file is not under the projects directory".to_string())?;
+    let session_id = sanitize_id(&rel.to_string_lossy());
+    Ok(home.join(".claude").join(".ccstudio-backups").join(&session_id))
 }
 
-/// Copy the current on-disk file into the backup store before an override.
+/// Copy the current on-disk file into the backup store before an override,
+/// resolving paths against `projects`/`home` (parameterized so this is
+/// testable without touching `CLAUDE_CONFIG_DIR`/`HOME`; the `#[tauri::command]`
+/// wrapper below resolves the real ones).
 ///
 /// Backup location:
 ///   ~/.claude/.ccstudio-backups/<sanitized_session_id>/vNNN-<unixsecs>.jsonl
 ///
 /// NNN is 1-based and grows by counting existing *.jsonl files in the dir.
-#[tauri::command]
-fn snapshot(path: String) -> Result<BackupVersion, String> {
-    let projects = projects_dir_inner()
-        .ok_or_else(|| "Projects directory not found".to_string())?;
-
-    let file_path = Path::new(&path);
-
-    let rel = file_path
-        .strip_prefix(&projects)
-        .map_err(|_| "Session file is not under the projects directory".to_string())?;
-
-    let session_id = sanitize_id(&rel.to_string_lossy());
-
-    let home = dirs::home_dir()
-        .ok_or_else(|| "Cannot determine home directory".to_string())?;
-    let backup_root = home
-        .join(".claude")
-        .join(".ccstudio-backups")
-        .join(&session_id);
+fn snapshot_at(projects: &Path, home: &Path, path: &str) -> Result<BackupVersion, String> {
+    let file_path = Path::new(path);
+    let backup_root = backup_root_for(projects, home, path)?;
 
     fs::create_dir_all(&backup_root).map_err(|e| e.to_string())?;
 
@@ -496,24 +480,18 @@ fn snapshot(path: String) -> Result<BackupVersion, String> {
     })
 }
 
-/// List all snapshots for a session, newest first.
 #[tauri::command]
-fn list_backups(session_path: String) -> Result<Vec<BackupVersion>, String> {
+fn snapshot(path: String) -> Result<BackupVersion, String> {
     let projects = projects_dir_inner()
         .ok_or_else(|| "Projects directory not found".to_string())?;
+    let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
+    snapshot_at(&projects, &home, &path)
+}
 
-    let file_path = Path::new(&session_path);
-    let rel = file_path
-        .strip_prefix(&projects)
-        .map_err(|_| "Session file is not under the projects directory".to_string())?;
-    let session_id = sanitize_id(&rel.to_string_lossy());
-
-    let home = dirs::home_dir()
-        .ok_or_else(|| "Cannot determine home directory".to_string())?;
-    let backup_root = home
-        .join(".claude")
-        .join(".ccstudio-backups")
-        .join(&session_id);
+/// List all snapshots for a session, newest first. See [`snapshot_at`] for why
+/// this is parameterized on `projects`/`home`.
+fn list_backups_at(projects: &Path, home: &Path, session_path: &str) -> Result<Vec<BackupVersion>, String> {
+    let backup_root = backup_root_for(projects, home, session_path)?;
 
     if !backup_root.is_dir() {
         return Ok(Vec::new());
@@ -549,6 +527,77 @@ fn list_backups(session_path: String) -> Result<Vec<BackupVersion>, String> {
     versions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
     Ok(versions)
+}
+
+#[tauri::command]
+fn list_backups(session_path: String) -> Result<Vec<BackupVersion>, String> {
+    let projects = projects_dir_inner()
+        .ok_or_else(|| "Projects directory not found".to_string())?;
+    let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
+    list_backups_at(&projects, &home, &session_path)
+}
+
+/// Guarantee a backup exists for `path`'s *current* on-disk content before it
+/// gets overwritten — the enforcement mechanism behind `write_session`'s
+/// "snapshot before write" precondition (see its doc comment). Parameterized
+/// on `projects`/`home` like [`snapshot_at`], for testability.
+///
+/// - If `path` doesn't exist yet (a brand-new file, e.g. Save-as-copy), there
+///   is nothing to back up — no-op.
+/// - If the newest existing backup's content already matches what's on disk
+///   right now, the caller already snapshotted this exact content (the
+///   documented, expected sequence: call `snapshot(path)` immediately before
+///   `write_session`) — no-op, so this never creates a redundant duplicate.
+/// - Otherwise (no backup yet, or the latest one is stale) a fresh snapshot is
+///   taken on the caller's behalf, so the precondition can never silently be
+///   skipped by a caller that forgets.
+/// - If `projects`/`home` aren't resolvable at all, this is a best-effort
+///   no-op (matches the pre-existing behavior of `write_session`, which never
+///   required a resolvable projects dir).
+fn ensure_snapshotted(projects: Option<&Path>, home: Option<&Path>, path: &str) -> Result<(), String> {
+    let file_path = Path::new(path);
+    if !file_path.exists() {
+        return Ok(());
+    }
+    let (Some(projects), Some(home)) = (projects, home) else {
+        return Ok(());
+    };
+
+    let current = fs::read_to_string(file_path).map_err(|e| e.to_string())?;
+    let already_backed_up = list_backups_at(projects, home, path)
+        .ok()
+        .and_then(|versions| versions.first().cloned())
+        .and_then(|newest| fs::read_to_string(&newest.path).ok())
+        .map(|latest_content| latest_content == current)
+        .unwrap_or(false);
+
+    if already_backed_up {
+        return Ok(());
+    }
+
+    snapshot_at(projects, home, path)?;
+    Ok(())
+}
+
+/// Overwrite the original .jsonl. Guarantees a pre-write backup exists for any
+/// path that currently has content (via [`ensure_snapshotted`]): if the caller
+/// already snapshotted the current bytes (the expected sequence — call
+/// `snapshot(path)` immediately before this), that backup is reused; if not,
+/// one is taken automatically here so the precondition can never silently be
+/// skipped. No backup is made for a path with no existing content (a
+/// brand-new file, e.g. Save-as-copy).
+#[tauri::command]
+fn write_session(
+    state: tauri::State<'_, search::state::SearchState>,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    ensure_snapshotted(projects_dir_inner().as_deref(), dirs::home_dir().as_deref(), &path)?;
+    fs::write(&path, content).map_err(|e| e.to_string())?;
+    // Eager reindex so search reflects the edit immediately (the lazy sweep
+    // would catch it eventually, but this keeps results in step with Save).
+    state.indexer().reindex_one(&path);
+    Ok(())
 }
 
 /// Return raw contents of a backup file (caller decides what to do with it).
@@ -904,6 +953,97 @@ mod session_scan_tests {
         );
         let stats = scan_session_lines(content);
         assert_eq!(stats.models, vec!["claude-a".to_string(), "claude-b".to_string()], "distinct models, first-seen order");
+    }
+}
+
+#[cfg(test)]
+mod write_session_snapshot_tests {
+    use super::*;
+
+    /// Returns (base dir to clean up, projects root, home dir), with a fresh
+    /// `<projects>/proj1/` directory already created — parameterized so these
+    /// tests never touch the real `CLAUDE_CONFIG_DIR`/`HOME`.
+    fn setup() -> (PathBuf, PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "ccstudio-snapshot-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let home = base.join("home");
+        let projects = home.join(".claude").join("projects");
+        fs::create_dir_all(projects.join("proj1")).unwrap();
+        (base, projects, home)
+    }
+
+    #[test]
+    fn ensure_snapshotted_auto_snapshots_when_caller_forgot() {
+        let (base, projects, home) = setup();
+        let session = projects.join("proj1").join("session.jsonl");
+        fs::write(&session, "original content\n").unwrap();
+        let session_path = session.to_string_lossy().into_owned();
+
+        // No snapshot() call happened first — this simulates a future caller
+        // of write_session that forgets the documented precondition.
+        ensure_snapshotted(Some(&projects), Some(&home), &session_path).unwrap();
+
+        let backups = list_backups_at(&projects, &home, &session_path).unwrap();
+        assert_eq!(backups.len(), 1, "a snapshot must be taken automatically, not silently skipped");
+        assert_eq!(fs::read_to_string(&backups[0].path).unwrap(), "original content\n");
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn ensure_snapshotted_is_a_noop_when_caller_already_snapshotted() {
+        let (base, projects, home) = setup();
+        let session = projects.join("proj1").join("session.jsonl");
+        fs::write(&session, "original content\n").unwrap();
+        let session_path = session.to_string_lossy().into_owned();
+
+        // Caller follows the documented sequence: snapshot(path) immediately
+        // before write_session.
+        snapshot_at(&projects, &home, &session_path).unwrap();
+        ensure_snapshotted(Some(&projects), Some(&home), &session_path).unwrap();
+
+        let backups = list_backups_at(&projects, &home, &session_path).unwrap();
+        assert_eq!(backups.len(), 1, "must not create a redundant duplicate backup");
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn ensure_snapshotted_is_a_noop_for_a_brand_new_file() {
+        let (base, projects, home) = setup();
+        // A path that doesn't exist yet — e.g. "Save as copy" writing a new file.
+        let new_path = projects.join("proj1").join("not-yet-written.jsonl");
+        let new_path_str = new_path.to_string_lossy().into_owned();
+
+        ensure_snapshotted(Some(&projects), Some(&home), &new_path_str).unwrap();
+
+        let backups = list_backups_at(&projects, &home, &new_path_str).unwrap();
+        assert!(backups.is_empty(), "nothing to back up for a file that doesn't exist yet");
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn ensure_snapshotted_takes_a_fresh_snapshot_when_disk_content_changed_since_last_backup() {
+        let (base, projects, home) = setup();
+        let session = projects.join("proj1").join("session.jsonl");
+        let session_path = session.to_string_lossy().into_owned();
+
+        fs::write(&session, "v1 content\n").unwrap();
+        snapshot_at(&projects, &home, &session_path).unwrap();
+
+        // Content changes on disk without an explicit fresh snapshot.
+        fs::write(&session, "v2 content\n").unwrap();
+        ensure_snapshotted(Some(&projects), Some(&home), &session_path).unwrap();
+
+        let backups = list_backups_at(&projects, &home, &session_path).unwrap();
+        assert_eq!(backups.len(), 2, "the stale backup must not be reused; a fresh one is taken");
+        let v2_backup = backups.iter().find(|b| b.version == 2).expect("a second backup must exist");
+        assert_eq!(fs::read_to_string(&v2_backup.path).unwrap(), "v2 content\n");
+
+        fs::remove_dir_all(&base).unwrap();
     }
 }
 

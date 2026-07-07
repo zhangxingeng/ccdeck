@@ -211,17 +211,33 @@ export async function readClaudeSettings(projectCwd: string | null): Promise<Cla
   return call<ClaudeSettings>('read_claude_settings', { projectCwd });
 }
 
-/** Write exactly one tier's settings file. Never merges. */
+/** Write exactly one tier's settings file. Never merges.
+ *
+ *  `baseVersion` is the exact `raw` text last read for this tier (a
+ *  `SettingsTierData.raw` from `readClaudeSettings`, `''` if the tier didn't
+ *  exist yet) — the backend's optimistic read-modify-write guard. If the file
+ *  changed on disk since then (e.g. the `claude` CLI wrote it concurrently),
+ *  the write is refused with a `CONFLICT: ...`-prefixed error instead of
+ *  silently overwriting the external change; callers should catch that and
+ *  prompt the user to reload rather than retry as-is. */
 export async function writeClaudeSettings(
   tier: SettingsTier,
   projectCwd: string | null,
-  value: Record<string, unknown>
+  value: Record<string, unknown>,
+  baseVersion: string
 ): Promise<void> {
   if (!isTauri()) {
     devSettingsStore[`${tier}:${projectCwd ?? ''}`] = value;
     return;
   }
-  await call<null>('write_claude_settings', { tier, projectCwd, value });
+  await call<null>('write_claude_settings', { tier, projectCwd, value, baseVersion });
+}
+
+/** True if an error thrown by `writeClaudeSettings` is the optimistic
+ *  read-modify-write conflict (settings changed on disk since last read). */
+export function isSettingsConflict(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return msg.startsWith('CONFLICT');
 }
 
 // ---------------------------------------------------------------------------

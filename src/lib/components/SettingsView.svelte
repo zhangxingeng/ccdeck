@@ -11,7 +11,7 @@
    */
   import { onMount } from 'svelte';
   import type { ClaudeSettings, SettingsTier, AppConfig } from '$lib/types';
-  import { readClaudeSettings, writeClaudeSettings, getAppConfig, setAppConfig } from '$lib/api';
+  import { readClaudeSettings, writeClaudeSettings, isSettingsConflict, getAppConfig, setAppConfig } from '$lib/api';
   import schema from '$lib/schema/claude-code-settings.json';
 
   let {
@@ -59,6 +59,9 @@
   let fieldErrors = $state<Record<string, string>>({});
   let saveMsg = $state<string | null>(null);
   let saveMsgTimer: ReturnType<typeof setTimeout> | null = null;
+  // Set when a save is refused because the file changed on disk since we last
+  // read it (another writer — e.g. the `claude` CLI — got there first).
+  let saveConflictMsg = $state<string | null>(null);
 
   const TIER_LABEL: Record<SettingsTier, string> = {
     local: 'Local (this machine)',
@@ -176,13 +179,24 @@
 
   async function save(): Promise<void> {
     if (Object.keys(fieldErrors).length > 0) return;
+    const baseVersion = settings?.tiers.find((t) => t.tier === selectedTier)?.raw ?? '';
     try {
-      await writeClaudeSettings(selectedTier, projectCwd, working[selectedTier] ?? {});
+      await writeClaudeSettings(selectedTier, projectCwd, working[selectedTier] ?? {}, baseVersion);
+      saveConflictMsg = null;
       showSaved('Saved');
       await load();
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      if (isSettingsConflict(e)) {
+        saveConflictMsg = `${TIER_LABEL[selectedTier]} settings changed on disk since this was loaded — reload to see the latest version before saving again.`;
+      } else {
+        loadError = e instanceof Error ? e.message : String(e);
+      }
     }
+  }
+
+  async function reloadAfterConflict(): Promise<void> {
+    saveConflictMsg = null;
+    await load();
   }
 
   function discard(): void {
@@ -292,6 +306,14 @@
         </fieldset>
       {/if}
     </div>
+
+    <!-- ── Save conflict banner ─────────────────────────────────────────── -->
+    {#if saveConflictMsg}
+      <div class="conflicts">
+        <div class="conflicts__title">⚠ Save refused — {saveConflictMsg}</div>
+        <button class="btn btn--ghost btn--sm" onclick={reloadAfterConflict} type="button">Reload</button>
+      </div>
+    {/if}
 
     <!-- ── Save bar ──────────────────────────────────────────────────────── -->
     <div class="save-bar">

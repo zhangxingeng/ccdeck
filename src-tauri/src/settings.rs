@@ -241,26 +241,70 @@ pub fn read_claude_settings(project_cwd: Option<String>) -> Result<ClaudeSetting
     read_settings_at(&user_dir, project_cwd.as_deref())
 }
 
+/// Read a tier file's current raw text for the optimistic-concurrency check,
+/// treating a missing file as `""` — the same convention [`read_tier`] uses
+/// for `raw` when `exists` is false, so a base version captured from a prior
+/// [`read_claude_settings`] call (whose tier didn't exist yet) compares equal
+/// to a still-missing file.
+fn current_raw(path: &Path) -> Result<String, String> {
+    if path.is_file() {
+        std::fs::read_to_string(path).map_err(|e| e.to_string())
+    } else {
+        Ok(String::new())
+    }
+}
+
+/// Core writer, parameterized on the user dir so it's testable without touching
+/// the global `CLAUDE_CONFIG_DIR`/`HOME` env (mirrors [`read_settings_at`]).
+///
+/// **Precondition (optimistic read-modify-write guard):** `base_version` must
+/// be the exact `raw` text the caller last read for this tier via
+/// [`read_settings_at`] / [`read_claude_settings`] (`""` if the tier didn't
+/// exist yet). Before writing, this re-reads the file on disk; if its current
+/// raw text no longer equals `base_version` — e.g. the `claude` CLI itself
+/// wrote this file concurrently — the write is refused with a
+/// `"CONFLICT: ..."`-prefixed error instead of silently clobbering the
+/// external change. The frontend should surface that error and prompt a
+/// reload rather than retry the write as-is.
+fn write_settings_at(
+    user_dir: &Path,
+    tier: &str,
+    project_cwd: Option<&str>,
+    value: &Value,
+    base_version: &str,
+) -> Result<(), String> {
+    if !value.is_object() {
+        return Err("Settings must be a JSON object".to_string());
+    }
+    let path = tier_path(user_dir, tier, project_cwd)?;
+
+    if current_raw(&path)? != base_version {
+        return Err(
+            "CONFLICT: settings changed on disk — reload before saving".to_string(),
+        );
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut pretty = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    pretty.push('\n'); // trailing newline, like an editor would leave
+    std::fs::write(&path, pretty).map_err(|e| e.to_string())
+}
+
 /// Write exactly one tier's settings file, pretty-printed. Never merges — the
 /// caller edited this tier and this tier alone. Creates the `.claude/` directory
-/// if it doesn't exist yet.
+/// if it doesn't exist yet. See [`write_settings_at`] for the read-modify-write
+/// guard this now enforces.
 #[tauri::command]
 pub fn write_claude_settings(
     tier: String,
     project_cwd: Option<String>,
     value: Value,
+    base_version: String,
 ) -> Result<(), String> {
-    if !value.is_object() {
-        return Err("Settings must be a JSON object".to_string());
-    }
     let user_dir = user_claude_dir().ok_or("Cannot determine home directory")?;
-    let path = tier_path(&user_dir, &tier, project_cwd.as_deref())?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let mut pretty = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
-    pretty.push('\n'); // trailing newline, like an editor would leave
-    std::fs::write(&path, pretty).map_err(|e| e.to_string())
+    write_settings_at(&user_dir, &tier, project_cwd.as_deref(), &value, &base_version)
 }
 
 #[cfg(test)]
@@ -405,6 +449,96 @@ mod tests {
         assert!(s.tiers[0].exists);
         assert!(s.tiers[0].parsed.is_none());
         assert!(s.tiers[0].parse_error.is_some());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── write_settings_at: optimistic read-modify-write guard ──────────────
+
+    #[test]
+    fn write_succeeds_when_base_version_matches_current_disk_content() {
+        let base = std::env::temp_dir().join(format!(
+            "ccstudio-settings-rmw-ok-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let user_dir = base.join(".claude");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        let settings_path = user_dir.join("settings.json");
+        std::fs::write(&settings_path, r#"{"model":"opus"}"#).unwrap();
+
+        // Simulates the frontend's last read: capture the exact raw text on disk.
+        let base_version = std::fs::read_to_string(&settings_path).unwrap();
+
+        let result = write_settings_at(
+            &user_dir,
+            "user",
+            None,
+            &json!({"model": "sonnet"}),
+            &base_version,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        let written = std::fs::read_to_string(&settings_path).unwrap();
+        assert!(written.contains("\"model\": \"sonnet\""));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn write_returns_conflict_instead_of_clobbering_an_external_change() {
+        let base = std::env::temp_dir().join(format!(
+            "ccstudio-settings-rmw-conflict-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let user_dir = base.join(".claude");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        let settings_path = user_dir.join("settings.json");
+        std::fs::write(&settings_path, r#"{"model":"opus"}"#).unwrap();
+
+        // The frontend read this stale content...
+        let stale_base_version = std::fs::read_to_string(&settings_path).unwrap();
+
+        // ...then something else (e.g. the real `claude` CLI) wrote the file
+        // concurrently, before our write lands.
+        std::fs::write(&settings_path, r#"{"model":"opus","theme":"dark"}"#).unwrap();
+
+        let result = write_settings_at(
+            &user_dir,
+            "user",
+            None,
+            &json!({"model": "sonnet"}),
+            &stale_base_version,
+        );
+        let err = result.expect_err("a concurrent external change must be detected");
+        assert!(err.starts_with("CONFLICT"), "unexpected error: {err}");
+
+        // The external writer's content must survive untouched — no clobber.
+        let on_disk = std::fs::read_to_string(&settings_path).unwrap();
+        assert_eq!(on_disk, r#"{"model":"opus","theme":"dark"}"#);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn write_succeeds_for_a_brand_new_tier_with_empty_base_version() {
+        let base = std::env::temp_dir().join(format!(
+            "ccstudio-settings-rmw-new-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let proj = base.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let user_dir = base.join(".claude"); // does not exist yet
+
+        // No file has ever existed for this tier — read_tier's `raw` for a
+        // missing file is "", so that's the base version a first-ever save
+        // would carry.
+        let result = write_settings_at(
+            &user_dir,
+            "project",
+            Some(proj.to_string_lossy().as_ref()),
+            &json!({"model": "haiku"}),
+            "",
+        );
+        assert!(result.is_ok(), "{result:?}");
+        let written =
+            std::fs::read_to_string(proj.join(".claude").join("settings.json")).unwrap();
+        assert!(written.contains("\"model\": \"haiku\""));
         let _ = std::fs::remove_dir_all(&base);
     }
 }
