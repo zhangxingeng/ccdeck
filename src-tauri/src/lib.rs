@@ -437,30 +437,29 @@ fn backup_root_for(projects: &Path, home: &Path, path: &str) -> Result<PathBuf, 
 /// testable without touching `CLAUDE_CONFIG_DIR`/`HOME`; the `#[tauri::command]`
 /// wrapper below resolves the real ones).
 ///
-/// Backup location:
-///   ~/.claude/.ccstudio-backups/<sanitized_session_id>/vNNN-<unixsecs>.jsonl
+/// There is exactly one backup slot per session — any existing backup file(s)
+/// in the session's backup directory are deleted before the new one is
+/// written, so a call to this function never leaves more than one file
+/// behind.
 ///
-/// NNN is 1-based and grows by counting existing *.jsonl files in the dir.
+/// Backup location:
+///   ~/.claude/.ccstudio-backups/<sanitized_session_id>/v001-<unixsecs>.jsonl
 fn snapshot_at(projects: &Path, home: &Path, path: &str) -> Result<BackupVersion, String> {
     let file_path = Path::new(path);
     let backup_root = backup_root_for(projects, home, path)?;
 
     fs::create_dir_all(&backup_root).map_err(|e| e.to_string())?;
 
-    // Count existing *.jsonl snapshots to derive the next version number.
-    let existing_count = fs::read_dir(&backup_root)
-        .map_err(|e| e.to_string())?
-        .flatten()
-        .filter(|e| {
-            e.path()
-                .extension()
-                .and_then(|x| x.to_str())
-                .map(|x| x == "jsonl")
-                .unwrap_or(false)
-        })
-        .count();
+    // Single-slot backup: clear out anything already in the directory before
+    // writing the new one, so exactly one file exists afterward.
+    for entry in fs::read_dir(&backup_root).map_err(|e| e.to_string())?.flatten() {
+        let entry_path = entry.path();
+        if entry_path.is_file() {
+            fs::remove_file(&entry_path).map_err(|e| e.to_string())?;
+        }
+    }
 
-    let version = (existing_count as u32) + 1;
+    let version = 1;
     let timestamp = unix_secs(SystemTime::now());
 
     let backup_name = format!("v{:03}-{}.jsonl", version, timestamp);
@@ -488,8 +487,11 @@ fn snapshot(path: String) -> Result<BackupVersion, String> {
     snapshot_at(&projects, &home, &path)
 }
 
-/// List all snapshots for a session, newest first. See [`snapshot_at`] for why
-/// this is parameterized on `projects`/`home`.
+/// List the session's backup(s), newest first. Since [`snapshot_at`] keeps
+/// only a single backup slot, this returns at most one entry — the `Vec`
+/// return shape is kept as-is since the frontend's list rendering already
+/// handles it generically. See [`snapshot_at`] for why this is parameterized
+/// on `projects`/`home`.
 fn list_backups_at(projects: &Path, home: &Path, session_path: &str) -> Result<Vec<BackupVersion>, String> {
     let backup_root = backup_root_for(projects, home, session_path)?;
 
@@ -537,63 +539,24 @@ fn list_backups(session_path: String) -> Result<Vec<BackupVersion>, String> {
     list_backups_at(&projects, &home, &session_path)
 }
 
-/// Guarantee a backup exists for `path`'s *current* on-disk content before it
-/// gets overwritten — the enforcement mechanism behind `write_session`'s
-/// "snapshot before write" precondition (see its doc comment). Parameterized
-/// on `projects`/`home` like [`snapshot_at`], for testability.
-///
-/// - If `path` doesn't exist yet (a brand-new file, e.g. Save-as-copy), there
-///   is nothing to back up — no-op.
-/// - If the newest existing backup's content already matches what's on disk
-///   right now, the caller already snapshotted this exact content (the
-///   documented, expected sequence: call `snapshot(path)` immediately before
-///   `write_session`) — no-op, so this never creates a redundant duplicate.
-/// - Otherwise (no backup yet, or the latest one is stale) a fresh snapshot is
-///   taken on the caller's behalf, so the precondition can never silently be
-///   skipped by a caller that forgets.
-/// - If `projects`/`home` aren't resolvable at all, this is a best-effort
-///   no-op (matches the pre-existing behavior of `write_session`, which never
-///   required a resolvable projects dir).
-fn ensure_snapshotted(projects: Option<&Path>, home: Option<&Path>, path: &str) -> Result<(), String> {
-    let file_path = Path::new(path);
-    if !file_path.exists() {
-        return Ok(());
-    }
-    let (Some(projects), Some(home)) = (projects, home) else {
-        return Ok(());
-    };
-
-    let current = fs::read_to_string(file_path).map_err(|e| e.to_string())?;
-    let already_backed_up = list_backups_at(projects, home, path)
-        .ok()
-        .and_then(|versions| versions.first().cloned())
-        .and_then(|newest| fs::read_to_string(&newest.path).ok())
-        .map(|latest_content| latest_content == current)
-        .unwrap_or(false);
-
-    if already_backed_up {
-        return Ok(());
-    }
-
-    snapshot_at(projects, home, path)?;
-    Ok(())
+/// Overwrite the original .jsonl. By convention, a caller that's overwriting
+/// existing content calls `snapshot(path)` immediately before this (see
+/// SessionEditor.svelte's confirmSave/exitSave/confirmRestoreBackup) — this
+/// function does not take or enforce that backup itself, it's a plain
+/// overwrite. Split out from the `#[tauri::command]` wrapper (which also
+/// needs `SearchState`) so the write itself is unit-testable, matching
+/// [`snapshot_at`]/[`list_backups_at`]'s parameterized-for-testability shape.
+fn write_session_at(path: &str, content: &str) -> Result<(), String> {
+    fs::write(path, content).map_err(|e| e.to_string())
 }
 
-/// Overwrite the original .jsonl. Guarantees a pre-write backup exists for any
-/// path that currently has content (via [`ensure_snapshotted`]): if the caller
-/// already snapshotted the current bytes (the expected sequence — call
-/// `snapshot(path)` immediately before this), that backup is reused; if not,
-/// one is taken automatically here so the precondition can never silently be
-/// skipped. No backup is made for a path with no existing content (a
-/// brand-new file, e.g. Save-as-copy).
 #[tauri::command]
 fn write_session(
     state: tauri::State<'_, search::state::SearchState>,
     path: String,
     content: String,
 ) -> Result<(), String> {
-    ensure_snapshotted(projects_dir_inner().as_deref(), dirs::home_dir().as_deref(), &path)?;
-    fs::write(&path, content).map_err(|e| e.to_string())?;
+    write_session_at(&path, &content)?;
     // Eager reindex so search reflects the edit immediately (the lazy sweep
     // would catch it eventually, but this keeps results in step with Save).
     state.indexer().reindex_one(&path);
@@ -975,58 +938,7 @@ mod write_session_snapshot_tests {
     }
 
     #[test]
-    fn ensure_snapshotted_auto_snapshots_when_caller_forgot() {
-        let (base, projects, home) = setup();
-        let session = projects.join("proj1").join("session.jsonl");
-        fs::write(&session, "original content\n").unwrap();
-        let session_path = session.to_string_lossy().into_owned();
-
-        // No snapshot() call happened first — this simulates a future caller
-        // of write_session that forgets the documented precondition.
-        ensure_snapshotted(Some(&projects), Some(&home), &session_path).unwrap();
-
-        let backups = list_backups_at(&projects, &home, &session_path).unwrap();
-        assert_eq!(backups.len(), 1, "a snapshot must be taken automatically, not silently skipped");
-        assert_eq!(fs::read_to_string(&backups[0].path).unwrap(), "original content\n");
-
-        fs::remove_dir_all(&base).unwrap();
-    }
-
-    #[test]
-    fn ensure_snapshotted_is_a_noop_when_caller_already_snapshotted() {
-        let (base, projects, home) = setup();
-        let session = projects.join("proj1").join("session.jsonl");
-        fs::write(&session, "original content\n").unwrap();
-        let session_path = session.to_string_lossy().into_owned();
-
-        // Caller follows the documented sequence: snapshot(path) immediately
-        // before write_session.
-        snapshot_at(&projects, &home, &session_path).unwrap();
-        ensure_snapshotted(Some(&projects), Some(&home), &session_path).unwrap();
-
-        let backups = list_backups_at(&projects, &home, &session_path).unwrap();
-        assert_eq!(backups.len(), 1, "must not create a redundant duplicate backup");
-
-        fs::remove_dir_all(&base).unwrap();
-    }
-
-    #[test]
-    fn ensure_snapshotted_is_a_noop_for_a_brand_new_file() {
-        let (base, projects, home) = setup();
-        // A path that doesn't exist yet — e.g. "Save as copy" writing a new file.
-        let new_path = projects.join("proj1").join("not-yet-written.jsonl");
-        let new_path_str = new_path.to_string_lossy().into_owned();
-
-        ensure_snapshotted(Some(&projects), Some(&home), &new_path_str).unwrap();
-
-        let backups = list_backups_at(&projects, &home, &new_path_str).unwrap();
-        assert!(backups.is_empty(), "nothing to back up for a file that doesn't exist yet");
-
-        fs::remove_dir_all(&base).unwrap();
-    }
-
-    #[test]
-    fn ensure_snapshotted_takes_a_fresh_snapshot_when_disk_content_changed_since_last_backup() {
+    fn snapshot_at_keeps_exactly_one_backup_file_across_repeated_calls() {
         let (base, projects, home) = setup();
         let session = projects.join("proj1").join("session.jsonl");
         let session_path = session.to_string_lossy().into_owned();
@@ -1034,14 +946,38 @@ mod write_session_snapshot_tests {
         fs::write(&session, "v1 content\n").unwrap();
         snapshot_at(&projects, &home, &session_path).unwrap();
 
-        // Content changes on disk without an explicit fresh snapshot.
         fs::write(&session, "v2 content\n").unwrap();
-        ensure_snapshotted(Some(&projects), Some(&home), &session_path).unwrap();
+        snapshot_at(&projects, &home, &session_path).unwrap();
+
+        let backup_root = backup_root_for(&projects, &home, &session_path).unwrap();
+        let files_on_disk: Vec<_> = fs::read_dir(&backup_root).unwrap().flatten().collect();
+        assert_eq!(files_on_disk.len(), 1, "only one backup file must exist on disk after two snapshots");
 
         let backups = list_backups_at(&projects, &home, &session_path).unwrap();
-        assert_eq!(backups.len(), 2, "the stale backup must not be reused; a fresh one is taken");
-        let v2_backup = backups.iter().find(|b| b.version == 2).expect("a second backup must exist");
-        assert_eq!(fs::read_to_string(&v2_backup.path).unwrap(), "v2 content\n");
+        assert_eq!(backups.len(), 1, "list_backups_at must report exactly one entry");
+        assert_eq!(
+            fs::read_to_string(&backups[0].path).unwrap(),
+            "v2 content\n",
+            "the surviving backup must hold the most recent snapshot's content"
+        );
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn write_session_does_not_auto_snapshot() {
+        let (base, projects, home) = setup();
+        let session = projects.join("proj1").join("session.jsonl");
+        fs::write(&session, "original content\n").unwrap();
+        let session_path = session.to_string_lossy().into_owned();
+
+        // Call the real write path with no preceding explicit snapshot() call
+        // — write_session must no longer take a backup as a side effect.
+        write_session_at(&session_path, "new content\n").unwrap();
+
+        let backups = list_backups_at(&projects, &home, &session_path).unwrap();
+        assert!(backups.is_empty(), "write_session must not create a backup as a side effect");
+        assert_eq!(fs::read_to_string(&session).unwrap(), "new content\n");
 
         fs::remove_dir_all(&base).unwrap();
     }

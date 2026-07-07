@@ -2,7 +2,7 @@
 
 Desktop app (Tauri v2 + SvelteKit static SPA, Svelte 5 + TS) for Claude Code. Fully offline.
 Reads Claude Code chat history from `~/.claude/projects/`, renders it, allows
-editing with a versioned backup/undo system. No data ever leaves the machine.
+editing with a single-slot pre-save backup. No data ever leaves the machine.
 
 ## Layers
 
@@ -53,19 +53,23 @@ read_subagents(session_path) -> SubagentFile[]
     SubagentFile { name: string, content: string, is_meta: boolean }
 
 write_session(path, content) -> null
-    // Overwrite the original .jsonl. Caller MUST call snapshot(path) first.
+    // Overwrite the original .jsonl. By convention the caller calls
+    // snapshot(path) first when overwriting existing content; not enforced
+    // inside write_session itself.
 
 snapshot(path) -> BackupVersion
     // Copy current on-disk file into the backup store BEFORE an override.
-    // Store: <projects-dir>/../.ccstudio-backups/<sanitized session id>/vNNN-<unixsecs>.jsonl
+    // Single backup slot per session: any existing backup file(s) for the
+    // session are deleted first, so exactly one file exists after the call.
+    // Store: <projects-dir>/../.ccstudio-backups/<sanitized session id>/v001-<unixsecs>.jsonl
     //   (i.e. ~/.claude/.ccstudio-backups/...). gzip optional; plain .jsonl is fine for v1.
     BackupVersion { version: number, timestamp: number, path: string, size: number }
 
 list_backups(session_path) -> BackupVersion[]
-    // All snapshots for a session, newest first.
+    // The session's backup, if any — 0 or 1 entries (single-slot backup).
 
 restore_backup(backup_path) -> string
-    // Return the raw contents of a backup version (frontend decides what to do:
+    // Return the raw contents of the backup (frontend decides what to do:
     // it will snapshot current state, then write this content back).
 
 read_edit_draft(session_path) -> string | null

@@ -105,14 +105,15 @@ export async function writeSession(path: string, content: string): Promise<void>
 
 export async function snapshot(path: string): Promise<BackupVersion> {
   if (!isTauri()) {
-    const list = (devBackups[path] ??= []);
+    // Mirrors the Rust side's single-slot backup: each call replaces the
+    // previous one instead of growing a list.
     const v: BackupVersion = {
-      version: list.length + 1,
+      version: 1,
       timestamp: Math.floor(Date.now() / 1000),
-      path: `${path}.v${list.length + 1}.bak`,
+      path: `${path}.v1.bak`,
       size: (devContent[path] ?? mockSession).length,
     };
-    list.unshift(v);
+    devBackups[path] = [v];
     return v;
   }
   return call<BackupVersion>('snapshot', { path });

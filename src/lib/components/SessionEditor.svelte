@@ -890,8 +890,8 @@
 {#if showHistoryModal}
   <div class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="history-title">
     <div class="modal" style="max-width:520px;">
-      <h3 id="history-title">Backup history</h3>
-      <p>Snapshots are taken before every save. Restoring also snapshots first.</p>
+      <h3 id="history-title">Backup</h3>
+      <p>A backup is taken before every save. Restoring also backs up first.</p>
       {#if backups.length === 0}
         <div class="empty-state" style="padding:1rem 0;">No backups yet.</div>
       {:else}

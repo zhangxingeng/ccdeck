@@ -32,7 +32,7 @@
       <button class="btn btn--sm btn--ghost" onclick={onDiscard} disabled={saving} type="button">Discard</button>
     </div>
   {/if}
-  <button class="save-rail__history" onclick={onHistory} disabled={saving} type="button" title="Backup history">History</button>
+  <button class="save-rail__history" onclick={onHistory} disabled={saving} type="button" title="Backup">History</button>
 </div>
 
 <style>
