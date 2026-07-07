@@ -68,26 +68,13 @@ const userTurns = session.turns.filter(t => t.role === 'user');
 assert(assistantTurns.length > 0, `${assistantTurns.length} assistant turns`);
 assert(userTurns.length > 0, `${userTurns.length} user turns`);
 
-// Key: tool results matched GLOBALLY across turns
+// Key: thinking/tool_use/tool_result blocks are trimmed entirely — the
+// display model only ever carries user/assistant text blocks now.
 const allBlocks = session.turns.flatMap(t => t.blocks);
-const toolUseBlocks = allBlocks.filter(b => b.blockType === 'tool_use');
-assert(toolUseBlocks.length > 0, `${toolUseBlocks.length} tool_use blocks total`);
-
-const matchedWithResult = toolUseBlocks.filter(b => b.toolOutput !== undefined);
-assert(matchedWithResult.length > 0, `${matchedWithResult.length} tool_use blocks have matched tool_result`);
-
-const noErrorMatch = matchedWithResult.find(b => !b.isError);
-assert(!!noErrorMatch, 'at least one matched tool_result has isError=false');
-
-// Verify the bash-test block has isError=false (from mock data explicit is_error:false)
-const bashBlock = toolUseBlocks.find(b => b.toolId === 'toolu_bash_test');
-assert(!!bashBlock, 'toolu_bash_test block found');
-assert(bashBlock && !bashBlock.isError, 'toolu_bash_test isError=false');
-
-// Agent tool_use block should have agentId set
-const agentBlock = toolUseBlocks.find(b => b.toolName === 'Agent');
-assert(!!agentBlock, 'Agent tool_use block found');
-assert(agentBlock?.agentId === 'agent-audit-secret', `Agent block agentId="${agentBlock?.agentId}"`);
+const nonTextBlocks = allBlocks.filter(b => b.blockType !== 'text');
+assert(nonTextBlocks.length === 0, `no non-text blocks survive parsing (found ${nonTextBlocks.length})`);
+assert(allBlocks.every(b => b.toolOutput === undefined && b.agentId === undefined && b.subagent === undefined),
+  'no tool/agent/subagent fields survive on any block');
 
 // Interrupted turn
 const interruptedTurn = session.turns.find(t => t.isInterrupted);
@@ -124,6 +111,10 @@ assert(
 );
 
 // ── Test linkSubagents ────────────────────────────────────────────────────────
+// linkSubagents is now a documented no-op (kept only because +page.svelte
+// still calls it) — tool_use/subagent rendering was removed, so there is
+// nothing left to attach. Just verify it doesn't throw and doesn't mutate
+// blocks with fields ContentBlock no longer has.
 console.log('\n[linkSubagents]');
 const subagentFiles = [
   { name: 'agent-audit-secret.jsonl', content: subagentJsonl, is_meta: false },
@@ -131,21 +122,8 @@ const subagentFiles = [
 ];
 linkSubagents(session, subagentFiles);
 
-// Find the Agent block (may not yet have subagent if agentId didn't match)
-const agentBlockAfterLink = session.turns
-  .flatMap(t => t.blocks)
-  .find(b => b.toolName === 'Agent');
-
-assert(!!agentBlockAfterLink?.subagent, 'Agent tool_use block has linked subagent Session');
-
-if (agentBlockAfterLink?.subagent) {
-  const sub = agentBlockAfterLink.subagent;
-  assert(sub.turns.length > 0, `subagent has ${sub.turns.length} turns`);
-  const subToolUse = sub.turns.flatMap(t => t.blocks).filter(b => b.blockType === 'tool_use');
-  assert(subToolUse.length > 0, `subagent has ${subToolUse.length} tool_use blocks`);
-  const subMatched = subToolUse.filter(b => b.toolOutput !== undefined);
-  assert(subMatched.length > 0, `${subMatched.length} subagent tool_use have matched results`);
-}
+const blocksAfterLink = session.turns.flatMap(t => t.blocks);
+assert(blocksAfterLink.every(b => b.subagent === undefined), 'linkSubagents is a no-op: no block gained a subagent');
 
 // ── Summary ───────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(50)}`);

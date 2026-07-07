@@ -65,45 +65,21 @@ console.log('\n[availableTargets / targetIndex]');
 }
 
 // ── displayModel: groupDisplayItems ──────────────────────────────────────────
+// Tool-call/tool-result/thinking rendering (and the "toolgroup" collapsing it
+// fed) was removed — groupDisplayItems now just wraps each row key as its own
+// message, in order.
 console.log('\n[groupDisplayItems]');
 {
-  const flag = (key, hasText) => ({ key, hasText });
-
   // Empty input.
   assert(groupDisplayItems([]).length === 0, 'empty rows → no items');
 
-  // Typical: user(text) → assistant(text) → tool → tool → user(text)
-  const items = groupDisplayItems([
-    flag('u1', true),
-    flag('a1', true),
-    flag('t1', false),
-    flag('t2', false),
-    flag('u2', true),
-  ]);
-  assert(items.length === 4, `4 display items (got ${items.length})`);
+  // Order preserved; every key becomes its own message.
+  const items = groupDisplayItems(['u1', 'a1', 'u2']);
+  assert(items.length === 3, `3 display items (got ${items.length})`);
   assert(items[0].kind === 'message' && items[0].key === 'u1', 'item0 message u1');
   assert(items[1].kind === 'message' && items[1].key === 'a1', 'item1 message a1');
-  assert(items[2].kind === 'toolgroup' && JSON.stringify(items[2].keys) === JSON.stringify(['t1', 't2']),
-    'item2 toolgroup [t1,t2]');
-  assert(items[3].kind === 'message' && items[3].key === 'u2', 'item3 message u2');
-
-  // Leading + trailing tool runs group correctly.
-  const edge = groupDisplayItems([
-    flag('t0', false), flag('m', true), flag('tA', false), flag('tB', false),
-  ]);
-  assert(edge.length === 3, 'leading/trailing groups: 3 items');
-  assert(edge[0].kind === 'toolgroup' && edge[0].keys.length === 1, 'leading single-line group');
-  assert(edge[1].kind === 'message', 'middle message');
-  assert(edge[2].kind === 'toolgroup' && edge[2].keys.length === 2, 'trailing 2-line group');
-
-  // All-text: no groups, each its own message; every key appears once.
-  const allText = groupDisplayItems([flag('a', true), flag('b', true), flag('c', true)]);
-  assert(allText.length === 3 && allText.every(i => i.kind === 'message'), 'all-text → all messages');
-
-  // All-tool: one single group.
-  const allTool = groupDisplayItems([flag('a', false), flag('b', false)]);
-  assert(allTool.length === 1 && allTool[0].kind === 'toolgroup' && allTool[0].keys.length === 2,
-    'all-tool → one group of 2');
+  assert(items[2].kind === 'message' && items[2].key === 'u2', 'item2 message u2');
+  assert(items.every(i => i.kind === 'message'), 'every item is a message');
 }
 
 // ── Summary ───────────────────────────────────────────────────────────────────

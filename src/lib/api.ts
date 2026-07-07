@@ -360,13 +360,13 @@ async function devSearch(
 
   DEV: for (const [lineNo, entry] of entries.entries()) {
     for (const [blockNo, b] of entry.blocks.entries()) {
-      const source =
-        b.blockType === 'text' ? entry.type
-        : b.blockType === 'thinking' ? 'thinking'
-        : b.blockType; // tool_use | tool_result
-      const text = b.text ?? b.thinking ?? b.toolOutput ?? b.toolName ?? '';
+      // Only 'text' blocks exist now (thinking/tool_use/tool_result rendering
+      // was removed), so the source is just the entry's role and a toolName
+      // restriction can never match.
+      const source = entry.type;
+      const text = b.text ?? '';
       if (filters.toolName) {
-        if (source !== 'tool_use' || !(text === filters.toolName || text.startsWith(`${filters.toolName}\n`))) continue;
+        continue;
       } else if (filters.sources.length && !filters.sources.includes(source)) {
         continue;
       }

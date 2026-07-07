@@ -1,24 +1,16 @@
 /**
  * Build a Session from parsed Entry objects.
- * Groups by requestId into Turns, matches tool results to tool_use blocks via
- * a GLOBAL registry (results may arrive in a different turn than the call),
- * and links subagent sessions.
+ * Groups by requestId into Turns.
  *
  * Pure TypeScript — no DOM, no Tauri, no Svelte.
  */
 
 import { parseJsonl } from './parser.js';
-import type { ContentBlock, Entry, Session, SubagentFile, Turn } from './types.js';
+import type { Entry, Session, SubagentFile, Turn } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-interface ToolResultInfo {
-  toolOutput: string;
-  isError: boolean;
-  isAsync: boolean;
-}
 
 /** Check if a user Entry has any actual text (not only tool_result blocks). */
 function hasUserText(entry: Entry): boolean {
@@ -33,58 +25,6 @@ function hasUserText(entry: Entry): boolean {
   return false;
 }
 
-/** Extract all tool_result blocks from a user Entry's rawContent. */
-function extractToolResults(entry: Entry): { toolId: string; info: ToolResultInfo }[] {
-  const results: { toolId: string; info: ToolResultInfo }[] = [];
-  const raw = entry.rawContent;
-  if (!Array.isArray(raw)) return results;
-
-  for (const b of raw as Array<Record<string, unknown>>) {
-    if (b['type'] !== 'tool_result') continue;
-    const resultContent = b['content'];
-    const textParts: string[] = [];
-    if (Array.isArray(resultContent)) {
-      for (const item of resultContent as Array<Record<string, unknown>>) {
-        if (item['type'] === 'text' && typeof item['text'] === 'string') {
-          textParts.push(item['text']);
-        }
-      }
-    }
-    results.push({
-      toolId: (b['tool_use_id'] as string) || '',
-      info: {
-        toolOutput: textParts.join('\n'),
-        isError: !!(b['is_error'] as boolean),
-        isAsync: false,
-      },
-    });
-  }
-  return results;
-}
-
-/** Attach global tool results to matching tool_use blocks in a turn. */
-function attachResults(
-  turn: Turn,
-  registry: Map<string, ToolResultInfo>,
-  agentIdByToolId: Map<string, string>
-): void {
-  for (const block of turn.blocks) {
-    if (block.blockType === 'tool_use' && block.toolId) {
-      const result = registry.get(block.toolId);
-      if (result) {
-        block.toolOutput = result.toolOutput;
-        block.isError = result.isError;
-        block.isAsync = result.isAsync;
-      }
-      // Set agentId for Agent tool_use blocks
-      const agentId = agentIdByToolId.get(block.toolId);
-      if (agentId) {
-        block.agentId = agentId;
-      }
-    }
-  }
-}
-
 // ---------------------------------------------------------------------------
 // buildSession
 // ---------------------------------------------------------------------------
@@ -96,18 +36,9 @@ export interface BuildSessionOptions {
 
 /**
  * Build a Session from a flat list of Entries.
- *
- * Key correctness guarantee: tool results are matched to tool_use blocks via a
- * GLOBAL registry keyed by tool_use id. Results are never assumed to live in
- * the same turn as the call — they can appear in any subsequent user entry.
  */
 export function buildSession(entries: Entry[], opts: BuildSessionOptions = {}): Session {
   const turns: Turn[] = [];
-
-  // Global tool result registry: tool_use_id → result info
-  const toolResultRegistry = new Map<string, ToolResultInfo>();
-  // Maps tool_use_id → agentId for async Agent launches
-  const agentIdByToolId = new Map<string, string>();
 
   let currentTurn: Turn | null = null;
   // Track the requestId of the turn currently being assembled (avoids polluting Turn type)
@@ -151,33 +82,13 @@ export function buildSession(entries: Entry[], opts: BuildSessionOptions = {}): 
       }
 
     } else if (entry.type === 'user') {
-      // 1. Collect tool results from this entry into the global registry
-      const trList = extractToolResults(entry);
-      for (const { toolId, info } of trList) {
-        if (toolId) toolResultRegistry.set(toolId, info);
-      }
-
-      // 2. Check for async subagent launch metadata
-      const tur = entry.toolUseResult;
-      if (tur && tur['status'] === 'async_launched' && tur['agentId']) {
-        const agentId = tur['agentId'] as string;
-        // Map all tool_result tool_use_ids in this entry to this agentId
-        for (const { toolId } of trList) {
-          if (toolId) agentIdByToolId.set(toolId, agentId);
-        }
-        // Also set on current assistant turn for quick lookup
-        if (currentTurn) {
-          currentTurn.subagentAgentId = agentId;
-        }
-      }
-
-      // 3. If this is only tool results (no user text), don't create a user turn
+      // 1. If this is only tool results (no user text), don't create a user turn
       if (!hasUserText(entry)) continue;
 
-      // 4. task-notification entries — skip (they're subagent result deliveries)
+      // 2. task-notification entries — skip (they're subagent result deliveries)
       if (entry.taskNotification) continue;
 
-      // 5. Interruption marker — mark the last assistant turn
+      // 3. Interruption marker — mark the last assistant turn
       if (entry.isInterruption) {
         if (turns.length > 0) {
           turns[turns.length - 1].isInterrupted = true;
@@ -188,7 +99,7 @@ export function buildSession(entries: Entry[], opts: BuildSessionOptions = {}): 
         continue;
       }
 
-      // 6. Regular user message — flush assistant turn, create user turn
+      // 4. Regular user message — flush assistant turn, create user turn
       flushTurn();
 
       const userTurn: Turn = {
@@ -204,11 +115,6 @@ export function buildSession(entries: Entry[], opts: BuildSessionOptions = {}): 
 
   // Flush any remaining assistant turn
   flushTurn();
-
-  // GLOBAL pass: attach tool results to tool_use blocks across ALL turns
-  for (const turn of turns) {
-    attachResults(turn, toolResultRegistry, agentIdByToolId);
-  }
 
   // Extract session-level metadata
   const meta = _deriveSessionMeta(entries, opts);
@@ -251,22 +157,17 @@ function _deriveSessionMeta(
 }
 
 // ---------------------------------------------------------------------------
-// linkSubagents
+// buildSubagentSessions
 // ---------------------------------------------------------------------------
 
 /**
- * Parse subagent files, build their sessions, and attach them to Agent
- * tool_use blocks in the parent session by agentId.
- *
- * subagentFiles comes from the Rust read_subagents() command.
- * Non-meta files (is_meta=false) contain JSONL; meta files (is_meta=true)
- * contain JSON metadata.
- */
-/**
  * Parse subagent files into a stem → Session map ("agent-foo.jsonl" +
- * "agent-foo.meta.json" → stem "agent-foo"). Split out from linkSubagents so
- * callers that don't build a full turn-grouped Session (e.g. SessionEditor,
- * which parses entries line-by-line) can still resolve subagent transcripts.
+ * "agent-foo.meta.json" → stem "agent-foo").
+ *
+ * subagentFiles comes from the Rust read_subagents() command. Non-meta files
+ * (is_meta=false) contain JSONL; meta files (is_meta=true) contain JSON
+ * metadata. Still used by SessionEditor's subagent stacked-navigation view
+ * (parses entries line-by-line, so it resolves subagent transcripts itself).
  */
 export function buildSubagentSessions(subagentFiles: SubagentFile[]): Map<string, Session> {
   const byName = new Map<string, { jsonl?: string; meta?: string }>();
@@ -305,51 +206,13 @@ export function buildSubagentSessions(subagentFiles: SubagentFile[]): Map<string
   return subagentSessions;
 }
 
-/** Resolve an agentId to its subagent Session, tolerating a fragment match
- *  (agentId may be a prefix/substring of the file stem or vice versa). */
-export function resolveSubagentSession(
-  subagentSessions: Map<string, Session>,
-  agentId: string
-): Session | undefined {
-  const direct = subagentSessions.get(agentId);
-  if (direct) return direct;
-  for (const [stem, subSess] of subagentSessions) {
-    if (stem.includes(agentId) || agentId.includes(stem)) return subSess;
-  }
-  return undefined;
-}
-
 /**
- * Map tool_use ids to the agentId of the subagent they spawned, by scanning
- * user entries for the async_launched toolUseResult marker. Extracted out of
- * buildSession's internal turn-assembly loop so callers that parse entries
- * without turn-grouping (SessionEditor) can compute the same mapping.
+ * No-op: subagent linking existed only to attach a Session onto the
+ * (now-removed) tool_use blocks' subagent "Open →" affordance. ContentBlock
+ * no longer carries `agentId`/`subagent` fields, so there is nothing left to
+ * attach. Kept as an exported no-op because `+page.svelte` still calls it —
+ * removing that call site is out of scope for this change.
  */
-export function mapAgentIdsByToolId(entries: Entry[]): Map<string, string> {
-  const agentIdByToolId = new Map<string, string>();
-  for (const entry of entries) {
-    if (entry.type !== 'user') continue;
-    const tur = entry.toolUseResult;
-    if (tur && tur['status'] === 'async_launched' && tur['agentId']) {
-      const agentId = tur['agentId'] as string;
-      for (const { toolId } of extractToolResults(entry)) {
-        if (toolId) agentIdByToolId.set(toolId, agentId);
-      }
-    }
-  }
-  return agentIdByToolId;
-}
-
-export function linkSubagents(session: Session, subagentFiles: SubagentFile[]): void {
-  const subagentSessions = buildSubagentSessions(subagentFiles);
-
-  // Walk ALL turns and blocks in the parent session; attach subagent by agentId
-  for (const turn of session.turns) {
-    for (const block of turn.blocks) {
-      if (block.blockType === 'tool_use' && block.agentId) {
-        const sub = resolveSubagentSession(subagentSessions, block.agentId);
-        if (sub) block.subagent = sub;
-      }
-    }
-  }
+export function linkSubagents(_session: Session, _subagentFiles: SubagentFile[]): void {
+  // Intentionally empty — see doc comment above.
 }

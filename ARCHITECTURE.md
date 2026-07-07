@@ -101,12 +101,8 @@ Also reference (Python source of truth, in git history e47e27d):
 Core shapes (keep these names; UI depends on them):
 ```
 ContentBlock {
-  blockType: 'thinking'|'text'|'tool_use'|'tool_result',
-  text?, thinking?, signature?,
-  toolName?, toolId?, toolInput?,        // tool_use
-  toolOutput?, isError?, isAsync?,       // tool_result (matched in)
-  agentId?,                              // set when tool_use is an Agent spawn
-  subagent?,                             // attached Session of the subagent
+  blockType: 'text',
+  text?,
 }
 Entry  { type, role, uuid, parentUuid, requestId, timestamp, model, isSidechain,
          blocks: ContentBlock[], isInterruption?, taskNotification? }
@@ -114,13 +110,20 @@ Turn   { role: 'user'|'assistant', blocks: ContentBlock[], timestamp, model }
 Session{ turns: Turn[], meta: { title, date, model, project, sourcePath } }
 ```
 
+As of issue #6 (Phase A: render-trim), thinking/tool_use/tool_result blocks are
+dropped during parsing — the display model only ever carries user/assistant
+text. `ContentBlock` previously also carried `thinking`/`signature` (thinking
+blocks) and `toolName`/`toolId`/`toolInput`/`toolOutput`/`isError`/`isAsync`/
+`agentId`/`subagent` (tool_use/tool_result blocks, including the subagent
+"Open →" navigation affordance); all were removed along with the rendering
+that used them.
+
 Functions to export:
 ```
 parseJsonl(text: string): Entry[]          // filters meta types + internal echoes
-buildSession(entries, opts): Session        // groups by requestId into turns,
-                                             // GLOBAL tool_result registry matches
-                                             // tool_result -> tool_use across all turns
-linkSubagents(session, subagentFiles)        // attach subagent Session to Agent tool_use by agentId
+buildSession(entries, opts): Session        // groups by requestId into turns
+linkSubagents(session, subagentFiles)        // no-op (see above) — kept because
+                                             // +page.svelte still calls it
 extractMeta(preview: string[]|Entry[]): {title,date,model}  // for the browse list
 decodeProject(raw: string): string           // encoded dir name -> readable
 ```

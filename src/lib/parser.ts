@@ -90,44 +90,14 @@ function extractContentBlocks(rawBlocks: RawBlock[]): ContentBlock[] {
     if (typeof b !== 'object' || b === null) continue;
     const type = b['type'] as string | undefined;
 
-    if (type === 'thinking') {
-      const thinking = (b['thinking'] as string) || '';
-      blocks.push({
-        blockType: 'thinking',
-        thinking,
-        signature: b['signature'] as string | undefined,
-        text: thinking,
-      });
-    } else if (type === 'text') {
+    if (type === 'text') {
       blocks.push({
         blockType: 'text',
         text: (b['text'] as string) || '',
       });
-    } else if (type === 'tool_use') {
-      blocks.push({
-        blockType: 'tool_use',
-        toolName: (b['name'] as string) || 'unknown',
-        toolId: (b['id'] as string) || '',
-        toolInput: (b['input'] as Record<string, unknown>) || {},
-      });
-    } else if (type === 'tool_result') {
-      const resultContent = b['content'];
-      const textParts: string[] = [];
-      if (Array.isArray(resultContent)) {
-        for (const item of resultContent as RawBlock[]) {
-          if (item && item['type'] === 'text' && typeof item['text'] === 'string') {
-            textParts.push(item['text']);
-          }
-        }
-      }
-      blocks.push({
-        blockType: 'tool_result',
-        toolId: (b['tool_use_id'] as string) || '',
-        toolOutput: textParts.join('\n'),
-        isError: !!(b['is_error'] as boolean),
-        text: textParts.join('\n'),
-      });
     }
+    // thinking / tool_use / tool_result blocks are intentionally dropped —
+    // the display model only ever carries user/assistant text.
   }
   return blocks;
 }

@@ -4,9 +4,9 @@
    *
    * This component is the orchestrator: it owns the byte-faithful edit Draft,
    * crash-safe persistence, save/discard/history/exit flows, and turns the draft
-   * into a display model (chat bubbles interleaved with collapsed tool groups).
+   * into a display model (one chat bubble per renderable row).
    * All rendering lives in focused children:
-   *   SessionMetaCard · MessageCell · ToolGroup · SaveRail · RawJsonModal
+   *   SessionMetaCard · MessageCell · SaveRail · RawJsonModal
    *
    * Safety model (JSON-safe by construction):
    *   - The edit model owns every line; the UI only ever edits a message *string*
@@ -40,7 +40,7 @@
   import { resumeCommand } from '$lib/resume';
   import { parseJsonl, extractMeta, extractCustomTitle } from '$lib/parser';
   import { renameSession } from '$lib/sessionOps';
-  import { buildSubagentSessions, mapAgentIdsByToolId, resolveSubagentSession } from '$lib/builder';
+  import { buildSubagentSessions } from '$lib/builder';
   import {
     buildDraft,
     serializeDraft,
@@ -57,7 +57,6 @@
   import { groupDisplayItems } from '$lib/displayModel';
   import SessionMetaCard from './SessionMetaCard.svelte';
   import MessageCell from './MessageCell.svelte';
-  import ToolGroup from './ToolGroup.svelte';
   import SaveRail from './SaveRail.svelte';
   import RawJsonModal from './RawJsonModal.svelte';
   import InlineSearchPanel from './InlineSearchPanel.svelte';
@@ -98,16 +97,15 @@
   // Back-to-top — shown once the page has scrolled past the header.
   let showBackToTop = $state(false);
 
-  // Subagent stacked navigation — pushed when a tool_use's "Open →" affordance
-  // is clicked (Block.svelte), popped via Esc/← Back. Subagent transcripts
+  // Subagent stacked navigation — popped via Esc/← Back. Subagent transcripts
   // aren't part of the editable Draft, so the top of the stack renders
   // read-only (plain Turn loop, same as SessionView.svelte) instead of the
-  // MessageCell/ToolGroup editing UI.
+  // MessageCell editing UI. Nothing currently pushes onto this stack: it was
+  // previously reached via a tool_use "Open →" affordance in Block.svelte,
+  // which was removed along with tool-call rendering.
   let subagentStack = $state<{ session: Session; label: string }[]>([]);
-  // Resolved once per load (in parallel with the session/draft load below) —
-  // linkSubagents()'s buildSession()-based pipeline never runs for this
-  // editor's own line-by-line parsed entries, so `renderable` below does its
-  // own equivalent pass using these.
+  // Resolved once per load (in parallel with the session/draft load below).
+  // Currently unconsumed — see subagentStack note above — kept alongside it.
   let subagentSessions = $state<Map<string, Session>>(new Map());
   function pushSubagent(session: Session, label: string) {
     subagentStack = [...subagentStack, { session, label }];
@@ -174,7 +172,6 @@
     key: string;
     row: DraftRow;
     entry: Entry;
-    hasText: boolean;
   }
 
   function parseLine(line: string): Entry | null {
@@ -182,15 +179,9 @@
     return es.length > 0 ? es[0] : null;
   }
 
-  // Renderable rows (conversational lines with visible blocks). Pure meta/echo
-  // lines parse to nothing here but stay preserved in the draft and pass through
-  // untouched on save.
-  //
-  // Also links subagent transcripts onto Agent tool_use blocks. builder.ts's
-  // buildSession()+linkSubagents() normally do this, but only for the separate
-  // Session built for the hidden HTML-export view — this editor parses each
-  // line independently (no turn-grouping), so it re-derives the same
-  // toolId → agentId → subagent mapping over these entries instead.
+  // Renderable rows (conversational lines with visible blocks — user/assistant
+  // text only). Pure meta/echo lines parse to nothing here but stay preserved
+  // in the draft and pass through untouched on save.
   let renderable = $derived.by<RenderRow[]>(() => {
     if (!draft) return [];
     const out: RenderRow[] = [];
@@ -198,23 +189,7 @@
       const row = draft.rows[key];
       const entry = parseLine(row.versions[row.active]);
       if (!entry || entry.blocks.length === 0) continue;
-      out.push({
-        key,
-        row,
-        entry,
-        hasText: entry.blocks.some((b) => b.blockType === 'text'),
-      });
-    }
-    if (subagentSessions.size > 0) {
-      const agentIdByToolId = mapAgentIdsByToolId(out.map((r) => r.entry));
-      for (const { entry } of out) {
-        for (const block of entry.blocks) {
-          if (block.blockType === 'tool_use' && block.toolId) {
-            const agentId = agentIdByToolId.get(block.toolId);
-            if (agentId) block.subagent = resolveSubagentSession(subagentSessions, agentId);
-          }
-        }
-      }
+      out.push({ key, row, entry });
     }
     return out;
   });
@@ -222,10 +197,8 @@
   // Fast key → RenderRow lookup for the display loop.
   let rmap = $derived(new Map(renderable.map((r) => [r.key, r])));
 
-  // Chat bubbles interleaved with collapsed tool-activity groups.
-  let displayItems = $derived(
-    groupDisplayItems(renderable.map((r) => ({ key: r.key, hasText: r.hasText })))
-  );
+  // One chat bubble per renderable row.
+  let displayItems = $derived(groupDisplayItems(renderable.map((r) => r.key)));
   let visibleItems = $derived(displayItems.slice(0, visibleCount));
 
   // ── Jump-to-hit (from search) ────────────────────────────────────────────
@@ -235,9 +208,7 @@
     if (!draft) return;
     const rr = renderable.find((r) => r.entry.uuid === uuid);
     if (!rr) return;
-    const idx = displayItems.findIndex((it) =>
-      it.kind === 'message' ? it.key === rr.key : it.keys.includes(rr.key)
-    );
+    const idx = displayItems.findIndex((it) => it.key === rr.key);
     if (idx < 0) return;
     if (idx >= visibleCount) visibleCount = idx + 50;
     await tick();
@@ -416,18 +387,6 @@
     } catch (e) {
       showToast(`Fork failed: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }
-  function deleteKeys(keys: string[]) {
-    if (!draft) return;
-    let d = draft;
-    for (const k of keys) d = deleteRow(d, k);
-    mutate(d);
-  }
-  function restoreKeys(keys: string[]) {
-    if (!draft) return;
-    let d = draft;
-    for (const k of keys) d = restoreRow(d, k);
-    mutate(d);
   }
 
   // Move a chat bubble relative to the previous/next *chat bubble*, hopping over
@@ -746,38 +705,25 @@
     </div>
   {/if}
 
-  <!-- ── Messages + tool groups ─────────────────────────────────────────────── -->
+  <!-- ── Messages ─────────────────────────────────────────────────────────── -->
   <div class="session-turns">
-    {#each visibleItems as item (item.kind === 'message' ? item.key : 'g:' + item.keys[0])}
+    {#each visibleItems as item (item.key)}
+      {@const rr = rmap.get(item.key)}
       <div class="jump-anchor">
-        {#if item.kind === 'message'}
-          {@const rr = rmap.get(item.key)}
-          {#if rr}
-            <MessageCell
-              msgKey={item.key}
-              row={rr.row}
-              entry={rr.entry}
-              onBlockEdit={(o, t) => doBlockEdit(item.key, o, t)}
-              onDelete={() => doDelete(item.key)}
-              onRestore={() => doRestore(item.key)}
-              onRole={(role) => doRole(item.key, role)}
-              onMoveUp={() => moveMessage(item.key, -1)}
-              onMoveDown={() => moveMessage(item.key, 1)}
-              onRaw={() => openRawEdit(item.key)}
-              onSetVersion={(idx) => doSetActiveVersion(item.key, idx)}
-              onResumeFrom={() => doResumeFrom(item.key)}
-              onOpenSubagent={pushSubagent}
-            />
-          {/if}
-        {:else}
-          {@const groupItems = item.keys.map((k) => rmap.get(k)).filter((x) => x !== undefined)}
-          <ToolGroup
-            items={groupItems}
-            onDeleteGroup={() => deleteKeys(item.keys)}
-            onRestoreGroup={() => restoreKeys(item.keys)}
-            onRawLine={openRawEdit}
-            onDeleteLine={doDelete}
-            onRestoreLine={doRestore}
+        {#if rr}
+          <MessageCell
+            msgKey={item.key}
+            row={rr.row}
+            entry={rr.entry}
+            onBlockEdit={(o, t) => doBlockEdit(item.key, o, t)}
+            onDelete={() => doDelete(item.key)}
+            onRestore={() => doRestore(item.key)}
+            onRole={(role) => doRole(item.key, role)}
+            onMoveUp={() => moveMessage(item.key, -1)}
+            onMoveDown={() => moveMessage(item.key, 1)}
+            onRaw={() => openRawEdit(item.key)}
+            onSetVersion={(idx) => doSetActiveVersion(item.key, idx)}
+            onResumeFrom={() => doResumeFrom(item.key)}
             onOpenSubagent={pushSubagent}
           />
         {/if}

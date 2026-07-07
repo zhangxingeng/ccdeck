@@ -4,22 +4,8 @@
  */
 
 export interface ContentBlock {
-  blockType: 'thinking' | 'text' | 'tool_use' | 'tool_result';
-  // text / thinking
+  blockType: 'text';
   text?: string;
-  thinking?: string;
-  signature?: string;
-  // tool_use fields
-  toolName?: string;
-  toolId?: string;
-  toolInput?: Record<string, unknown>;
-  // tool_result fields (matched in from global registry)
-  toolOutput?: string;
-  isError?: boolean;
-  isAsync?: boolean;
-  // Agent spawn
-  agentId?: string;
-  subagent?: Session;
 }
 
 export interface Entry {
