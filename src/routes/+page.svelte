@@ -3,15 +3,15 @@
    * +page.svelte — top-level SPA shell for CC Deck (Claude Code Control Center).
    *
    * States: browse | viewer | settings — search lives inside browse (BrowseView.svelte)
-   * Orchestrates: session loading, subagent linking, HTML export, theme toggle.
+   * Orchestrates: session loading, HTML export, theme toggle.
    */
   import { onMount, tick } from 'svelte';
   import { getVersion } from '@tauri-apps/api/app';
   import { checkForUpdates, update as updateState } from '$lib/updater.svelte';
   import type { Session, SessionMeta, SearchHit } from '$lib/types';
-  import { readSession, readSubagents, openSessionFile, resumeInTerminal } from '$lib/api';
+  import { readSession, openSessionFile, resumeInTerminal } from '$lib/api';
   import { parseJsonl, decodeProject } from '$lib/parser';
-  import { buildSession, linkSubagents } from '$lib/builder';
+  import { buildSession } from '$lib/builder';
   import { extractSessionInfo } from '$lib/editDraft';
   import { getTheme, toggleTheme } from '$lib/theme';
   import { cleanFilename } from '$lib/markdown';
@@ -115,8 +115,6 @@
       const entries = parseJsonl(text);
       const session = buildSession(entries, { project, sourcePath: path });
       session.meta.cwd = extractSessionInfo(text).cwd;
-      const subagentFiles = await readSubagents(path);
-      linkSubagents(session, subagentFiles);
       current = session;
       scrollToUuid = scroll;
       scrollNonce++;

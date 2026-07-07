@@ -40,13 +40,6 @@ pub struct SessionMeta {
                                   // the file. Last-wins so a later rename supersedes an earlier one.
 }
 
-#[derive(Serialize)]
-pub struct SubagentFile {
-    pub name: String,
-    pub content: String,
-    pub is_meta: bool,
-}
-
 #[derive(Serialize, Clone)]
 pub struct BackupVersion {
     pub version: u32,
@@ -357,46 +350,6 @@ fn list_sessions() -> Result<Vec<SessionMeta>, String> {
 #[tauri::command]
 fn read_session(path: String) -> Result<String, String> {
     fs::read_to_string(&path).map_err(|e| e.to_string())
-}
-
-/// Look in <dir-of-session>/subagents/ for agent-*.jsonl and agent-*.meta.json.
-#[tauri::command]
-fn read_subagents(session_path: String) -> Result<Vec<SubagentFile>, String> {
-    let session_file = Path::new(&session_path);
-    let parent = session_file
-        .parent()
-        .ok_or_else(|| "Cannot determine parent directory".to_string())?;
-    let subagents_dir = parent.join("subagents");
-
-    if !subagents_dir.is_dir() {
-        return Ok(Vec::new());
-    }
-
-    let mut files: Vec<SubagentFile> = Vec::new();
-    let entries = fs::read_dir(&subagents_dir).map_err(|e| e.to_string())?;
-    for entry in entries.flatten() {
-        let file_path = entry.path();
-        let fname = match file_path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        let is_meta: bool;
-        if fname.starts_with("agent-") && fname.ends_with(".meta.json") {
-            is_meta = true;
-        } else if fname.starts_with("agent-") && fname.ends_with(".jsonl") {
-            is_meta = false;
-        } else {
-            continue;
-        }
-        let content = fs::read_to_string(&file_path).map_err(|e| e.to_string())?;
-        files.push(SubagentFile {
-            name: fname,
-            content,
-            is_meta,
-        });
-    }
-
-    Ok(files)
 }
 
 /// Resolve `<backup-root>/<sanitized-session-id>` for `path`, requiring it be
@@ -950,7 +903,6 @@ pub fn run() {
             home_dir,
             list_sessions,
             read_session,
-            read_subagents,
             write_session,
             snapshot,
             list_backups,

@@ -47,11 +47,6 @@ list_sessions() -> SessionMeta[]
 read_session(path) -> string
     // Raw UTF-8 contents of the .jsonl file.
 
-read_subagents(session_path) -> SubagentFile[]
-    // Look in <dir-of-session>/subagents/ for agent-*.jsonl and agent-*.meta.json.
-    // Return raw contents; JS parses + links them.
-    SubagentFile { name: string, content: string, is_meta: boolean }
-
 write_session(path, content) -> null
     // Overwrite the original .jsonl. By convention the caller calls
     // snapshot(path) first when overwriting existing content; not enforced
@@ -118,8 +113,6 @@ Functions to export:
 ```
 parseJsonl(text: string): Entry[]          // filters meta types + internal echoes
 buildSession(entries, opts): Session        // groups by requestId into turns
-linkSubagents(session, subagentFiles)        // no-op (see above) — kept because
-                                             // +page.svelte still calls it
 extractMeta(preview: string[]|Entry[]): {title,date,model}  // for the browse list
 decodeProject(raw: string): string           // encoded dir name -> readable
 ```

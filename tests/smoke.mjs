@@ -12,7 +12,7 @@ const root = join(__dir, '..');
 
 // Use tsx to import TS modules
 const { parseJsonl, extractMeta, decodeProject, cleanTitle } = await import(join(root, 'src/lib/parser.ts'));
-const { buildSession, linkSubagents } = await import(join(root, 'src/lib/builder.ts'));
+const { buildSession } = await import(join(root, 'src/lib/builder.ts'));
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 let passed = 0;
@@ -30,8 +30,6 @@ function assert(cond, msg) {
 
 // ── Load mock data ────────────────────────────────────────────────────────────
 const sessionText = readFileSync(join(__dir, 'mock_data/session.jsonl'), 'utf8');
-const subagentJsonl = readFileSync(join(__dir, 'mock_data/subagents/agent-audit-secret.jsonl'), 'utf8');
-const subagentMeta  = readFileSync(join(__dir, 'mock_data/subagents/agent-audit-secret.meta.json'), 'utf8');
 
 // ── Test parseJsonl ───────────────────────────────────────────────────────────
 console.log('\n[parseJsonl]');
@@ -109,21 +107,6 @@ assert(
   cleanTitle('Hello\n\nWorld') === 'Hello World',
   'cleanTitle: collapses newlines to single space'
 );
-
-// ── Test linkSubagents ────────────────────────────────────────────────────────
-// linkSubagents is now a documented no-op (kept only because +page.svelte
-// still calls it) — tool_use/subagent rendering was removed, so there is
-// nothing left to attach. Just verify it doesn't throw and doesn't mutate
-// blocks with fields ContentBlock no longer has.
-console.log('\n[linkSubagents]');
-const subagentFiles = [
-  { name: 'agent-audit-secret.jsonl', content: subagentJsonl, is_meta: false },
-  { name: 'agent-audit-secret.meta.json', content: subagentMeta,  is_meta: true  },
-];
-linkSubagents(session, subagentFiles);
-
-const blocksAfterLink = session.turns.flatMap(t => t.blocks);
-assert(blocksAfterLink.every(b => b.subagent === undefined), 'linkSubagents is a no-op: no block gained a subagent');
 
 // ── Summary ───────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(50)}`);

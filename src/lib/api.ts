@@ -5,7 +5,6 @@
  */
 import type {
   SessionMeta,
-  SubagentFile,
   BackupVersion,
   SearchOpts,
   SearchFilters,
@@ -19,8 +18,6 @@ import type {
 
 // Bundled mock fixtures for browser-dev mode (Vite ?raw import).
 import mockSession from '../../tests/mock_data/session.jsonl?raw';
-import mockAgent from '../../tests/mock_data/subagents/agent-audit-secret.jsonl?raw';
-import mockAgentMeta from '../../tests/mock_data/subagents/agent-audit-secret.meta.json?raw';
 
 export function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -81,16 +78,6 @@ export async function listSessions(): Promise<SessionMeta[]> {
 export async function readSession(path: string): Promise<string> {
   if (!isTauri()) return devContent[path] ?? mockSession;
   return call<string>('read_session', { path });
-}
-
-export async function readSubagents(sessionPath: string): Promise<SubagentFile[]> {
-  if (!isTauri()) {
-    return [
-      { name: 'agent-audit-secret.jsonl', content: mockAgent, is_meta: false },
-      { name: 'agent-audit-secret.meta.json', content: mockAgentMeta, is_meta: true },
-    ];
-  }
-  return call<SubagentFile[]>('read_subagents', { sessionPath });
 }
 
 export async function writeSession(path: string, content: string): Promise<void> {

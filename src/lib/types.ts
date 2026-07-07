@@ -114,13 +114,6 @@ export interface IndexStatus {
   building: boolean;
 }
 
-/** Returned by Rust read_subagents. */
-export interface SubagentFile {
-  name: string;
-  content: string;
-  is_meta: boolean;
-}
-
 /** Returned by Rust snapshot / list_backups. */
 export interface BackupVersion {
   version: number;

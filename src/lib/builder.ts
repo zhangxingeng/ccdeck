@@ -5,8 +5,7 @@
  * Pure TypeScript — no DOM, no Tauri, no Svelte.
  */
 
-import { parseJsonl } from './parser.js';
-import type { Entry, Session, SubagentFile, Turn } from './types.js';
+import type { Entry, Session, Turn } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -154,65 +153,4 @@ function _deriveSessionMeta(
     sourcePath: opts.sourcePath || '',
     cwd: '', // filled in by the caller from the raw text (see +page.svelte::loadSession)
   };
-}
-
-// ---------------------------------------------------------------------------
-// buildSubagentSessions
-// ---------------------------------------------------------------------------
-
-/**
- * Parse subagent files into a stem → Session map ("agent-foo.jsonl" +
- * "agent-foo.meta.json" → stem "agent-foo").
- *
- * subagentFiles comes from the Rust read_subagents() command. Non-meta files
- * (is_meta=false) contain JSONL; meta files (is_meta=true) contain JSON
- * metadata. Still used by SessionEditor's subagent stacked-navigation view
- * (parses entries line-by-line, so it resolves subagent transcripts itself).
- */
-export function buildSubagentSessions(subagentFiles: SubagentFile[]): Map<string, Session> {
-  const byName = new Map<string, { jsonl?: string; meta?: string }>();
-  for (const f of subagentFiles) {
-    // Derive stem: "agent-foo.jsonl" → "agent-foo"
-    const stem = f.name.replace(/\.(jsonl|meta\.json)$/, '').replace(/\.meta$/, '');
-    if (!byName.has(stem)) byName.set(stem, {});
-    const entry = byName.get(stem)!;
-    if (f.is_meta) {
-      entry.meta = f.content;
-    } else {
-      entry.jsonl = f.content;
-    }
-  }
-
-  const subagentSessions = new Map<string, Session>();
-  for (const [stem, { jsonl, meta }] of byName) {
-    if (!jsonl) continue;
-    const entries = parseJsonl(jsonl);
-    if (!entries.length) continue;
-
-    const subSession = buildSession(entries, { sourcePath: stem });
-
-    if (meta) {
-      try {
-        const m = JSON.parse(meta) as Record<string, unknown>;
-        subSession.meta.model = (m['model'] as string) || subSession.meta.model;
-        subSession.meta.project = (m['description'] as string) || subSession.meta.project;
-      } catch {
-        // Ignore malformed meta
-      }
-    }
-
-    subagentSessions.set(stem, subSession);
-  }
-  return subagentSessions;
-}
-
-/**
- * No-op: subagent linking existed only to attach a Session onto the
- * (now-removed) tool_use blocks' subagent "Open →" affordance. ContentBlock
- * no longer carries `agentId`/`subagent` fields, so there is nothing left to
- * attach. Kept as an exported no-op because `+page.svelte` still calls it —
- * removing that call site is out of scope for this change.
- */
-export function linkSubagents(_session: Session, _subagentFiles: SubagentFile[]): void {
-  // Intentionally empty — see doc comment above.
 }
