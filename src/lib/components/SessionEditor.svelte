@@ -291,7 +291,7 @@
       const cwd = sessionInfo?.cwd ?? '';
       await copyToClipboard(resumeCommand(cwd, forked.id));
       try {
-        await resumeInTerminal(cwd, forked.id);
+        await resumeInTerminal(cwd, forked.id, displayTitle);
         showToast('Forked session — opened in a terminal, command also copied to clipboard');
       } catch {
         showToast('Forked session — could not open a terminal, command copied to clipboard');

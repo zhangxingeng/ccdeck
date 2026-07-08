@@ -8,11 +8,8 @@ use tauri::Manager;
 // Search: SQLite-backed extracted-text cache (built up over milestones 1–12).
 mod search;
 
-// CC Deck's own preference store (terminal launcher choice + extra args).
+// CC Deck's own preference store (terminal launcher choice + resume-launch command).
 mod appconfig;
-
-// Schema-driven Claude Code settings: read/merge/conflict across the three tiers.
-mod settings;
 
 // ---------------------------------------------------------------------------
 // Return-type structs (must match the JS contract in ARCHITECTURE.md)
@@ -208,11 +205,28 @@ fn json_replace_str_value(line: &str, key_token: &str, new_value: &str) -> Strin
     line.to_string()
 }
 
-/// Single-quote `s` for embedding in a POSIX shell script (used only for the
-/// macOS Terminal.app launch script).
-#[cfg(target_os = "macos")]
-fn shell_quote(s: &str) -> String {
+/// Single-quote `s` for embedding in a POSIX shell script. Shared by every
+/// resume-script call site (macOS, Linux, and the env-var exports both share)
+/// — see [`appconfig::build_resume_script`].
+pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Write `content` to a fresh temp file named `ccstudio-resume-<session_id>.<ext>`,
+/// marking it executable on Unix (`0o755`) — mirrors the temp-script convention
+/// the macOS resume path originally used alone, now shared across every OS's
+/// resume script.
+fn write_resume_script(session_id: &str, ext: &str, content: &str) -> Result<PathBuf, String> {
+    let tmp = std::env::temp_dir().join(format!("ccstudio-resume-{session_id}.{ext}"));
+    fs::write(&tmp, content).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&tmp).map_err(|e| e.to_string())?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&tmp, perms).map_err(|e| e.to_string())?;
+    }
+    Ok(tmp)
 }
 
 // ---------------------------------------------------------------------------
@@ -544,14 +558,20 @@ fn fork_session(path: String, upto_index: usize) -> Result<ForkResult, String> {
     })
 }
 
-/// Best-effort: open a terminal in `cwd` running `claude --resume <session_id>`,
-/// honouring the user's persisted terminal preference + extra args (Settings →
-/// Terminal). Platform-specific and inherently unreliable (depends on what's
-/// installed); callers should always pair this with a copy-to-clipboard
-/// fallback. Default (no preference saved, or "auto") reproduces the original
-/// auto-detect behavior exactly.
+/// Best-effort: open a terminal in `cwd` running the user's configured
+/// resume-launch command (App Config → Launch command; default reproduces
+/// the original `claude --resume <id>` behavior exactly), honouring the
+/// user's persisted terminal preference (App Config → Terminal). Platform-
+/// specific and inherently unreliable (depends on what's installed); callers
+/// should always pair this with a copy-to-clipboard fallback.
+///
+/// Every OS/terminal candidate shares one script body built by
+/// [`appconfig::build_resume_script`] (or its Windows counterpart) — this
+/// removes the old per-platform hand-built `claude --resume <id> <args>`
+/// strings and is the only way a multi-line custom `launch_command` works
+/// uniformly across `open -a`, `gnome-terminal --`, `konsole -e`, `wt`, etc.
 #[tauri::command]
-fn resume_in_terminal(cwd: String, session_id: String) -> Result<(), String> {
+fn resume_in_terminal(cwd: String, session_id: String, session_title: String) -> Result<(), String> {
     if session_id.is_empty()
         || !session_id
             .chars()
@@ -564,29 +584,14 @@ fn resume_in_terminal(cwd: String, session_id: String) -> Result<(), String> {
     }
 
     let config = appconfig::load();
-    let extra_args = appconfig::parse_args(&config.terminal_args);
     let auto = appconfig::is_auto(&config.terminal);
 
     #[cfg(target_os = "macos")]
     {
-        let mut claude_cmd = format!("claude --resume {}", session_id);
-        for a in &extra_args {
-            claude_cmd.push(' ');
-            claude_cmd.push_str(a);
-        }
-        let script = format!(
-            "#!/bin/sh\ncd {} && exec {}\n",
-            shell_quote(&cwd),
-            claude_cmd
-        );
-        let tmp = std::env::temp_dir().join(format!("ccstudio-resume-{}.command", session_id));
-        fs::write(&tmp, script).map_err(|e| e.to_string())?;
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&tmp).map_err(|e| e.to_string())?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&tmp, perms).map_err(|e| e.to_string())?;
-        }
+        let script = appconfig::build_resume_script(&cwd, &session_id, &session_title, &config.launch_command);
+        // `.command` extension: what makes Terminal.app treat an `open -a`'d
+        // file as a script to run rather than a text file to display.
+        let tmp = write_resume_script(&session_id, "command", &script)?;
         // Default terminal app is "Terminal"; an advanced preference can name
         // another (e.g. "iTerm").
         let app = if auto { "Terminal" } else { config.terminal.trim() };
@@ -601,6 +606,9 @@ fn resume_in_terminal(cwd: String, session_id: String) -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     {
+        let script = appconfig::build_resume_script(&cwd, &session_id, &session_title, &config.launch_command);
+        let tmp = write_resume_script(&session_id, "sh", &script)?;
+
         if auto {
             let candidates: &[(&str, &[&str])] = &[
                 ("gnome-terminal", &["--"]),
@@ -613,12 +621,7 @@ fn resume_in_terminal(cwd: String, session_id: String) -> Result<(), String> {
             ];
             for (term, prefix) in candidates {
                 let mut cmd = std::process::Command::new(term);
-                cmd.args(*prefix)
-                    .arg("claude")
-                    .arg("--resume")
-                    .arg(&session_id)
-                    .args(&extra_args)
-                    .current_dir(&cwd);
+                cmd.args(*prefix).arg("sh").arg(&tmp);
                 if cmd.spawn().is_ok() {
                     return Ok(());
                 }
@@ -628,18 +631,13 @@ fn resume_in_terminal(cwd: String, session_id: String) -> Result<(), String> {
 
         // Advanced: the preference is a terminal command template, e.g.
         // "gnome-terminal --" or "konsole -e" — the first token is the program,
-        // the rest are args that precede the `claude` invocation.
+        // the rest are args that precede the `sh <script>` invocation.
         let tokens = appconfig::parse_args(&config.terminal);
         let Some((program, prefix_args)) = tokens.split_first() else {
             return Err("No terminal command configured".to_string());
         };
         let mut cmd = std::process::Command::new(program);
-        cmd.args(prefix_args)
-            .arg("claude")
-            .arg("--resume")
-            .arg(&session_id)
-            .args(&extra_args)
-            .current_dir(&cwd);
+        cmd.args(prefix_args).arg("sh").arg(&tmp);
         return cmd
             .spawn()
             .map(|_| ())
@@ -648,20 +646,13 @@ fn resume_in_terminal(cwd: String, session_id: String) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
+        let script = appconfig::build_resume_script_windows(&cwd, &session_id, &session_title, &config.launch_command);
+        let tmp = write_resume_script(&session_id, "bat", &script)?;
+
         if auto {
             std::process::Command::new("cmd")
-                .args([
-                    "/C",
-                    "start",
-                    "Claude Resume",
-                    "cmd",
-                    "/K",
-                    "claude",
-                    "--resume",
-                    &session_id,
-                ])
-                .args(&extra_args)
-                .current_dir(&cwd)
+                .args(["/C", "start", "Claude Resume", "cmd", "/K", "call"])
+                .arg(&tmp)
                 .spawn()
                 .map_err(|e| e.to_string())?;
             return Ok(());
@@ -673,12 +664,7 @@ fn resume_in_terminal(cwd: String, session_id: String) -> Result<(), String> {
             return Err("No terminal command configured".to_string());
         };
         let mut cmd = std::process::Command::new(program);
-        cmd.args(prefix_args)
-            .arg("claude")
-            .arg("--resume")
-            .arg(&session_id)
-            .args(&extra_args)
-            .current_dir(&cwd);
+        cmd.args(prefix_args).arg("cmd").arg("/K").arg("call").arg(&tmp);
         return cmd
             .spawn()
             .map(|_| ())
@@ -912,8 +898,6 @@ pub fn run() {
             search::state::search,
             search::state::refresh_index,
             search::state::index_status,
-            settings::read_claude_settings,
-            settings::write_claude_settings,
             appconfig::get_app_config,
             appconfig::set_app_config,
         ]);

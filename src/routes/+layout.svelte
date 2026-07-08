@@ -4,13 +4,18 @@
   import CopyContextMenu from '$lib/components/CopyContextMenu.svelte';
   import UpdateBanner from '$lib/components/UpdateBanner.svelte';
   import { checkForUpdates } from '$lib/updater.svelte';
-  import { isTauri } from '$lib/api';
+  import { isTauri, getAppConfig } from '$lib/api';
   let { children } = $props();
 
   onMount(() => {
     // Only in the packaged desktop app — skip in browser preview/dev.
     if (!isTauri()) return;
-    checkForUpdates(true);
+    // App Config's "check for updates on launch" toggle gates only this
+    // silent launch-time check — the footer's manual "Check for updates"
+    // button (+page.svelte's handleCheckForUpdates, non-silent) always runs.
+    getAppConfig().then((config) => {
+      if (config.updateCheckOnLaunch) checkForUpdates(true);
+    });
 
     // Rendered message content ({@html}'d markdown) contains plain <a href>
     // tags with no click handling. Left alone, clicking one makes the Tauri

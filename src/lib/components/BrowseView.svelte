@@ -36,11 +36,9 @@
   let {
     onOpen,
     onJump,
-    onOpenSettings,
   }: {
     onOpen: (meta: SessionMeta) => void;
     onJump: (hit: SearchHit) => void;
-    onOpenSettings?: (cwd: string, label: string) => void;
   } = $props();
 
   // Source filter presented as three friendly groups over the low-level sources.
@@ -468,11 +466,11 @@
   }
 
   // ── resume (from a list card, without opening the session first) ──────────
-  async function doResume(sessionPath: string, cwd: string) {
+  async function doResume(sessionPath: string, cwd: string, title: string) {
     const id = sessionIdFromPath(sessionPath);
     await copyToClipboard(resumeCommand(cwd, id));
     try {
-      await resumeInTerminal(cwd, id);
+      await resumeInTerminal(cwd, id, title);
       showToast('Opened in a terminal — command also copied to clipboard');
     } catch {
       showToast('Could not open a terminal — command copied to clipboard instead');
@@ -587,15 +585,6 @@
       <div class="project-group">
         <div class="project-group__head">
           <div class="project-group__name" title={pg.project} data-copy-text={pg.project}>{pg.project}</div>
-          {#if onOpenSettings && pg.items[0]?.meta?.cwd}
-            <button
-              type="button"
-              class="project-group__settings"
-              title="Claude Code settings for this project"
-              aria-label="Claude Code settings for this project"
-              onclick={() => onOpenSettings?.(pg.items[0].meta!.cwd, pg.project)}
-            >⚙</button>
-          {/if}
         </div>
 
         {#each pg.items as sg (sg.path)}
@@ -629,7 +618,7 @@
                 {#if sg.meta}
                   <button
                     type="button" class="btn btn--ghost btn--sm resume-btn"
-                    onclick={(e) => { e.stopPropagation(); doResume(sg.path, sg.meta!.cwd); }}
+                    onclick={(e) => { e.stopPropagation(); doResume(sg.path, sg.meta!.cwd, sg.title); }}
                     aria-label="Resume this session in a terminal"
                     title="claude --resume"
                   >Resume</button>
@@ -684,15 +673,6 @@
     <div class="project-group">
       <div class="project-group__head">
         <div class="project-group__name" title={pg.project} data-copy-text={pg.project}>{pg.project}</div>
-        {#if onOpenSettings && pg.items[0]?.meta.cwd}
-          <button
-            type="button"
-            class="project-group__settings"
-            title="Claude Code settings for this project"
-            aria-label="Claude Code settings for this project"
-            onclick={() => onOpenSettings?.(pg.items[0].meta.cwd, pg.project)}
-          >⚙</button>
-        {/if}
       </div>
 
       {#each pg.items as s (s.path)}
@@ -725,7 +705,7 @@
             </button>
             <button
               type="button" class="btn btn--ghost btn--sm resume-btn"
-              onclick={(e) => { e.stopPropagation(); doResume(s.path, s.meta.cwd); }}
+              onclick={(e) => { e.stopPropagation(); doResume(s.path, s.meta.cwd, s.title); }}
               aria-label="Resume this session in a terminal"
               title="claude --resume"
             >Resume</button>

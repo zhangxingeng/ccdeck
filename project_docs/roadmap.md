@@ -433,6 +433,56 @@ production build. `cargo build --lib`: zero warnings. **Not run:** `pnpm exec pl
 sandbox this was built in hit `ENOSPC` (system file-watcher limit) starting Vite's dev server for
 Playwright, unrelated to this change; founder should run the e2e suite before shipping.
 
+## Phase 12 — Remove settings editor; App Config page (env-var launch command + update toggle) (DONE)
+
+Closes **#18** and **#19**, built together in one pass (per #19's own note: "coordinate with #18 ...
+either land together or keep a stopgap entry point" — landing together avoided ever leaving Resume
+without a working launch mechanism, and avoided merge friction since both issues touch the same
+files: the header entry-point button, `appconfig.rs`, `lib.rs`'s `resume_in_terminal`).
+
+- **Removed (#18)** — the schema-driven Claude Code `settings.json` editor, entirely, no
+  replacement UI: `SettingsView.svelte` (501 lines), `src-tauri/src/settings.rs` (544 lines) and its
+  `mod settings`/command registrations, the vendored ~190KB `src/lib/schema/claude-code-settings.json`,
+  and the matching `api.ts`/`types.ts` surface (`readClaudeSettings`/`writeClaudeSettings`/
+  `isSettingsConflict`/the dev-mode settings shims, `SettingsTier`/`SettingsTierData`/
+  `SettingsConflictValue`/`SettingsConflict`/`ClaudeSettings`). Users hand-edit `settings.json`
+  themselves now — same "lean beats impressive-and-idle" call already made for the chat-viewer diff
+  machinery in Phase 9.
+- **Added (#19)** — `AppConfigView.svelte`, a single global-scope page (launch command / terminal /
+  update toggle are app-level preferences, not per-project) replacing the removed "⚙ Settings" header
+  button with "⚙ App Config". Holds: the existing terminal-launcher preference (unchanged semantics),
+  a new fully-custom `launch_command` (multi-line-capable, defaults to
+  `claude --resume "$CCDECK_SESSION_ID"`, with two starter presets — plain and a `tmux new-session`
+  example), and a new `update_check_on_launch` toggle (defaults `true`, gating only the silent
+  launch-time check in `+layout.svelte`; the footer's manual "Check for updates" stays ungated).
+- **Env-var launch mechanism** — `resume_in_terminal` now exports `CCDECK_SESSION_ID`,
+  `CCDECK_SESSION_TITLE`, `CCDECK_CWD` into the launched command's environment instead of splicing
+  a session id into a hardcoded `claude --resume <id> <extra-args>` string. `terminal_args` is
+  retired (folded into the free-text `launch_command` — keeping both would be two mechanisms doing
+  the same job); dropping it needed no migration since `AppConfig` has no `deny_unknown_fields`, so a
+  stale on-disk `terminalArgs` key is simply ignored on next load (covered by a round-trip unit test
+  deserializing a JSON blob containing the stale key, per this repo's parse/serialize testing
+  convention). The three previously-duplicated per-OS command-string builders were replaced with one
+  shared pure function (`appconfig::build_resume_script`, plus a Windows `.bat` counterpart) that
+  every terminal-emulator candidate now invokes via `sh <script-path>` (or the OS-native equivalent)
+  instead of re-deriving the command per platform — the only way a multi-line custom command works
+  uniformly across `open -a`, `gnome-terminal --`, `konsole -e`, `wt`, etc. `resume_in_terminal`
+  gained a `session_title` parameter, threaded through from all three call sites
+  (`+page.svelte::resumeSession`, `BrowseView.svelte::doResume`, `SessionEditor.svelte::doResumeFrom`)
+  reusing each component's existing display-title value.
+- Per-project settings gear icon in `BrowseView.svelte` (two near-identical blocks) was deleted, not
+  relocated — App Config has no per-project analog.
+
+### Verification (Phase 12)
+
+`cargo test --lib`: 36/36 passing (includes new `appconfig` module tests: stale-key round trip,
+default-`true` update toggle, script-builder unit tests for both POSIX and Windows shapes).
+`pnpm check`: 0 errors/warnings across 221 files. `pnpm test:smoke`: 105/105 assertions still green —
+no smoke test touched the removed/changed surface. `pnpm build`: clean production build.
+**Not performed:** live GUI verification (open App Config, toggle the update check, save, reload) —
+the Chrome browser-automation extension wasn't connected in the sandbox this was built in, same gap
+noted for Phase 6/7's live-verification steps. Founder should do a visual pass before shipping.
+
 ## Verification performed
 
 - `cargo test --lib` (src-tauri): 30/30 passing.
@@ -452,23 +502,18 @@ Playwright, unrelated to this change; founder should run the e2e suite before sh
 - New app icon/logo art for "CC Deck" (needs founder-supplied art).
 - Guided onboarding / install-Claude-Code flow, for reaching truly non-technical users who don't
   yet have Claude Code installed.
-- Heavier JSON-Schema validation (`ajv` or similar) for the settings form, if silent type coercion
-  proves too loose in practice.
 
 ## Future ideas (exploratory — not planned, not scoped, no timeline)
 
 Raised by the founder while reviewing the 0.6.0 release. Recorded here so they aren't lost, but
 none of these are committed work — each needs its own design pass before becoming a real phase.
 
-- **"Ask Claude" about a setting.** Inline AI help inside `SettingsView` so a user can ask what a
-  specific field does / whether a value is sane, instead of just reading the schema description.
-  Open design question (founder's own words): per-field AI help feels like a chore to wire up
-  field-by-field, but one global "ask about this settings file" affordance might lose the specific
-  context of which field the user is confused about. Possible directions to explore later: a
-  skill-file-style prompt template fed the schema + current tier values + the field in focus;
-  or a single chat panel scoped to the currently-open tier. Needs a design pass on UX (where the
-  entry point lives) and on how it calls out to Claude (local `claude` CLI shellout? API key?)
-  before any implementation starts.
+- **"Ask Claude" about a setting — moot (2026-07-08).** Inline AI help inside `SettingsView` so a
+  user could ask what a specific field does / whether a value is sane, instead of just reading the
+  schema description. Phase 12 removed `SettingsView` and the whole schema-driven settings editor
+  entirely (issue #18: users hand-edit `settings.json` themselves now), so the surface this idea
+  was scoped to no longer exists. Recorded here rather than deleted so the underlying theme —
+  embedding AI help into a CC Deck surface — isn't lost if it resurfaces scoped to something else.
 - **Selective / smarter chat compaction — dropped (2026-07-07).** A finer-grained alternative to
   Claude Code's raw `/compact`, letting a user selectively condense parts of a long conversation.
   Explored further (a design sketch lived briefly at `project_docs/future/conversation-compactor.md`)

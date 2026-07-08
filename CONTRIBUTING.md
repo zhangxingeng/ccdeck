@@ -55,7 +55,7 @@ equivalent per-OS bundles elsewhere) if you want to test a real install.
 1. Fork the repo and create a branch off `main`.
 2. Keep PRs focused — one feature or fix per PR is easier to review than a bundle of unrelated
    changes.
-3. Add or update Rust unit tests for backend logic changes (see `src-tauri/src/settings.rs` or
+3. Add or update Rust unit tests for backend logic changes (see `src-tauri/src/appconfig.rs` or
    `src-tauri/src/search/query.rs` for examples of the test style used here).
 4. If your change is user-facing, mention it in the PR description — no changelog file to update,
    just a clear description.
