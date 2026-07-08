@@ -47,6 +47,7 @@
   import { groupDisplayItems } from '$lib/displayModel';
   import SessionMetaCard from './SessionMetaCard.svelte';
   import MessageCell from './MessageCell.svelte';
+  import ToolGroup from './ToolGroup.svelte';
   import InlineSearchPanel from './InlineSearchPanel.svelte';
 
   // ── Props ──────────────────────────────────────────────────────────────────
@@ -140,6 +141,7 @@
     key: string;
     row: DraftRow;
     entry: Entry;
+    hasText: boolean;
   }
 
   function parseLine(line: string): Entry | null {
@@ -147,9 +149,9 @@
     return es.length > 0 ? es[0] : null;
   }
 
-  // Renderable rows (conversational lines with visible blocks — user/assistant
-  // text only). Pure meta/echo lines parse to nothing here but stay preserved
-  // in the draft and pass through untouched on save.
+  // Renderable rows (conversational lines with visible blocks — text,
+  // thinking, tool_use, tool_result). Pure meta/echo lines parse to nothing
+  // here but stay preserved in the draft and pass through untouched on save.
   let renderable = $derived.by<RenderRow[]>(() => {
     if (!draft) return [];
     const out: RenderRow[] = [];
@@ -157,7 +159,7 @@
       const row = draft.rows[key];
       const entry = parseLine(row.value);
       if (!entry || entry.blocks.length === 0) continue;
-      out.push({ key, row, entry });
+      out.push({ key, row, entry, hasText: entry.blocks.some((b) => b.blockType === 'text') });
     }
     return out;
   });
@@ -165,8 +167,10 @@
   // Fast key → RenderRow lookup for the display loop.
   let rmap = $derived(new Map(renderable.map((r) => [r.key, r])));
 
-  // One chat bubble per renderable row.
-  let displayItems = $derived(groupDisplayItems(renderable.map((r) => r.key)));
+  // Chat bubbles interleaved with collapsed tool-activity groups.
+  let displayItems = $derived(
+    groupDisplayItems(renderable.map((r) => ({ key: r.key, hasText: r.hasText })))
+  );
   let visibleItems = $derived(displayItems.slice(0, visibleCount));
 
   // ── Jump-to-hit (from search) ────────────────────────────────────────────
@@ -176,7 +180,9 @@
     if (!draft) return;
     const rr = renderable.find((r) => r.entry.uuid === uuid);
     if (!rr) return;
-    const idx = displayItems.findIndex((it) => it.key === rr.key);
+    const idx = displayItems.findIndex((it) =>
+      it.kind === 'message' ? it.key === rr.key : it.keys.includes(rr.key)
+    );
     if (idx < 0) return;
     if (idx >= visibleCount) visibleCount = idx + 50;
     await tick();
@@ -491,15 +497,21 @@
 
   <!-- ── Messages ─────────────────────────────────────────────────────────── -->
   <div class="session-turns">
-    {#each visibleItems as item (item.key)}
-      {@const rr = rmap.get(item.key)}
+    {#each visibleItems as item, ii (item.kind === 'message' ? item.key : item.keys.join('|') + ':' + ii)}
       <div class="jump-anchor">
-        {#if rr}
-          <MessageCell
-            row={rr.row}
-            entry={rr.entry}
-            onBlockEdit={(o, t) => doBlockEdit(item.key, o, t)}
-            onResumeFrom={() => doResumeFrom(item.key)}
+        {#if item.kind === 'message'}
+          {@const rr = rmap.get(item.key)}
+          {#if rr}
+            <MessageCell
+              row={rr.row}
+              entry={rr.entry}
+              onBlockEdit={(o, t) => doBlockEdit(item.key, o, t)}
+              onResumeFrom={() => doResumeFrom(item.key)}
+            />
+          {/if}
+        {:else}
+          <ToolGroup
+            items={item.keys.map((k) => rmap.get(k)).filter((r) => r !== undefined)}
           />
         {/if}
       </div>

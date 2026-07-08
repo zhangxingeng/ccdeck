@@ -66,13 +66,29 @@ const userTurns = session.turns.filter(t => t.role === 'user');
 assert(assistantTurns.length > 0, `${assistantTurns.length} assistant turns`);
 assert(userTurns.length > 0, `${userTurns.length} user turns`);
 
-// Key: thinking/tool_use/tool_result blocks are trimmed entirely — the
-// display model only ever carries user/assistant text blocks now.
+// Key (issue #14): thinking/tool_use blocks are preserved alongside text now
+// — the display model carries the full block set again, read-only for
+// non-text blocks. (tool_result-only user entries are still deliberately
+// excluded from buildSession's turns by hasUserText() — pre-existing,
+// unrelated to #14: the export-only Turn/Session path never showed bare
+// tool results as their own "user turn". tool_result IS parsed at the Entry
+// level — see the parseJsonl assertion below — the editor's own per-line
+// rendering path (SessionEditor.svelte) is what actually surfaces it.)
 const allBlocks = session.turns.flatMap(t => t.blocks);
 const nonTextBlocks = allBlocks.filter(b => b.blockType !== 'text');
-assert(nonTextBlocks.length === 0, `no non-text blocks survive parsing (found ${nonTextBlocks.length})`);
-assert(allBlocks.every(b => b.toolOutput === undefined && b.agentId === undefined && b.subagent === undefined),
-  'no tool/agent/subagent fields survive on any block');
+assert(nonTextBlocks.length > 0, `non-text blocks survive parsing (found ${nonTextBlocks.length})`);
+assert(allBlocks.some(b => b.blockType === 'thinking'), 'thinking blocks present');
+assert(allBlocks.some(b => b.blockType === 'tool_use'), 'tool_use blocks present');
+// The subagent-era fields are gone from ContentBlock entirely (issue #14
+// drops isAsync/agentId/subagent) — no block carries them.
+assert(allBlocks.every(b => b.agentId === undefined && b.subagent === undefined && b.isAsync === undefined),
+  'no subagent-era fields survive on any block');
+
+// tool_result IS parsed correctly at the Entry level (parseJsonl), even
+// though buildSession's Turn grouping (above) doesn't surface tool-result-only
+// user entries as their own turn.
+const entryToolResults = entries.flatMap(e => e.blocks).filter(b => b.blockType === 'tool_result');
+assert(entryToolResults.length > 0, `tool_result blocks parsed at the Entry level (found ${entryToolResults.length})`);
 
 // Interrupted turn
 const interruptedTurn = session.turns.find(t => t.isInterrupted);
