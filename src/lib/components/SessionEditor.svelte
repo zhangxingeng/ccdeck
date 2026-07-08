@@ -46,13 +46,15 @@
     deleteMessage,
     deleteThinking,
     deleteToolGroup,
+    deleteBulk,
     undelete,
   } from '$lib/editDraft';
   import type { Draft, DraftRow } from '$lib/editDraft';
-  import { groupDisplayItems } from '$lib/displayModel';
+  import { groupDisplayItems, deriveTurnSpans } from '$lib/displayModel';
   import SessionMetaCard from './SessionMetaCard.svelte';
   import MessageCell from './MessageCell.svelte';
   import ToolGroup from './ToolGroup.svelte';
+  import TurnDivider from './TurnDivider.svelte';
   import InlineSearchPanel from './InlineSearchPanel.svelte';
 
   // ── Props ──────────────────────────────────────────────────────────────────
@@ -178,6 +180,20 @@
     groupDisplayItems(renderable.map((r) => ({ key: r.key, hasText: r.hasText })))
   );
   let visibleItems = $derived(displayItems.slice(0, visibleCount));
+
+  // Turn spans (delete-as-a-unit): a user-with-text bubble starts a turn and it
+  // runs to the next such bubble (see displayModel.ts). A turn always begins on
+  // a display-item boundary (a user-with-text row is its own message bubble,
+  // never inside a tool group), so we can key the divider by the span's first
+  // row key and render it above whichever display item starts there.
+  let turnSpans = $derived(
+    deriveTurnSpans(renderable.map((r) => ({ key: r.key, type: r.entry.type, hasText: r.hasText })))
+  );
+  let turnByStartKey = $derived.by(() => {
+    const m = new Map<string, string[]>();
+    for (const span of turnSpans) m.set(span.keys[0], span.keys);
+    return m;
+  });
 
   // ── Jump-to-hit (from search) ────────────────────────────────────────────
   // Find the display-item index whose message uuid matches, ensure it's within
@@ -331,10 +347,11 @@
     mutate(undelete(draft, [blockKey(rr.row, blockIndex)]));
   }
 
-  // Whole-group delete/undelete: every block in every member row of a
-  // toolgroup. (Turn-level delete and multi-select bulk delete are a later
-  // phase — this is just the one existing grouping unit, per issue #14.)
-  function groupBlockKeys(keys: string[]): string[] {
+  // Expand a set of row keys to every block key they carry. The single source
+  // of truth for "which block keys does this unit cover" — used by tool-group,
+  // turn, and bulk deletes alike, so none of them hand-roll key math (the
+  // originalIndex:contentIndex invariant lives only in editDraft.blockKey).
+  function rowsBlockKeys(keys: string[]): string[] {
     const out: string[] = [];
     for (const rowKey of keys) {
       const rr = rmap.get(rowKey);
@@ -343,11 +360,30 @@
     }
     return out;
   }
+  /** True when every block across the given rows is already soft-deleted (drives
+   *  the Delete↔Restore label flip for groups and turns). */
+  function rowsAllDeleted(keys: string[]): boolean {
+    if (!draft) return false;
+    const bks = rowsBlockKeys(keys);
+    return bks.length > 0 && bks.every((k) => draft!.deletedBlocks.has(k));
+  }
   function doDeleteToolGroup(keys: string[]) {
-    if (draft) mutate(deleteToolGroup(draft, groupBlockKeys(keys)));
+    if (draft) mutate(deleteToolGroup(draft, rowsBlockKeys(keys)));
   }
   function doUndeleteToolGroup(keys: string[]) {
-    if (draft) mutate(undelete(draft, groupBlockKeys(keys)));
+    if (draft) mutate(undelete(draft, rowsBlockKeys(keys)));
+  }
+
+  // ── Turn-level delete (issue #14 checkpoint 4) ───────────────────────────
+  // A turn is a span of row keys (see turnSpans). Delete soft-deletes every
+  // block in the span via deleteBulk (cascade-aware — an in-span tool_use
+  // still pulls its tool_result); restore undeletes the same keys. Both go
+  // through rowsBlockKeys → the block-key primitives, no bespoke key math.
+  function doDeleteTurn(keys: string[]) {
+    if (draft) mutate(deleteBulk(draft, rowsBlockKeys(keys)));
+  }
+  function doUndeleteTurn(keys: string[]) {
+    if (draft) mutate(undelete(draft, rowsBlockKeys(keys)));
   }
 
   async function doResumeFrom(key: string) {
@@ -546,6 +582,15 @@
   <!-- ── Messages ─────────────────────────────────────────────────────────── -->
   <div class="session-turns">
     {#each visibleItems as item, ii (item.kind === 'message' ? item.key : item.keys.join('|') + ':' + ii)}
+      {@const startKey = item.kind === 'message' ? item.key : item.keys[0]}
+      {@const turnKeys = turnByStartKey.get(startKey)}
+      {#if turnKeys}
+        <TurnDivider
+          deleted={rowsAllDeleted(turnKeys)}
+          onDelete={() => doDeleteTurn(turnKeys)}
+          onUndelete={() => doUndeleteTurn(turnKeys)}
+        />
+      {/if}
       <div class="jump-anchor">
         {#if item.kind === 'message'}
           {@const rr = rmap.get(item.key)}

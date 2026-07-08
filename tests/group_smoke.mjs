@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path';
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = join(__dir, '..');
 
-const { groupDisplayItems } = await import(join(root, 'src/lib/displayModel.ts'));
+const { groupDisplayItems, deriveTurnSpans, isTurnStart } = await import(join(root, 'src/lib/displayModel.ts'));
 
 let passed = 0, failed = 0;
 function assert(cond, msg) {
@@ -88,6 +88,56 @@ console.log('\n[groupDisplayItems]');
   assert(items.length === 3, `two separate groups, not merged (got ${items.length})`);
   assert(items[0].kind === 'toolgroup' && items[0].keys.length === 2, 'first group has 2 members');
   assert(items[2].kind === 'toolgroup' && items[2].keys.length === 1, 'second group has 1 member');
+}
+
+// ── deriveTurnSpans (issue #14 checkpoint 4) ─────────────────────────────────
+// A turn begins at a user MESSAGE bubble (type==='user' AND hasText) and runs
+// to the next such bubble. A tool_result-only user line (hasText===false) does
+// NOT start a turn. Rows before the first user-with-text form an implicit
+// leading turn.
+console.log('\n[deriveTurnSpans]');
+{
+  assert(deriveTurnSpans([]).length === 0, 'empty rows → no turns');
+
+  // isTurnStart predicate.
+  assert(isTurnStart({ key: 'u', type: 'user', hasText: true }), 'user-with-text is a turn start');
+  assert(!isTurnStart({ key: 'r', type: 'user', hasText: false }), 'tool_result-only user line is NOT a turn start');
+  assert(!isTurnStart({ key: 'a', type: 'assistant', hasText: true }), 'assistant-with-text is NOT a turn start');
+
+  // Canonical shape: user → assistant → (tool_use/result run) → user.
+  // The tool_result user line (hasText false) must stay INSIDE turn 1, not
+  // open a turn of its own.
+  const rows = [
+    { key: 'u1', type: 'user', hasText: true },       // starts turn 1
+    { key: 'a1', type: 'assistant', hasText: true },
+    { key: 'tu1', type: 'assistant', hasText: false }, // tool_use
+    { key: 'tr1', type: 'user', hasText: false },      // tool_result (NOT a turn start)
+    { key: 'a2', type: 'assistant', hasText: true },
+    { key: 'u2', type: 'user', hasText: true },        // starts turn 2
+    { key: 'a3', type: 'assistant', hasText: true },
+  ];
+  const spans = deriveTurnSpans(rows);
+  assert(spans.length === 2, `2 turns (got ${spans.length})`);
+  assert(JSON.stringify(spans[0].keys) === JSON.stringify(['u1', 'a1', 'tu1', 'tr1', 'a2']),
+    `turn 1 spans u1..a2, absorbing the tool_result line: ${JSON.stringify(spans[0].keys)}`);
+  assert(JSON.stringify(spans[1].keys) === JSON.stringify(['u2', 'a3']),
+    `turn 2 spans u2..a3: ${JSON.stringify(spans[1].keys)}`);
+
+  // Implicit leading turn: rows before the first user-with-text.
+  const rows2 = [
+    { key: 's0', type: 'assistant', hasText: true },   // leading (no user yet)
+    { key: 'g0', type: 'assistant', hasText: false },
+    { key: 'u1', type: 'user', hasText: true },         // starts turn 2
+    { key: 'a1', type: 'assistant', hasText: true },
+  ];
+  const spans2 = deriveTurnSpans(rows2);
+  assert(spans2.length === 2, `implicit leading turn + 1 real turn (got ${spans2.length})`);
+  assert(JSON.stringify(spans2[0].keys) === JSON.stringify(['s0', 'g0']), `leading turn holds pre-user rows: ${JSON.stringify(spans2[0].keys)}`);
+  assert(spans2[1].keys[0] === 'u1', 'second turn starts at the first user-with-text row');
+
+  // Every key appears exactly once across all spans, order preserved.
+  const flat = spans.flatMap((s) => s.keys);
+  assert(JSON.stringify(flat) === JSON.stringify(rows.map((r) => r.key)), 'every row key appears exactly once, in order');
 }
 
 // ── Summary ───────────────────────────────────────────────────────────────────

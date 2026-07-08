@@ -34,6 +34,32 @@ const {
   deleteMessage, deleteThinking, deleteToolGroup, deleteBulk, undelete,
 } = await import(join(root, 'src/lib/editDraft.ts'));
 const { parseJsonl } = await import(join(root, 'src/lib/parser.ts'));
+const { deriveTurnSpans } = await import(join(root, 'src/lib/displayModel.ts'));
+
+// Replicate SessionEditor's renderable + rowsBlockKeys derivation so these
+// tests exercise the EXACT key math the UI uses (block key == originalIndex:
+// contentIndex, via editDraft.blockKey), not a bespoke reimplementation.
+function renderableRows(draft) {
+  const out = [];
+  for (const key of draft.order) {
+    const row = draft.rows[key];
+    const es = parseJsonl(row.value);
+    const entry = es.length > 0 ? es[0] : null;
+    if (!entry || entry.blocks.length === 0) continue;
+    out.push({ key, row, entry, hasText: entry.blocks.some((b) => b.blockType === 'text') });
+  }
+  return out;
+}
+function rowsBlockKeys(rr, rowKeys) {
+  const map = new Map(rr.map((r) => [r.key, r]));
+  const out = [];
+  for (const k of rowKeys) {
+    const r = map.get(k);
+    if (!r) continue;
+    r.entry.blocks.forEach((_, bi) => out.push(blockKey(r.row, bi)));
+  }
+  return out;
+}
 
 let passed = 0;
 let failed = 0;
@@ -399,6 +425,82 @@ console.log('\n[delete — delete-group over a row with an unknown block drops t
   assert(!out.includes('grp-1') && !out.includes('server_tool_use'), 'the whole group line is dropped (no orphan half survives)');
   assert(out.includes('still here'), 'the unrelated line is untouched');
   assert(out.split('\n').filter((l) => l.trim()).length === 1, 'exactly one line remains');
+}
+
+// ── Turn-level delete (issue #14 checkpoint 4) ───────────────────────────────
+// Deleting a whole turn (deleteBulk over the span's block keys) then restoring
+// it (undelete over the same keys) must round-trip serializeDraft back to the
+// fixture byte-for-byte — the soft model gives this for free, but the cascade
+// (an in-span tool_use pulling its tool_result) must also restore cleanly.
+console.log('\n[delete — turn delete → undelete is an identity round-trip]');
+{
+  const draft0 = buildDraft(REAL_RAW, '/fake/path.jsonl', 0);
+  const rr = renderableRows(draft0);
+  const spans = deriveTurnSpans(rr.map((r) => ({ key: r.key, type: r.entry.type, hasText: r.hasText })));
+  assert(spans.length >= 2, `fixture has multiple turns (got ${spans.length})`);
+
+  // Pick a turn that actually contains a tool_use, so the round-trip also
+  // exercises the pairing cascade inside the span.
+  const rrMap = new Map(rr.map((r) => [r.key, r]));
+  const turn = spans.find((s) =>
+    s.keys.some((k) => rrMap.get(k)?.entry.blocks.some((b) => b.blockType === 'tool_use'))
+  ) ?? spans[1];
+
+  const bks = rowsBlockKeys(rr, turn.keys);
+  assert(bks.length > 0, 'turn expands to at least one block key');
+
+  let d = deleteBulk(draft0, bks);
+  assert(isDirty(d), 'draft is dirty after a turn delete');
+  assert(serializeDraft(d) !== REAL_RAW, 'a turn delete actually changes the serialized output');
+  // The span's tool_use/tool_result pairs are self-contained (a tool_result is
+  // a no-text user line, which never starts a new turn), so no orphaned half
+  // survives the turn delete.
+  for (const k of turn.keys) {
+    const r = rrMap.get(k);
+    if (!r) continue;
+    for (const b of r.entry.blocks) {
+      if (b.blockType === 'tool_use' && b.toolId) {
+        assert(!serializeDraft(d).includes(b.toolId), `in-turn tool_use ${b.toolId} and its result are both gone (no orphan)`);
+      }
+    }
+  }
+
+  d = undelete(d, bks);
+  assert(!isDirty(d), 'turn delete → undelete leaves the draft clean');
+  assert(d.deletedBlocks.size === 0, 'no residual deleted blocks after undelete');
+  assert(serializeDraft(d) === REAL_RAW, 'turn delete → undelete round-trips byte-for-byte');
+}
+
+// ── Bulk multi-select delete (issue #14 checkpoint 5) ────────────────────────
+// deleteBulk over the union of a MIXED selection (a text bubble + a tool_use
+// whose paired tool_result is NOT itself selected) must still remove the
+// paired result — no orphan.
+console.log('\n[delete — bulk delete over a mixed selection drops paired results, no orphan]');
+{
+  const draft0 = buildDraft(REAL_RAW, '/fake/path.jsonl', 0);
+  const rr = renderableRows(draft0);
+  const rrMap = new Map(rr.map((r) => [r.key, r]));
+
+  // Unit A: the tool_use row at originalIndex 4 (toolu_ls1) — its tool_result
+  // lives on the SEPARATE row at originalIndex 5, which we deliberately do NOT
+  // select. Unit B: an unrelated assistant text bubble.
+  const toolUseRow = rr.find((r) => r.row.originalIndex === 4);
+  const textRow = rr.find((r) => r.hasText && r.entry.type === 'assistant');
+  assert(!!toolUseRow && !!textRow, 'found a tool_use row and a text bubble to select');
+
+  const selectionRowKeys = [toolUseRow.key, textRow.key];
+  const unionBlockKeys = rowsBlockKeys(rr, selectionRowKeys);
+
+  let d = deleteBulk(draft0, unionBlockKeys);
+  const out = serializeDraft(d);
+  assert(!out.includes('toolu_ls1'), 'the selected tool_use AND its non-selected paired tool_result are both gone (cascade)');
+  // The selected text bubble's content is gone too.
+  const textContent = textRow.entry.blocks.find((b) => b.blockType === 'text')?.text ?? '';
+  if (textContent) {
+    assert(!out.includes(textContent.slice(0, 24)), 'the selected text bubble is deleted');
+  }
+  // An unrelated pair is untouched.
+  assert(out.includes('toolu_read1'), 'unrelated tool pairs survive a bulk delete');
 }
 
 // ── Summary ────────────────────────────────────────────────────────────────
