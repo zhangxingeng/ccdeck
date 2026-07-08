@@ -13,12 +13,13 @@
    * case/whole-word/regex mode — see issue #5).
    */
   import { onMount, onDestroy, tick } from 'svelte';
-  import type { SessionMeta, SearchHit } from '$lib/types';
-  import { listSessions, cleanupEmptySessions, homeDir as fetchHomeDir, resumeInTerminal, getAppConfig } from '$lib/api';
+  import type { SessionMeta, SearchHit, ProviderProfile } from '$lib/types';
+  import { listSessions, cleanupEmptySessions, homeDir as fetchHomeDir, resumeInTerminal, getAppConfig, listProviderProfiles } from '$lib/api';
   import { extractMeta, projectLabel, cleanTitle } from '$lib/parser';
   import { renameSession } from '$lib/sessionOps';
   import { copyToClipboard } from '$lib/copy';
   import { sessionIdFromPath, resumeCommand } from '$lib/resume';
+  import ProviderResumeMenu from './ProviderResumeMenu.svelte';
   import {
     search,
     setQuery,
@@ -479,16 +480,55 @@
   }
 
   // ── resume (from a list card, without opening the session first) ──────────
-  async function doResume(sessionPath: string, cwd: string, title: string) {
+  // `providerName` (issue #21) selects an alternate provider profile; omit it
+  // (plain left-click Resume) for the default account. The clipboard fallback
+  // reflects the chosen provider with a MASKED key placeholder.
+  async function doResume(sessionPath: string, cwd: string, title: string, providerName?: string) {
     const id = sessionIdFromPath(sessionPath);
     const { launchCommand } = await getAppConfig();
-    await copyToClipboard(resumeCommand(cwd, id, title, launchCommand));
+    const profile = providerName ? resumeProfiles.find((p) => p.name === providerName) : undefined;
+    const providerInfo = profile
+      ? { name: profile.name, baseUrl: profile.baseUrl, defaultModel: profile.defaultModel }
+      : undefined;
+    await copyToClipboard(resumeCommand(cwd, id, title, launchCommand, providerInfo));
     try {
-      await resumeInTerminal(cwd, id, title);
-      showToast('Opened in a terminal — command also copied to clipboard');
+      await resumeInTerminal(cwd, id, title, providerName);
+      showToast(
+        providerName
+          ? `Opened with ${providerName} — command also copied to clipboard`
+          : 'Opened in a terminal — command also copied to clipboard'
+      );
     } catch {
-      showToast('Could not open a terminal — command copied to clipboard instead');
+      showToast(
+        providerName
+          ? `Could not open with ${providerName} — command copied to clipboard instead`
+          : 'Could not open a terminal — command copied to clipboard instead'
+      );
     }
+  }
+
+  // ── provider picker (right-click on Resume) ───────────────────────────────
+  let resumeMenu = $state<{ x: number; y: number; path: string; cwd: string; title: string } | null>(null);
+  let resumeProfiles = $state<ProviderProfile[]>([]);
+
+  async function openResumeMenu(e: MouseEvent, path: string, cwd: string, title: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      resumeProfiles = await listProviderProfiles();
+    } catch {
+      resumeProfiles = [];
+    }
+    resumeMenu = { x: e.clientX, y: e.clientY, path, cwd, title };
+  }
+  function closeResumeMenu() {
+    resumeMenu = null;
+  }
+  async function pickResume(providerName: string | null) {
+    const m = resumeMenu;
+    if (!m) return;
+    closeResumeMenu();
+    await doResume(m.path, m.cwd, m.title, providerName ?? undefined);
   }
 </script>
 
@@ -642,8 +682,9 @@
                   <button
                     type="button" class="btn btn--ghost btn--sm resume-btn"
                     onclick={(e) => { e.stopPropagation(); doResume(sg.path, sg.meta!.cwd, sg.title); }}
+                    oncontextmenu={(e) => openResumeMenu(e, sg.path, sg.meta!.cwd, sg.title)}
                     aria-label="Resume this session in a terminal"
-                    title="claude --resume"
+                    title="claude --resume — right-click to pick a provider"
                   >Resume</button>
                 {/if}
                 <button
@@ -738,8 +779,9 @@
             <button
               type="button" class="btn btn--ghost btn--sm resume-btn"
               onclick={(e) => { e.stopPropagation(); doResume(s.path, s.meta.cwd, s.title); }}
+              oncontextmenu={(e) => openResumeMenu(e, s.path, s.meta.cwd, s.title)}
               aria-label="Resume this session in a terminal"
-              title="claude --resume"
+              title="claude --resume — right-click to pick a provider"
             >Resume</button>
             <button
               type="button" class="btn btn--ghost btn--sm rename-btn"
@@ -772,6 +814,18 @@
       </div>
     </div>
   </div>
+{/if}
+
+<!-- ── provider picker (right-click Resume) ─────────────────────────────────── -->
+{#if resumeMenu}
+  <ProviderResumeMenu
+    x={resumeMenu.x}
+    y={resumeMenu.y}
+    profiles={resumeProfiles}
+    verb="Resume"
+    onSelect={pickResume}
+    onClose={closeResumeMenu}
+  />
 {/if}
 
 <!-- ── toast ─────────────────────────────────────────────────────────────── -->

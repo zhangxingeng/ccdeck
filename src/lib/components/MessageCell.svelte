@@ -31,6 +31,7 @@
     onDeleteBlock,
     onUndeleteBlock,
     onResumeFrom,
+    onResumeFromContext,
   }: {
     row: DraftRow;
     entry: Entry;
@@ -42,6 +43,9 @@
     onDeleteBlock: (blockIndex: number) => void;
     onUndeleteBlock: (blockIndex: number) => void;
     onResumeFrom: () => void;
+    /** Right-click on the fork-and-resume button — opens the provider picker
+     *  (issue #21). Optional; default no-op keeps the native menu suppressed. */
+    onResumeFromContext?: (e: MouseEvent) => void;
   } = $props();
 
   // ── Derived shape ──────────────────────────────────────────────────────────
@@ -99,7 +103,13 @@
 
   <!-- Hover toolbar -->
   <div class="msg-tools">
-    <button class="msg-tools__btn" onclick={onResumeFrom} title="Fork &amp; resume from here" type="button">⑂</button>
+    <button
+      class="msg-tools__btn"
+      onclick={onResumeFrom}
+      oncontextmenu={(e) => onResumeFromContext?.(e)}
+      title="Fork &amp; resume from here — right-click to pick a provider"
+      type="button"
+    >⑂</button>
   </div>
 
   <!-- Blocks: text blocks are editable; everything else renders read-only.

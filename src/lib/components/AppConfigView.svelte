@@ -255,8 +255,20 @@
     plaintextPrompt = null;
   }
 
-  async function removeProvider(name: string): Promise<void> {
-    if (!confirm(`Delete provider profile "${name}"? Its stored API key will also be removed.`)) return;
+  // Inline delete confirm (mirrors BrowseView's confirmPendingPath pattern —
+  // a pending-name state + inline Confirm/Cancel, not a window.confirm dialog).
+  let pendingDeleteProvider = $state<string | null>(null);
+  function requestRemoveProvider(name: string): void {
+    providersError = null;
+    pendingDeleteProvider = name;
+  }
+  function cancelRemoveProvider(): void {
+    pendingDeleteProvider = null;
+  }
+  async function confirmRemoveProvider(): Promise<void> {
+    const name = pendingDeleteProvider;
+    if (!name) return;
+    pendingDeleteProvider = null;
     try {
       await deleteProviderProfile(name);
       if (draft && draft.name === name) draft = null;
@@ -395,9 +407,15 @@
                 {#if p.defaultModel}<span class="provider-model">{p.defaultModel}</span>{/if}
               </div>
               <div class="provider-actions">
-                <span class="badge {badge.cls}" title={badge.label}>{badge.icon} {badge.label}</span>
-                <button class="btn btn--ghost btn--sm" type="button" onclick={() => startEdit(p)}>Edit</button>
-                <button class="btn btn--ghost btn--sm" type="button" onclick={() => removeProvider(p.name)}>Delete</button>
+                {#if pendingDeleteProvider === p.name}
+                  <span class="hint-inline">Delete profile & its key?</span>
+                  <button class="btn btn--sm btn--danger" type="button" onclick={confirmRemoveProvider}>Confirm</button>
+                  <button class="btn btn--ghost btn--sm" type="button" onclick={cancelRemoveProvider}>Cancel</button>
+                {:else}
+                  <span class="badge {badge.cls}" title={badge.label}>{badge.icon} {badge.label}</span>
+                  <button class="btn btn--ghost btn--sm" type="button" onclick={() => startEdit(p)}>Edit</button>
+                  <button class="btn btn--ghost btn--sm" type="button" onclick={() => requestRemoveProvider(p.name)}>Delete</button>
+                {/if}
               </div>
             </li>
           {/each}

@@ -254,10 +254,17 @@ export async function forkSession(path: string, uptoIndex: number): Promise<Fork
 
 /** Best-effort: open a terminal in `cwd` running the configured resume-launch
  *  command (App Config), with CCDECK_SESSION_ID/CCDECK_SESSION_TITLE/CCDECK_CWD
- *  exported into its environment. */
-export async function resumeInTerminal(cwd: string, sessionId: string, sessionTitle: string): Promise<void> {
+ *  exported into its environment. When `providerName` names a saved provider
+ *  profile (issue #21), its ANTHROPIC_* vars (incl. the keychain-stored key)
+ *  are also exported around the command; omit it for the default account. */
+export async function resumeInTerminal(
+  cwd: string,
+  sessionId: string,
+  sessionTitle: string,
+  providerName?: string
+): Promise<void> {
   if (!isTauri()) throw new Error('Not available outside the desktop app');
-  await call<null>('resume_in_terminal', { cwd, sessionId, sessionTitle });
+  await call<null>('resume_in_terminal', { cwd, sessionId, sessionTitle, providerName });
 }
 
 // ---------------------------------------------------------------------------
