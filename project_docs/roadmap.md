@@ -549,6 +549,47 @@ key, confirm the popover, round-trip an edit across Local/Workspace/User on a re
 Chrome browser-automation extension wasn't connected in this sandbox, the same gap noted for Phase
 6/7/12. Founder should do a visual pass before shipping.
 
+## Phase 14 — Editor simplification + toast/resume fixes, built by concurrent event-based teammates (DONE, resolves #16 #15 #22)
+
+Three code-fix issues cleared in one concurrent burst — the first live test of the **iterative
+teammate protocol** (`project_docs/iterative_teammate_protocol.md`, new this phase): steerable,
+worktree-isolated teammates the manager holds a multi-turn dialogue with (investigate → gate →
+implement + commit → issue-update), as opposed to one-shot passive workers.
+
+- **#16 — editor simplification.** Removed the version-history/restore-backup UI (button + modal +
+  handlers) while keeping the silent single-slot `snapshot`-on-save mechanism and its server-side
+  restore command as the recovery path; moved the dirty indicator + Save / Save-as-copy / Discard
+  out of the floating `SaveRail` (deleted) into the top nav via a `$bindable` save-state surface;
+  dropped "Edit raw JSON" (`RawJsonModal` deleted) and the user/assistant role-change `<select>`;
+  added `cleanup_empty_sessions` — auto-cleans zero-turn, untitled, **stale** session files on the
+  browse scan, gated by a pure `is_cleanup_eligible` guard with a 15-min recency window (and
+  clock-skew-safe `saturating_sub`) so a freshly-created *live* Claude Code session is never deleted
+  out from under a running CLI. The only irreversible action in the batch; unit-tested on all edges.
+- **#15 — stuck toasts/popovers.** The real bugs were not the suspected error-path (that was already
+  covered) but missing `onDestroy` timer cleanup on five surfaces and the update-banner's transient
+  statuses (`checking`/`uptodate`/`error`) never auto-dismissing at all. Fixed via a centralized
+  `setStatus()` dismiss timer in `updater.svelte.ts` plus `onDestroy(clearTimeout)` everywhere.
+- **#22 — clipboard fallback stale since #19.** `resumeCommand()` now mirrors the backend
+  `build_resume_script` (env exports + `cd` + the configured `launch_command` verbatim) instead of a
+  hardcoded `claude --resume <id>`, so the paste-fallback matches what actually launches for custom
+  commands; the Resume tooltip became a generic label rather than a possibly-wrong command preview.
+
+Process notes worth keeping: all three teammates hit the harness's worktree-reclamation-on-idle gap
+(an uncommitted isolation worktree is reclaimed as "unchanged" at the idle boundary) and recovered
+by re-establishing a worktree and re-doing still-uncommitted work — validating the protocol's
+commit-early durability rule, now sharpened in the doc. The manager owned the 3-way merge (only two
+trivial import-line conflicts, since lanes were pre-declared inside the shared hub files).
+
+### Verification (Phase 14)
+
+`pnpm check`: 0 errors / 0 warnings across 221 files. `cargo test --lib`: 51/51 passing (the 47 from
+Phase 13 + 4 new `cleanup_tests` covering stale-eligible, boundary, recent-spared, future-mtime-
+spared, and any-real-content-spared). `pnpm build`: clean production build (this caught a stale
+pre-merge `.svelte-kit`/`.vite` cache 404'ing on the deleted `SaveRail`/`RawJsonModal` during a dev
+run — a cache artifact, not a real dangling reference; the production build resolves cleanly).
+**Live GUI verification: performed by the founder** (top-nav save controls, toast auto-dismiss,
+auto-clean) before the v0.10.0 release.
+
 ## Verification performed
 
 - `cargo test --lib` (src-tauri): 30/30 passing.
@@ -609,3 +650,8 @@ none of these are committed work — each needs its own design pass before becom
   Added `.github/dependabot.yml` covering the three dependency surfaces (pnpm/npm, Cargo, and the
   GitHub Actions versions in our own workflows), weekly, grouped by minor/patch to keep the PR
   volume sane.
+- **v0.10.0 (2026-07-08)** — Phase 14: editor simplification (#16), stuck-toast/popover fixes (#15),
+  and the config-aware resume-clipboard fix (#22), built concurrently by three event-based teammates
+  as the first live run of the iterative teammate protocol. Founder did the visual verification pass
+  before release. (Release-history entries for v0.7.0–v0.9.0 were not recorded at the time; noted
+  here for the next reader rather than backfilled.)
