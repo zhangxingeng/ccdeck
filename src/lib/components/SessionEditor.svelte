@@ -5,7 +5,9 @@
    * This component is the orchestrator: it owns the byte-faithful edit Draft
    * and the save/discard/restore-backup/exit flows, and turns the draft into a
    * display model (one chat bubble per renderable row). All rendering lives in
-   * focused children: SessionMetaCard · MessageCell · SaveRail
+   * focused children: SessionMetaCard · MessageCell. The dirty indicator and
+   * Save / Save as copy / Discard controls live in the top nav (+page.svelte),
+   * driven through the editor's $bindable save-state surface.
    *
    * Safety model (JSON-safe by construction):
    *   - The edit model owns every line; the UI only ever edits a message
@@ -44,7 +46,6 @@
   import { groupDisplayItems } from '$lib/displayModel';
   import SessionMetaCard from './SessionMetaCard.svelte';
   import MessageCell from './MessageCell.svelte';
-  import SaveRail from './SaveRail.svelte';
   import InlineSearchPanel from './InlineSearchPanel.svelte';
 
   // ── Props ──────────────────────────────────────────────────────────────────
@@ -52,12 +53,29 @@
     path,
     onExit = () => {},
     requestExit = $bindable<() => void>(),
+    // Save-state surface — the editor is the single owner of dirty/saving/
+    // change-count, mirrored up to the top nav (the one place the controls
+    // live now that the floating SaveRail is gone). The three request* fns let
+    // the nav's Save / Save as copy / Discard buttons drive the editor's own
+    // save flows (Save/Discard still pop the editor's confirm modals).
+    requestSave = $bindable<() => void>(),
+    requestSaveCopy = $bindable<() => void>(),
+    requestDiscard = $bindable<() => void>(),
+    editorDirty = $bindable(false),
+    editorChangeCount = $bindable(0),
+    editorSaving = $bindable(false),
     scrollToUuid = undefined,
     scrollNonce = 0,
   }: {
     path: string;
     onExit?: () => void;
     requestExit?: () => void;
+    requestSave?: () => void;
+    requestSaveCopy?: () => void;
+    requestDiscard?: () => void;
+    editorDirty?: boolean;
+    editorChangeCount?: number;
+    editorSaving?: boolean;
     scrollToUuid?: string;
     scrollNonce?: number;
   } = $props();
@@ -192,7 +210,7 @@
   });
 
   // Ctrl/Cmd+F opens find-in-chat instead of the browser's own find bar;
-  // Ctrl/Cmd+S saves (same confirm-then-write flow as the SaveRail's Save
+  // Ctrl/Cmd+S saves (same confirm-then-write flow as the top nav's Save
   // button — no new save logic here); Escape closes whichever of this editor's
   // own modals is open (it does NOT drive the exit flow — attemptExit/
   // requestExit above is the only path that leaves the editor).
@@ -247,6 +265,16 @@
 
   // Expose the exit guard to the parent header's ← Back button.
   $effect(() => { requestExit = attemptExit; });
+
+  // Mirror the save-state surface up to the top nav (the single home for these
+  // controls). Save/Discard still route through the editor's own confirm
+  // modals; Save-as-copy runs directly, matching the old SaveRail behaviour.
+  $effect(() => { requestSave = () => { showSaveModal = true; }; });
+  $effect(() => { requestSaveCopy = saveAsCopy; });
+  $effect(() => { requestDiscard = () => { showDiscardModal = true; }; });
+  $effect(() => { editorDirty = dirty; });
+  $effect(() => { editorChangeCount = changeCount; });
+  $effect(() => { editorSaving = saving; });
 
   function mutate(newDraft: Draft) {
     draft = newDraft;
@@ -484,16 +512,6 @@
     {/if}
   </div>
 
-  <!-- ── Floating save rail (right edge) ────────────────────────────────────── -->
-  <SaveRail
-    {dirty}
-    {changeCount}
-    {saving}
-    onSave={() => (showSaveModal = true)}
-    onSaveCopy={saveAsCopy}
-    onDiscard={() => (showDiscardModal = true)}
-  />
-
   <!-- ── Back to top ─────────────────────────────────────────────────────────── -->
   {#if showBackToTop}
     <button
@@ -608,8 +626,8 @@
   .find-toggle-row__kbd { color: var(--text-faint); font-size: 0.7rem; margin-left: 0.3rem; }
 
   /* ── Back to top ──────────────────────────────────────────────  */
-  /* Bottom-right, clear of SaveRail (which is vertically centered at the
-     same right edge) so the two floating controls never overlap. */
+  /* Pinned bottom-right — the only floating control now that the save rail
+     has moved up into the top nav. */
   .back-to-top {
     position: fixed; right: 1.25rem; bottom: 1.25rem; z-index: 20;
     padding: 0.45rem 0.8rem; font-size: 0.78rem;

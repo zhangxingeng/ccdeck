@@ -101,6 +101,17 @@
   // editor can prompt about unsaved edits before we navigate away.
   let requestEditorExit = $state<(() => void) | undefined>(undefined);
 
+  // Save-state surface, hoisted out of SessionEditor so the dirty indicator +
+  // Save / Save as copy / Discard controls live in the top nav (the one place
+  // that manages editor state). The editor owns the logic; these bindings just
+  // mirror its state up and let the nav buttons trigger its save flows.
+  let requestEditorSave = $state<(() => void) | undefined>(undefined);
+  let requestEditorSaveCopy = $state<(() => void) | undefined>(undefined);
+  let requestEditorDiscard = $state<(() => void) | undefined>(undefined);
+  let editorDirty = $state(false);
+  let editorChangeCount = $state(0);
+  let editorSaving = $state(false);
+
   // Ctrl/Cmd+K "go to search" — set right before we ask to leave the viewer
   // (which may show a dirty-guard prompt) or App Config, then consumed by
   // backToBrowse() once we actually land back on the browse view.
@@ -161,6 +172,14 @@
     current = null;
     loadError = null;
     requestEditorExit = undefined;
+    // Reset the mirrored save state so a stale dirty indicator can't flash
+    // before the next editor mounts and re-syncs.
+    requestEditorSave = undefined;
+    requestEditorSaveCopy = undefined;
+    requestEditorDiscard = undefined;
+    editorDirty = false;
+    editorChangeCount = 0;
+    editorSaving = false;
     if (focusSearchPending) {
       focusSearchPending = false;
       tick().then(focusBrowseSearch);
@@ -307,6 +326,20 @@ ${contentHtml}
       <button class="btn btn--ghost btn--sm" onclick={handleBack} type="button">
         ← Back
       </button>
+      {#if editorDirty}
+        <span class="editor-dirty">
+          {editorChangeCount} unsaved {editorChangeCount === 1 ? 'change' : 'changes'}
+        </span>
+        <button class="btn btn--sm btn--primary" onclick={() => requestEditorSave?.()} disabled={editorSaving} type="button">
+          Save
+        </button>
+        <button class="btn btn--sm" onclick={() => requestEditorSaveCopy?.()} disabled={editorSaving} type="button">
+          Save as copy
+        </button>
+        <button class="btn btn--ghost btn--sm" onclick={() => requestEditorDiscard?.()} disabled={editorSaving} type="button">
+          Discard
+        </button>
+      {/if}
       <button class="btn btn--sm" onclick={exportHtml} type="button">
         Export HTML
       </button>
@@ -352,6 +385,12 @@ ${contentHtml}
       {scrollNonce}
       onExit={backToBrowse}
       bind:requestExit={requestEditorExit}
+      bind:requestSave={requestEditorSave}
+      bind:requestSaveCopy={requestEditorSaveCopy}
+      bind:requestDiscard={requestEditorDiscard}
+      bind:editorDirty
+      bind:editorChangeCount
+      bind:editorSaving
     />
     {#if exporting}
       <!-- Hidden read-only render captured by exportHtml(), then unmounted -->
@@ -384,3 +423,15 @@ ${contentHtml}
 {#if resumeMsg}
   <div class="toast" role="status">{resumeMsg}</div>
 {/if}
+
+<style>
+  /* Unsaved-change indicator in the top nav (moved here from the old floating
+     SaveRail — the nav is now the single home for editor save state). */
+  .editor-dirty {
+    align-self: center;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--accent-user);
+    white-space: nowrap;
+  }
+</style>
