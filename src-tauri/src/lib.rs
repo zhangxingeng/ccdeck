@@ -189,6 +189,35 @@ fn scan_session_lines(content: &str) -> SessionScanStats {
     stats
 }
 
+/// How long a zero-turn/untitled session file is left alone before it's eligible
+/// for auto-cleanup. A freshly-created session that a *live* Claude Code process
+/// just opened can legitimately have no logged turns for a short while — this
+/// window keeps us from deleting one out from under a running CLI (the only
+/// irreversible action in the browse scan). 15 minutes, erring toward keeping.
+const CLEANUP_RECENCY_WINDOW_SECS: u64 = 15 * 60;
+
+/// Whether a session file is eligible for auto-cleanup. Three conditions must
+/// ALL hold: it has zero conversational turns (no `user` and no `assistant`
+/// lines), it was never given a custom title (a manual /rename is a strong
+/// signal the user cares about it), AND it is *stale* — untouched for at least
+/// `recency_window_secs`. The staleness guard is the safety rail: only truly
+/// empty, untitled, and cold files are ever removed; anything with real content
+/// or a recent write is always spared. Pure function of its inputs so the guard
+/// is unit-testable without touching the filesystem.
+fn is_cleanup_eligible(
+    stats: &SessionScanStats,
+    mtime_secs: u64,
+    now_secs: u64,
+    recency_window_secs: u64,
+) -> bool {
+    stats.user_count == 0
+        && stats.assistant_count == 0
+        && stats.custom_title.is_empty()
+        // saturating_sub so a future-dated mtime (clock skew) reads as age 0,
+        // i.e. NOT stale — again erring toward keeping the file.
+        && now_secs.saturating_sub(mtime_secs) >= recency_window_secs
+}
+
 /// Find `key_token` (e.g. `"\"sessionId\":\""`) in `line` and replace the quoted
 /// string value that follows it with `new_value`, leaving the rest of the line
 /// byte-identical. Assumes the value itself never contains an escaped quote —
@@ -361,6 +390,78 @@ fn list_sessions() -> Result<Vec<SessionMeta>, String> {
     }
 
     Ok(sessions)
+}
+
+/// Auto-clean junk session files: zero-turn, untitled, and stale `*.jsonl`
+/// under the projects dir. The frontend calls this once from the browse-list
+/// scan (BrowseView's onMount, just before `list_sessions`), so cleanup runs
+/// at app start and on every return to the browse view. Uses the exact same
+/// walk/skip rules as `list_sessions` (same dir filters, same `agent-*` skip)
+/// and the shared `scan_session_lines`, gated by [`is_cleanup_eligible`] so
+/// only genuinely-empty, untitled, cold files are removed — never real content.
+/// Returns the number of files deleted. Best-effort: a file whose metadata or
+/// mtime can't be read, or that fails to delete, is simply skipped.
+#[tauri::command]
+fn cleanup_empty_sessions() -> Result<u32, String> {
+    let projects = projects_dir_inner()
+        .ok_or_else(|| "Projects directory not found".to_string())?;
+    let now = unix_secs(SystemTime::now());
+    let mut removed: u32 = 0;
+
+    let top_entries = fs::read_dir(&projects).map_err(|e| e.to_string())?;
+    for top in top_entries.flatten() {
+        let project_path = top.path();
+        if !project_path.is_dir() {
+            continue;
+        }
+        let dir_name = match project_path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        if dir_name == "subagents" || dir_name == "tool-results" {
+            continue;
+        }
+
+        let inner = match fs::read_dir(&project_path) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for jentry in inner.flatten() {
+            let file_path = jentry.path();
+            let fname = match file_path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if !fname.ends_with(".jsonl") {
+                continue;
+            }
+            if fname.starts_with("agent-") {
+                continue;
+            }
+
+            let meta = match fs::metadata(&file_path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            // Skip (keep) any file whose mtime we can't read — never delete
+            // something we can't prove is stale.
+            let mtime = match meta.modified().ok().map(unix_secs) {
+                Some(m) => m,
+                None => continue,
+            };
+
+            let content = fs::read_to_string(&file_path).unwrap_or_default();
+            let stats = scan_session_lines(&content);
+
+            if is_cleanup_eligible(&stats, mtime, now, CLEANUP_RECENCY_WINDOW_SECS)
+                && fs::remove_file(&file_path).is_ok()
+            {
+                removed += 1;
+            }
+        }
+    }
+
+    Ok(removed)
 }
 
 /// Return raw UTF-8 contents of a session .jsonl file.
@@ -872,6 +973,70 @@ mod write_session_snapshot_tests {
     }
 }
 
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    const NOW: u64 = 1_000_000_000;
+    const WINDOW: u64 = CLEANUP_RECENCY_WINDOW_SECS;
+
+    /// A zero-turn, untitled file that's been sitting cold IS eligible.
+    #[test]
+    fn stale_zero_turn_untitled_is_eligible() {
+        let stats = SessionScanStats {
+            line_count: 3, // meta/summary lines only, no user/assistant turns
+            ..Default::default()
+        };
+        let mtime = NOW - WINDOW - 60; // older than the window
+        assert!(is_cleanup_eligible(&stats, mtime, NOW, WINDOW));
+    }
+
+    /// The safety rail: a freshly-created zero-turn session (a live CLI may have
+    /// just opened it) is SPARED until it goes stale.
+    #[test]
+    fn recent_zero_turn_is_spared() {
+        let stats = SessionScanStats {
+            line_count: 3,
+            ..Default::default()
+        };
+        // Modified 60s ago — well inside the recency window.
+        let mtime = NOW - 60;
+        assert!(!is_cleanup_eligible(&stats, mtime, NOW, WINDOW));
+        // Exactly at the boundary counts as stale (>= window); just under does not.
+        assert!(is_cleanup_eligible(&stats, NOW - WINDOW, NOW, WINDOW));
+        assert!(!is_cleanup_eligible(&stats, NOW - WINDOW + 1, NOW, WINDOW));
+    }
+
+    /// A future-dated mtime (clock skew) must never read as stale.
+    #[test]
+    fn future_mtime_is_spared() {
+        let stats = SessionScanStats {
+            line_count: 3,
+            ..Default::default()
+        };
+        assert!(!is_cleanup_eligible(&stats, NOW + 500, NOW, WINDOW));
+    }
+
+    /// Real content is never touched, no matter how old: a single user line,
+    /// a single assistant line, or a custom title each block cleanup.
+    #[test]
+    fn any_real_content_is_never_eligible() {
+        let ancient = NOW - WINDOW - 100_000; // very stale
+
+        let with_user = SessionScanStats { user_count: 1, ..Default::default() };
+        assert!(!is_cleanup_eligible(&with_user, ancient, NOW, WINDOW));
+
+        let with_assistant = SessionScanStats { assistant_count: 1, ..Default::default() };
+        assert!(!is_cleanup_eligible(&with_assistant, ancient, NOW, WINDOW));
+
+        let with_title = SessionScanStats {
+            custom_title: "My important session".to_string(),
+            ..Default::default()
+        };
+        assert!(!is_cleanup_eligible(&with_title, ancient, NOW, WINDOW));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // App entry point
 // ---------------------------------------------------------------------------
@@ -891,6 +1056,7 @@ pub fn run() {
             find_projects_dir,
             home_dir,
             list_sessions,
+            cleanup_empty_sessions,
             read_session,
             write_session,
             snapshot,

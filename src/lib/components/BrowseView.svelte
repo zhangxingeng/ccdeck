@@ -14,7 +14,7 @@
    */
   import { onMount, onDestroy, tick } from 'svelte';
   import type { SessionMeta, SearchHit } from '$lib/types';
-  import { listSessions, homeDir as fetchHomeDir, resumeInTerminal } from '$lib/api';
+  import { listSessions, cleanupEmptySessions, homeDir as fetchHomeDir, resumeInTerminal } from '$lib/api';
   import { extractMeta, projectLabel, cleanTitle } from '$lib/parser';
   import { renameSession } from '$lib/sessionOps';
   import { copyToClipboard } from '$lib/copy';
@@ -101,6 +101,14 @@
   // ── lifecycle ───────────────────────────────────────────────────────────────
   onMount(async () => {
     try {
+      // Auto-clean junk (zero-turn, untitled, stale) sessions before listing so
+      // the browse list never accumulates them. Best-effort — a failure here
+      // must not block loading the list, so it's swallowed.
+      try {
+        await cleanupEmptySessions();
+      } catch {
+        // ignore — cleanup is opportunistic
+      }
       sessions = await listSessions();
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);

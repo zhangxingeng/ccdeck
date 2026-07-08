@@ -74,6 +74,16 @@ export async function listSessions(): Promise<SessionMeta[]> {
   return call<SessionMeta[]>('list_sessions');
 }
 
+/**
+ * Auto-clean zero-turn, untitled, stale session files, returning how many were
+ * removed. Called from the browse-list scan just before `listSessions` so junk
+ * never accumulates in the list. No-op in browser-dev mode (no real files).
+ */
+export async function cleanupEmptySessions(): Promise<number> {
+  if (!isTauri()) return 0;
+  return call<number>('cleanup_empty_sessions');
+}
+
 export async function readSession(path: string): Promise<string> {
   if (!isTauri()) return devContent[path] ?? mockSession;
   return call<string>('read_session', { path });
