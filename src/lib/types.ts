@@ -193,3 +193,26 @@ export interface AppConfig {
   /** Whether CC Deck checks for app updates automatically on launch. */
   updateCheckOnLaunch: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Provider profiles (issue #21 — mirrors src-tauri/src/providers.rs)
+// ---------------------------------------------------------------------------
+
+/** Where a profile's API key currently lives (the honest UI-badge signal).
+ *  'none' = no key stored yet. Never carries the key itself. */
+export type KeyBackend = 'none' | 'keychain' | 'plaintext';
+
+/** A named alternate-provider profile (e.g. DeepSeek). The API key is NEVER
+ *  part of this object — it lives only in the OS keychain (or the explicit
+ *  plaintext fallback), keyed by `name`, backend-side. */
+export interface ProviderProfile {
+  /** User-visible name; also the keychain account key. Immutable once created
+   *  (the backend matches by name and updates baseUrl/defaultModel only). */
+  name: string;
+  /** Anthropic-compatible base URL, e.g. https://api.deepseek.com/anthropic. */
+  baseUrl: string;
+  /** Optional default model exported as ANTHROPIC_MODEL (e.g. deepseek-chat). */
+  defaultModel?: string;
+  /** Which store holds this profile's key — drives the 🔒/⚠/no-key badge. */
+  keyBackend: KeyBackend;
+}

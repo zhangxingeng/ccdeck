@@ -13,6 +13,8 @@ import type {
   ClaudeSettings,
   SettingsTier,
   AppConfig,
+  ProviderProfile,
+  KeyBackend,
 } from './types';
 
 // Bundled mock fixtures for browser-dev mode (Vite ?raw import).
@@ -252,10 +254,103 @@ export async function forkSession(path: string, uptoIndex: number): Promise<Fork
 
 /** Best-effort: open a terminal in `cwd` running the configured resume-launch
  *  command (App Config), with CCDECK_SESSION_ID/CCDECK_SESSION_TITLE/CCDECK_CWD
- *  exported into its environment. */
-export async function resumeInTerminal(cwd: string, sessionId: string, sessionTitle: string): Promise<void> {
+ *  exported into its environment. When `providerName` names a saved provider
+ *  profile (issue #21), its ANTHROPIC_* vars (incl. the keychain-stored key)
+ *  are also exported around the command; omit it for the default account. */
+export async function resumeInTerminal(
+  cwd: string,
+  sessionId: string,
+  sessionTitle: string,
+  providerName?: string
+): Promise<void> {
   if (!isTauri()) throw new Error('Not available outside the desktop app');
-  await call<null>('resume_in_terminal', { cwd, sessionId, sessionTitle });
+  await call<null>('resume_in_terminal', { cwd, sessionId, sessionTitle, providerName });
+}
+
+// ---------------------------------------------------------------------------
+// Provider profiles (issue #21) — alternate Anthropic-compatible providers.
+// Keys never cross this boundary on read: the UI only ever writes a new key
+// (setProviderKey) or asks whether one is set (providerKeyStatus).
+// ---------------------------------------------------------------------------
+
+// Browser-dev store: mirrors the backend's split (profile metadata vs keys) so
+// the management UI is exercisable in a plain browser. Dev mode pretends the
+// keychain is always available (probe → true), so the plaintext-opt-in branch
+// is only reachable in the real desktop app on a keychain-less machine.
+const devProviderProfiles: ProviderProfile[] = [];
+const devProviderKeys: Record<string, string> = {};
+
+/** List provider profiles (metadata only — never keys). */
+export async function listProviderProfiles(): Promise<ProviderProfile[]> {
+  if (!isTauri()) return devProviderProfiles.map((p) => ({ ...p }));
+  return call<ProviderProfile[]>('list_provider_profiles');
+}
+
+/** Upsert a profile's metadata. `name` is the identity and immutable on edit —
+ *  an existing profile is matched by name and only baseUrl/defaultModel change. */
+export async function saveProviderProfile(profile: ProviderProfile): Promise<void> {
+  if (!isTauri()) {
+    const existing = devProviderProfiles.find((p) => p.name === profile.name);
+    if (existing) {
+      existing.baseUrl = profile.baseUrl;
+      existing.defaultModel = profile.defaultModel;
+    } else {
+      devProviderProfiles.push({ ...profile, keyBackend: 'none' });
+    }
+    return;
+  }
+  await call<null>('save_provider_profile', { profile });
+}
+
+/** Delete a profile and cascade-remove its key from every store. */
+export async function deleteProviderProfile(name: string): Promise<void> {
+  if (!isTauri()) {
+    const i = devProviderProfiles.findIndex((p) => p.name === name);
+    if (i >= 0) devProviderProfiles.splice(i, 1);
+    delete devProviderKeys[name];
+    return;
+  }
+  await call<null>('delete_provider_profile', { name });
+}
+
+/** Write-only key set. Returns the backend actually used ('keychain' when the
+ *  keychain probe passes; 'plaintext' only when it fails AND `allowPlaintext`).
+ *  Rejects with a message starting `KEYCHAIN_UNAVAILABLE` when the keychain is
+ *  unavailable and `allowPlaintext` is false — the UI turns that into the
+ *  explicit plaintext opt-in prompt (never auto-retries with plaintext). */
+export async function setProviderKey(
+  name: string,
+  key: string,
+  allowPlaintext: boolean
+): Promise<KeyBackend> {
+  if (!isTauri()) {
+    devProviderKeys[name] = key;
+    const p = devProviderProfiles.find((pr) => pr.name === name);
+    if (p) p.keyBackend = 'keychain';
+    return 'keychain';
+  }
+  return call<KeyBackend>('set_provider_key', { name, key, allowPlaintext });
+}
+
+/** Whether a key is currently stored for this profile (in either backend).
+ *  Never returns the key itself. */
+export async function providerKeyStatus(name: string): Promise<boolean> {
+  if (!isTauri()) return name in devProviderKeys;
+  return call<boolean>('provider_key_status', { name });
+}
+
+/** Runtime-probe whether the OS keychain is usable (write+read+delete a
+ *  throwaway value). Drives the plaintext-opt-in gating and mount pre-warning. */
+export async function providerProbeKeychain(): Promise<boolean> {
+  if (!isTauri()) return true;
+  return call<boolean>('provider_probe_keychain');
+}
+
+/** True if a `setProviderKey` rejection is the keychain-unavailable signal
+ *  (drives the "1% outlier" plaintext opt-in flow). */
+export function isKeychainUnavailable(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return msg.includes('KEYCHAIN_UNAVAILABLE');
 }
 
 // ---------------------------------------------------------------------------

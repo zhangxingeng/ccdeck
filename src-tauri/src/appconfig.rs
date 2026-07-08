@@ -109,20 +109,33 @@ pub fn effective_launch_command(launch_command: &str) -> String {
 /// `claude --resume <id> <extra_args>` strings) — a pure function, fully
 /// unit-testable without spawning any process. Returns a POSIX shell-script
 /// body: env exports for the three `CCDECK_*` vars (shell-quoted via
-/// [`crate::shell_quote`]), then `cd <cwd> &&`, then the raw `launch_command`
-/// text verbatim (which may itself be multi-line).
+/// [`crate::shell_quote`]), then any `provider_env` pairs (issue #21 —
+/// `ANTHROPIC_*` provider-identity vars) exported right after them and before
+/// `cd`, then `cd <cwd> &&`, then the raw `launch_command` text verbatim (which
+/// may itself be multi-line).
+///
+/// `provider_env` values (base_url, auth token, model) go through the SAME
+/// [`crate::shell_quote`] path as everything else — the API key especially is
+/// never string-spliced, so an embedded quote can't break out of its export.
+/// An empty slice reproduces the exact prior output (no provider vars).
 pub fn build_resume_script(
     cwd: &str,
     session_id: &str,
     session_title: &str,
     launch_command: &str,
+    provider_env: &[(String, String)],
 ) -> String {
     let command = effective_launch_command(launch_command);
+    let provider_exports: String = provider_env
+        .iter()
+        .map(|(name, value)| format!("export {}={}\n", name, crate::shell_quote(value)))
+        .collect();
     format!(
-        "#!/bin/sh\nexport CCDECK_SESSION_ID={}\nexport CCDECK_SESSION_TITLE={}\nexport CCDECK_CWD={}\ncd {} &&\n{}\n",
+        "#!/bin/sh\nexport CCDECK_SESSION_ID={}\nexport CCDECK_SESSION_TITLE={}\nexport CCDECK_CWD={}\n{}cd {} &&\n{}\n",
         crate::shell_quote(session_id),
         crate::shell_quote(session_title),
         crate::shell_quote(cwd),
+        provider_exports,
         crate::shell_quote(cwd),
         command,
     )
@@ -167,13 +180,21 @@ pub fn build_resume_script_windows(
     session_id: &str,
     session_title: &str,
     launch_command: &str,
+    provider_env: &[(String, String)],
 ) -> String {
     let command = effective_launch_command(launch_command);
     let cwd_esc = windows_escape(cwd);
     let id_esc = windows_escape(session_id);
     let title_esc = windows_escape(session_title);
+    // Provider vars (issue #21) exported right after the CCDECK_* vars, before
+    // `cd`. Values go through the same `windows_escape` breakout-prevention path
+    // as the session title — the API key especially is never spliced raw.
+    let provider_sets: String = provider_env
+        .iter()
+        .map(|(name, value)| format!("set \"{}={}\"\r\n", name, windows_escape(value)))
+        .collect();
     format!(
-        "@echo off\r\nset \"CCDECK_SESSION_ID={id_esc}\"\r\nset \"CCDECK_SESSION_TITLE={title_esc}\"\r\nset \"CCDECK_CWD={cwd_esc}\"\r\ncd /D \"{cwd_esc}\"\r\n{command}\r\n"
+        "@echo off\r\nset \"CCDECK_SESSION_ID={id_esc}\"\r\nset \"CCDECK_SESSION_TITLE={title_esc}\"\r\nset \"CCDECK_CWD={cwd_esc}\"\r\n{provider_sets}cd /D \"{cwd_esc}\"\r\n{command}\r\n"
     )
 }
 
@@ -269,7 +290,7 @@ mod tests {
 
     #[test]
     fn build_resume_script_exports_env_vars_and_uses_default_command() {
-        let script = build_resume_script("/home/user/proj", "abc-123", "My Session", "");
+        let script = build_resume_script("/home/user/proj", "abc-123", "My Session", "", &[]);
         assert!(script.starts_with("#!/bin/sh\n"));
         assert!(script.contains("export CCDECK_SESSION_ID='abc-123'"));
         assert!(script.contains("export CCDECK_SESSION_TITLE='My Session'"));
@@ -279,9 +300,19 @@ mod tests {
     }
 
     #[test]
+    fn build_resume_script_without_provider_env_is_byte_identical_to_no_provider_vars() {
+        // The empty-slice path must reproduce the exact prior output — no stray
+        // provider exports leak in when no provider is selected.
+        let script = build_resume_script("/p", "id", "T", "echo hi", &[]);
+        assert!(!script.contains("ANTHROPIC_"));
+        // The line right after CCDECK_CWD is `cd ...` with nothing between.
+        assert!(script.contains("export CCDECK_CWD='/p'\ncd '/p' &&"));
+    }
+
+    #[test]
     fn build_resume_script_preserves_multiline_custom_command() {
         let custom = "tmux new-session -A -s \"$CCDECK_SESSION_TITLE\" \"claude --resume $CCDECK_SESSION_ID\"";
-        let script = build_resume_script("/tmp/proj", "id-1", "Title", custom);
+        let script = build_resume_script("/tmp/proj", "id-1", "Title", custom, &[]);
         assert!(script.contains(custom));
     }
 
@@ -289,13 +320,44 @@ mod tests {
     fn build_resume_script_shell_quotes_titles_with_special_characters() {
         // Adversarial title: embedded single quote + spaces — must not break
         // out of the exported env var's shell-quoting.
-        let script = build_resume_script("/tmp/proj", "id-1", "It's a \"test\" session", "");
+        let script = build_resume_script("/tmp/proj", "id-1", "It's a \"test\" session", "", &[]);
         assert!(script.contains(r#"export CCDECK_SESSION_TITLE='It'\''s a "test" session'"#));
     }
 
     #[test]
+    fn build_resume_script_exports_provider_env_after_ccdeck_and_before_cd() {
+        // Issue #21: provider vars go AFTER the CCDECK_* exports and BEFORE cd.
+        let provider = vec![
+            (
+                "ANTHROPIC_BASE_URL".to_string(),
+                "https://api.deepseek.com/anthropic".to_string(),
+            ),
+            ("ANTHROPIC_AUTH_TOKEN".to_string(), "sk-plainkey".to_string()),
+            ("ANTHROPIC_MODEL".to_string(), "deepseek-chat".to_string()),
+        ];
+        let script = build_resume_script("/p", "id", "T", "", &provider);
+        assert!(script.contains(
+            "export CCDECK_CWD='/p'\nexport ANTHROPIC_BASE_URL='https://api.deepseek.com/anthropic'\nexport ANTHROPIC_AUTH_TOKEN='sk-plainkey'\nexport ANTHROPIC_MODEL='deepseek-chat'\ncd '/p' &&"
+        ));
+    }
+
+    #[test]
+    fn build_resume_script_shell_quotes_provider_key_with_embedded_quote() {
+        // Adversarial API key: an embedded single quote + a shell metachar
+        // chain. It MUST be shell-quoted (never string-spliced) so it can't
+        // break out of the export and run an arbitrary command — same guarantee
+        // as the session-title test above.
+        let evil_key = "sk-'; rm -rf ~ #";
+        let provider = vec![("ANTHROPIC_AUTH_TOKEN".to_string(), evil_key.to_string())];
+        let script = build_resume_script("/p", "id", "T", "", &provider);
+        assert!(script.contains(r#"export ANTHROPIC_AUTH_TOKEN='sk-'\''; rm -rf ~ #'"#));
+        // The raw dangerous sequence must NOT appear unquoted.
+        assert!(!script.contains("sk-'; rm -rf ~ #\n"));
+    }
+
+    #[test]
     fn build_resume_script_windows_contains_env_sets_and_command() {
-        let script = build_resume_script_windows("C:\\proj", "abc-123", "My Session", "");
+        let script = build_resume_script_windows("C:\\proj", "abc-123", "My Session", "", &[]);
         assert!(script.starts_with("@echo off\r\n"));
         assert!(script.contains("set \"CCDECK_SESSION_ID=abc-123\""));
         assert!(script.contains("set \"CCDECK_SESSION_TITLE=My Session\""));
@@ -313,14 +375,42 @@ mod tests {
         // characters at all inside the exported values (each embedded quote
         // is replaced with a single quote).
         let evil_title = "x\" & calc.exe & \"";
-        let script = build_resume_script_windows("C:\\proj", "id-1", evil_title, "");
+        let script = build_resume_script_windows("C:\\proj", "id-1", evil_title, "", &[]);
         assert!(!script.contains("\" & calc.exe & \""));
         assert!(script.contains("set \"CCDECK_SESSION_TITLE=x' & calc.exe & '\""));
     }
 
     #[test]
     fn build_resume_script_windows_strips_newlines_and_escapes_percent() {
-        let script = build_resume_script_windows("C:\\proj", "id-1", "line1\r\nline2 %PATH%", "");
+        let script =
+            build_resume_script_windows("C:\\proj", "id-1", "line1\r\nline2 %PATH%", "", &[]);
         assert!(script.contains("set \"CCDECK_SESSION_TITLE=line1line2 %%PATH%%\""));
+    }
+
+    #[test]
+    fn build_resume_script_windows_exports_provider_env_before_cd() {
+        let provider = vec![
+            (
+                "ANTHROPIC_BASE_URL".to_string(),
+                "https://api.deepseek.com/anthropic".to_string(),
+            ),
+            ("ANTHROPIC_MODEL".to_string(), "deepseek-chat".to_string()),
+        ];
+        let script = build_resume_script_windows("C:\\proj", "id", "T", "", &provider);
+        assert!(script.contains(
+            "set \"CCDECK_CWD=C:\\proj\"\r\nset \"ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic\"\r\nset \"ANTHROPIC_MODEL=deepseek-chat\"\r\ncd /D \"C:\\proj\""
+        ));
+    }
+
+    #[test]
+    fn build_resume_script_windows_escapes_provider_key_quote_breakout() {
+        // Adversarial API key with an embedded `"` + `&`: must be neutralized
+        // by windows_escape (quote → single quote) so it can't close the
+        // `set "VAR=..."` value early and chain a command.
+        let evil_key = "k\" & calc.exe & \"";
+        let provider = vec![("ANTHROPIC_AUTH_TOKEN".to_string(), evil_key.to_string())];
+        let script = build_resume_script_windows("C:\\proj", "id", "T", "", &provider);
+        assert!(!script.contains("\" & calc.exe & \""));
+        assert!(script.contains("set \"ANTHROPIC_AUTH_TOKEN=k' & calc.exe & '\""));
     }
 }

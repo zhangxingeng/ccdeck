@@ -23,7 +23,7 @@
    *                 the editor to handle exit with a dirty-guard prompt.
    */
   import { onMount, onDestroy, tick } from 'svelte';
-  import type { Entry } from '$lib/types';
+  import type { Entry, ProviderProfile } from '$lib/types';
   import {
     readSession,
     writeSession,
@@ -31,9 +31,11 @@
     forkSession,
     resumeInTerminal,
     getAppConfig,
+    listProviderProfiles,
   } from '$lib/api';
   import { copyToClipboard } from '$lib/copy';
   import { resumeCommand } from '$lib/resume';
+  import ProviderResumeMenu from './ProviderResumeMenu.svelte';
   import { parseJsonl, extractMeta, extractCustomTitle } from '$lib/parser';
   import { renameSession } from '$lib/sessionOps';
   import {
@@ -464,7 +466,10 @@
     selectedUnits = new Set();
   }
 
-  async function doResumeFrom(key: string) {
+  // `providerName` (issue #21) forks-and-resumes against an alternate provider
+  // profile; omit it (plain left-click ⑂) for the default account. The
+  // clipboard fallback reflects the provider with a MASKED key placeholder.
+  async function doResumeFrom(key: string, providerName?: string) {
     if (!draft) return;
     const row = draft.rows[key];
     if (!row) return;
@@ -472,16 +477,52 @@
       const forked = await forkSession(path, row.originalIndex);
       const cwd = sessionInfo?.cwd ?? '';
       const { launchCommand } = await getAppConfig();
-      await copyToClipboard(resumeCommand(cwd, forked.id, displayTitle, launchCommand));
+      const profile = providerName ? resumeProfiles.find((p) => p.name === providerName) : undefined;
+      const providerInfo = profile
+        ? { name: profile.name, baseUrl: profile.baseUrl, defaultModel: profile.defaultModel }
+        : undefined;
+      await copyToClipboard(resumeCommand(cwd, forked.id, displayTitle, launchCommand, providerInfo));
       try {
-        await resumeInTerminal(cwd, forked.id, displayTitle);
-        showToast('Forked session — opened in a terminal, command also copied to clipboard');
+        await resumeInTerminal(cwd, forked.id, displayTitle, providerName);
+        showToast(
+          providerName
+            ? `Forked session — opened with ${providerName}, command also copied to clipboard`
+            : 'Forked session — opened in a terminal, command also copied to clipboard'
+        );
       } catch {
-        showToast('Forked session — could not open a terminal, command copied to clipboard');
+        showToast(
+          providerName
+            ? `Forked session — could not open with ${providerName}, command copied to clipboard`
+            : 'Forked session — could not open a terminal, command copied to clipboard'
+        );
       }
     } catch (e) {
       showToast(`Fork failed: ${e instanceof Error ? e.message : String(e)}`);
     }
+  }
+
+  // ── provider picker (right-click on Fork & resume) ────────────────────────
+  let resumeMenu = $state<{ x: number; y: number; key: string } | null>(null);
+  let resumeProfiles = $state<ProviderProfile[]>([]);
+
+  async function openResumeMenu(e: MouseEvent, key: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      resumeProfiles = await listProviderProfiles();
+    } catch {
+      resumeProfiles = [];
+    }
+    resumeMenu = { x: e.clientX, y: e.clientY, key };
+  }
+  function closeResumeMenu() {
+    resumeMenu = null;
+  }
+  async function pickResume(providerName: string | null) {
+    const m = resumeMenu;
+    if (!m) return;
+    closeResumeMenu();
+    await doResumeFrom(m.key, providerName ?? undefined);
   }
 
   // ── Title rename (immediate, direct file write — same as BrowseView) ───────
@@ -704,6 +745,7 @@
               onDeleteBlock={(bi) => doDeleteBlock(item.key, bi)}
               onUndeleteBlock={(bi) => doUndeleteBlock(item.key, bi)}
               onResumeFrom={() => doResumeFrom(item.key)}
+              onResumeFromContext={(e) => openResumeMenu(e, item.key)}
             />
           {/if}
         {:else}
@@ -804,6 +846,18 @@
       </div>
     </div>
   </div>
+{/if}
+
+<!-- ── provider picker (right-click Fork & resume) ──────────────────────────── -->
+{#if resumeMenu}
+  <ProviderResumeMenu
+    x={resumeMenu.x}
+    y={resumeMenu.y}
+    profiles={resumeProfiles}
+    verb="Fork & resume"
+    onSelect={pickResume}
+    onClose={closeResumeMenu}
+  />
 {/if}
 
 <!-- ── Toast ─────────────────────────────────────────────────────────────────── -->

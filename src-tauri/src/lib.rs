@@ -14,6 +14,10 @@ mod appconfig;
 // Claude Code's own settings.json (schema-driven read/merge/conflict/write across tiers).
 mod settings;
 
+// Named provider profiles (issue #21): keychain-backed API keys + ANTHROPIC_*
+// env injection for resuming against an alternate Anthropic-compatible provider.
+mod providers;
+
 // ---------------------------------------------------------------------------
 // Return-type structs (must match the JS contract in ARCHITECTURE.md)
 // ---------------------------------------------------------------------------
@@ -675,7 +679,12 @@ fn fork_session(path: String, upto_index: usize) -> Result<ForkResult, String> {
 /// strings and is the only way a multi-line custom `launch_command` works
 /// uniformly across `open -a`, `gnome-terminal --`, `konsole -e`, `wt`, etc.
 #[tauri::command]
-fn resume_in_terminal(cwd: String, session_id: String, session_title: String) -> Result<(), String> {
+fn resume_in_terminal(
+    cwd: String,
+    session_id: String,
+    session_title: String,
+    provider_name: Option<String>,
+) -> Result<(), String> {
     if session_id.is_empty()
         || !session_id
             .chars()
@@ -687,12 +696,21 @@ fn resume_in_terminal(cwd: String, session_id: String, session_title: String) ->
         return Err(format!("Directory not found: {cwd}"));
     }
 
+    // Resolve the selected provider's ANTHROPIC_* env pairs (issue #21). A
+    // missing/empty provider_name ⇒ no override (default account). A named
+    // provider that can't be resolved (unknown, or no key stored) errors here
+    // rather than silently launching against the default account.
+    let provider_env = match provider_name.as_deref() {
+        Some(name) if !name.is_empty() => providers::provider_env_for(name)?,
+        _ => Vec::new(),
+    };
+
     let config = appconfig::load();
     let auto = appconfig::is_auto(&config.terminal);
 
     #[cfg(target_os = "macos")]
     {
-        let script = appconfig::build_resume_script(&cwd, &session_id, &session_title, &config.launch_command);
+        let script = appconfig::build_resume_script(&cwd, &session_id, &session_title, &config.launch_command, &provider_env);
         // `.command` extension: what makes Terminal.app treat an `open -a`'d
         // file as a script to run rather than a text file to display.
         let tmp = write_resume_script(&session_id, "command", &script)?;
@@ -710,7 +728,7 @@ fn resume_in_terminal(cwd: String, session_id: String, session_title: String) ->
 
     #[cfg(target_os = "linux")]
     {
-        let script = appconfig::build_resume_script(&cwd, &session_id, &session_title, &config.launch_command);
+        let script = appconfig::build_resume_script(&cwd, &session_id, &session_title, &config.launch_command, &provider_env);
         let tmp = write_resume_script(&session_id, "sh", &script)?;
 
         if auto {
@@ -750,7 +768,7 @@ fn resume_in_terminal(cwd: String, session_id: String, session_title: String) ->
 
     #[cfg(target_os = "windows")]
     {
-        let script = appconfig::build_resume_script_windows(&cwd, &session_id, &session_title, &config.launch_command);
+        let script = appconfig::build_resume_script_windows(&cwd, &session_id, &session_title, &config.launch_command, &provider_env);
         let tmp = write_resume_script(&session_id, "bat", &script)?;
 
         if auto {
@@ -1071,6 +1089,12 @@ pub fn run() {
             settings::write_claude_settings,
             appconfig::get_app_config,
             appconfig::set_app_config,
+            providers::list_provider_profiles,
+            providers::save_provider_profile,
+            providers::delete_provider_profile,
+            providers::set_provider_key,
+            providers::provider_key_status,
+            providers::provider_probe_keychain,
         ]);
 
     match search_state {
