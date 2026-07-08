@@ -11,7 +11,7 @@
    * schema, ClaudeSettings/SettingsTier) are unchanged from before #18 — only
    * this frontend is new.
    */
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import type { ClaudeSettings, SettingsTier, SettingsTierData } from '$lib/types';
   import { readClaudeSettings, writeClaudeSettings, isSettingsConflict } from '$lib/api';
   import schema from '$lib/schema/claude-code-settings.json';
@@ -226,6 +226,10 @@
       saveMsgTimer = null;
     }, 2500);
   }
+
+  // Clear any pending auto-dismiss timer on unmount so it can't fire against a
+  // torn-down component or leak.
+  onDestroy(() => { if (saveMsgTimer) clearTimeout(saveMsgTimer); });
 
   async function writeTier(mutate: (obj: Record<string, unknown>) => void): Promise<boolean> {
     if (!selectedKey) return false;

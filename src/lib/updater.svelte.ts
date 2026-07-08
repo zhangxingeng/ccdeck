@@ -33,6 +33,29 @@ export const update = $state<{
 // chooses to install it.
 let pending: Update | null = null;
 
+// Auto-dismiss for the *transient* statuses. Unlike SessionEditor/BrowseView
+// toasts, these are driven off shared module state (no component + onDestroy to
+// clear a timer), so 'checking' / 'uptodate' / 'error' would otherwise sit on
+// screen forever. `setStatus` routes every transition through here so the timer
+// is always cleared/replaced: transient statuses arm a fresh dismiss timer, and
+// the persistent ones ('available', 'downloading') just clear it.
+const TRANSIENT_DISMISS_MS = 4000;
+let dismissTimer: ReturnType<typeof setTimeout> | null = null;
+
+function setStatus(status: UpdateStatus): void {
+  update.status = status;
+  if (dismissTimer) {
+    clearTimeout(dismissTimer);
+    dismissTimer = null;
+  }
+  if (status === 'checking' || status === 'uptodate' || status === 'error') {
+    dismissTimer = setTimeout(() => {
+      dismissTimer = null;
+      update.status = 'idle';
+    }, TRANSIENT_DISMISS_MS);
+  }
+}
+
 /**
  * @param silent when true (the launch-time call) stay quiet unless an update
  *   is actually available; when false (a manual "check for updates") also
@@ -45,27 +68,27 @@ export async function checkForUpdates(silent = true): Promise<void> {
   // second "Update & restart" click races a second downloadAndInstall().
   if (update.status === 'downloading' || update.status === 'checking') return;
   if (!silent) {
-    update.status = 'checking';
     update.error = '';
+    setStatus('checking');
   }
   try {
     const found = await check();
     if (!found) {
       pending = null;
-      update.status = silent ? 'idle' : 'uptodate';
+      setStatus(silent ? 'idle' : 'uptodate');
       return;
     }
     pending = found;
     update.newVersion = found.version;
-    update.status = 'available';
+    setStatus('available');
   } catch (err) {
     // Never let an update check break startup.
     console.error('[updater]', err);
     if (silent) {
-      update.status = 'idle';
+      setStatus('idle');
     } else {
       update.error = err instanceof Error ? err.message : String(err);
-      update.status = 'error';
+      setStatus('error');
     }
   }
 }
@@ -77,9 +100,9 @@ export async function installUpdate(): Promise<void> {
   // downloadAndInstall() calls, each prompting its own install/permission
   // dialog and racing writes to the shared `update.progress`.
   if (!pending || update.status === 'downloading') return;
-  update.status = 'downloading';
   update.progress = 0;
   update.error = '';
+  setStatus('downloading');
 
   let total = 0;
   let downloaded = 0;
@@ -104,11 +127,11 @@ export async function installUpdate(): Promise<void> {
   } catch (err) {
     console.error('[updater]', err);
     update.error = err instanceof Error ? err.message : String(err);
-    update.status = 'error';
+    setStatus('error');
   }
 }
 
 /** Dismiss the current banner/toast (the "Later" button). */
 export function dismiss(): void {
-  update.status = 'idle';
+  setStatus('idle');
 }

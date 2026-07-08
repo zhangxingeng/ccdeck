@@ -18,6 +18,7 @@
    *   3. Nothing — if neither applies, no menu is shown (native menu stays
    *      suppressed either way, so right-click never leaks a useless one).
    */
+  import { onDestroy } from 'svelte';
   import { copyToClipboard } from '$lib/copy';
 
   let visible = $state(false);
@@ -25,6 +26,7 @@
   let y = $state(0);
   let copyText = $state('');
   let copied = $state(false);
+  let closeTimer: ReturnType<typeof setTimeout> | null = null;
 
   function isEditable(el: Element | null): boolean {
     if (!el) return false;
@@ -66,8 +68,13 @@
 
   async function doCopy() {
     copied = await copyToClipboard(copyText);
-    setTimeout(close, 500);
+    if (closeTimer) clearTimeout(closeTimer);
+    closeTimer = setTimeout(() => { close(); closeTimer = null; }, 500);
   }
+
+  // Clear the pending close timer on unmount so it can't fire against a
+  // torn-down component or leak.
+  onDestroy(() => { if (closeTimer) clearTimeout(closeTimer); });
 
   function handleWindowClick() {
     if (visible) close();

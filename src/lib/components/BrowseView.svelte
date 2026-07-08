@@ -120,6 +120,9 @@
     setQuery('');
   });
   onDestroy(disposeSearch);
+  // Clear any pending toast auto-dismiss timer on unmount so it can't fire
+  // against a torn-down component or leak.
+  onDestroy(() => { if (toastTimer !== null) clearTimeout(toastTimer); });
 
   // ── shared derived data ─────────────────────────────────────────────────────
 

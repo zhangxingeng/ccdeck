@@ -17,7 +17,7 @@
    * toggle are app-level preferences, not per-project, so (unlike
    * SettingsSearchView) there is no project-cwd scoping here.
    */
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import type { AppConfig } from '$lib/types';
   import { getAppConfig, setAppConfig } from '$lib/api';
 
@@ -68,6 +68,10 @@
       saveMsgTimer = null;
     }, 2500);
   }
+
+  // Clear any pending auto-dismiss timer on unmount so it can't fire against a
+  // torn-down component or leak.
+  onDestroy(() => { if (saveMsgTimer) clearTimeout(saveMsgTimer); });
 
   async function save(): Promise<void> {
     try {

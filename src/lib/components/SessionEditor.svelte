@@ -21,7 +21,7 @@
    *   requestExit — $bindable; parent calls this (from the header ← Back) to ask
    *                 the editor to handle exit with a dirty-guard prompt.
    */
-  import { onMount, tick } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import type { BackupVersion, Entry } from '$lib/types';
   import {
     readSession,
@@ -274,6 +274,10 @@
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { toastMsg = null; toastTimer = null; }, 3500);
   }
+
+  // Clear any pending auto-dismiss timer on unmount so it can't fire against a
+  // torn-down component or leak.
+  onDestroy(() => { if (toastTimer) clearTimeout(toastTimer); });
 
   // ── Row mutations (wired to children) ────────────────────────────────────────
   function doBlockEdit(key: string, ordinal: number, text: string) {
