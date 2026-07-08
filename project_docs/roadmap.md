@@ -552,9 +552,10 @@ Chrome browser-automation extension wasn't connected in this sandbox, the same g
 ## Phase 14 — Editor simplification + toast/resume fixes, built by concurrent event-based teammates (DONE, resolves #16 #15 #22)
 
 Three code-fix issues cleared in one concurrent burst — the first live test of the **iterative
-teammate protocol** (`project_docs/iterative_teammate_protocol.md`, new this phase): steerable,
-worktree-isolated teammates the manager holds a multi-turn dialogue with (investigate → gate →
-implement + commit → issue-update), as opposed to one-shot passive workers.
+teammate protocol** (now a generic doc in the ai-first-docs corpus:
+`ai-first-docs/orchestration/iterative_teammate_protocol.mdx`): steerable, worktree-isolated
+teammates the manager holds a multi-turn dialogue with (investigate → gate → implement + commit →
+issue-update), as opposed to one-shot passive workers.
 
 - **#16 — editor simplification.** Removed the version-history/restore-backup UI (button + modal +
   handlers) while keeping the silent single-slot `snapshot`-on-save mechanism and its server-side
