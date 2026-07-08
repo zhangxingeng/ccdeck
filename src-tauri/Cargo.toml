@@ -1,6 +1,6 @@
 [package]
 name = "ccstudio"
-version = "0.10.0"
+version = "0.10.1"
 description = "Offline desktop viewer and editor for Claude Code chat history"
 authors = ["zhangxingeng"]
 edition = "2021"
