@@ -132,7 +132,17 @@ fn plaintext_save(map: &HashMap<String, String>) -> Result<(), String> {
     }
     let mut pretty = serde_json::to_string_pretty(map).map_err(|e| e.to_string())?;
     pretty.push('\n');
-    std::fs::write(&path, pretty).map_err(|e| e.to_string())
+    std::fs::write(&path, pretty).map_err(|e| e.to_string())?;
+    // Harden the world-readable fallback to owner-only (0600) on Unix — the
+    // keys are plaintext, so at least keep other local users out. Best-effort;
+    // Windows keeps its default ACLs.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn plaintext_set(name: &str, key: &str) -> Result<(), String> {
