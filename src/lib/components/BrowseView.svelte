@@ -14,7 +14,7 @@
    */
   import { onMount, onDestroy, tick } from 'svelte';
   import type { SessionMeta, SearchHit } from '$lib/types';
-  import { listSessions, cleanupEmptySessions, homeDir as fetchHomeDir, resumeInTerminal } from '$lib/api';
+  import { listSessions, cleanupEmptySessions, homeDir as fetchHomeDir, resumeInTerminal, getAppConfig } from '$lib/api';
   import { extractMeta, projectLabel, cleanTitle } from '$lib/parser';
   import { renameSession } from '$lib/sessionOps';
   import { copyToClipboard } from '$lib/copy';
@@ -478,7 +478,8 @@
   // ── resume (from a list card, without opening the session first) ──────────
   async function doResume(sessionPath: string, cwd: string, title: string) {
     const id = sessionIdFromPath(sessionPath);
-    await copyToClipboard(resumeCommand(cwd, id));
+    const { launchCommand } = await getAppConfig();
+    await copyToClipboard(resumeCommand(cwd, id, title, launchCommand));
     try {
       await resumeInTerminal(cwd, id, title);
       showToast('Opened in a terminal — command also copied to clipboard');

@@ -12,7 +12,7 @@
   import { getVersion } from '@tauri-apps/api/app';
   import { checkForUpdates, update as updateState } from '$lib/updater.svelte';
   import type { Session, SessionMeta, SearchHit } from '$lib/types';
-  import { readSession, openSessionFile, resumeInTerminal } from '$lib/api';
+  import { readSession, openSessionFile, resumeInTerminal, getAppConfig } from '$lib/api';
   import { parseJsonl, decodeProject } from '$lib/parser';
   import { buildSession } from '$lib/builder';
   import { extractSessionInfo } from '$lib/editDraft';
@@ -289,7 +289,8 @@ ${contentHtml}
     if (!current) return;
     const id = sessionIdFromPath(current.meta.sourcePath);
     const cwd = current.meta.cwd;
-    await copyToClipboard(resumeCommand(cwd, id));
+    const { launchCommand } = await getAppConfig();
+    await copyToClipboard(resumeCommand(cwd, id, current.meta.title, launchCommand));
     try {
       await resumeInTerminal(cwd, id, current.meta.title);
       showResumeMsg('Opened in a terminal — command also copied to clipboard');
@@ -347,7 +348,7 @@ ${contentHtml}
         class="btn btn--ghost btn--sm"
         onclick={resumeSession}
         type="button"
-        title={current ? resumeCommand(current.meta.cwd, sessionIdFromPath(current.meta.sourcePath)) : ''}
+        title="Open in a terminal (copies the resume command to the clipboard as a fallback)"
       >
         Resume
       </button>
