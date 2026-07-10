@@ -234,8 +234,7 @@ pub fn scan_pieces(
             // the lexicographically-first filename (contract: a deterministic
             // winner, never directory-iteration order — write paths key off
             // this view, so a flaky winner is flaky data destruction).
-            let new_wins =
-                (canonical && !existing.1) || (!canonical && !existing.1 && *fname < *existing.2);
+            let new_wins = !existing.1 && (canonical || *fname < *existing.2);
             let loser = if new_wins {
                 std::mem::replace(existing, (piece, canonical, fname.to_string())).2
             } else {
