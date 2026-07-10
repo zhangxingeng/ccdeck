@@ -105,8 +105,17 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
-/// Derive `placeholders` from `{{token}}` occurrences: trimmed, non-empty,
-/// no braces/newlines inside, deduped in first-seen order.
+/// Is `c` allowed in a placeholder name? The grammar is `[\w.-]+` — exactly
+/// the frontend's `parsePlaceholders` regex (ASCII `\w`, so no spaces, no
+/// unicode letters). The two lanes MUST agree: a looser rule here would store
+/// a placeholder entry the fill-in popover never shows (audit M2).
+fn is_placeholder_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')
+}
+
+/// Derive `placeholders` from `{{token}}` occurrences: token must fully match
+/// `[\w.-]+` (no trimming — `{{ a }}` is prose, not a placeholder), deduped
+/// in first-seen order.
 pub fn derive_placeholders(body: &str) -> Vec<Placeholder> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -116,11 +125,9 @@ pub fn derive_placeholders(body: &str) -> Vec<Placeholder> {
         let Some(end) = after.find("}}") else {
             break;
         };
-        let name = after[..end].trim();
+        let name = &after[..end];
         if !name.is_empty()
-            && !name.contains('{')
-            && !name.contains('}')
-            && !name.contains('\n')
+            && name.chars().all(is_placeholder_char)
             && seen.insert(name.to_string())
         {
             out.push(Placeholder { name: name.to_string() });
@@ -209,6 +216,34 @@ pub fn load_pieces(dir: &Path) -> Result<Vec<Piece>, String> {
     Ok(pieces)
 }
 
+/// Resolve the stored piece a save to `id` would update — refusing whenever
+/// proceeding would overwrite `<id>.json` content we could not read (audit
+/// L2: the loader SKIPS an unparseable file, so resolving through it would
+/// turn the save into a create and destroy the broken file's versions/extra,
+/// violating "a save never destroys a prior body"). Same refusal when the
+/// file parses but holds a DIFFERENT piece's id (hand-edited): writing over
+/// it would destroy that other piece's data.
+fn resolve_existing(dir: &Path, id: &str) -> Result<Option<Piece>, String> {
+    let canonical = dir.join(format!("{id}.json"));
+    if canonical.is_file() {
+        let content = fs::read_to_string(&canonical).map_err(|e| e.to_string())?;
+        let piece: Piece = serde_json::from_str(&content).map_err(|e| {
+            format!(
+                "refusing to save piece {id}: {id}.json exists but cannot be parsed ({e}) — fix or remove the file first, so the save cannot destroy its contents"
+            )
+        })?;
+        if piece.id != id {
+            return Err(format!(
+                "refusing to save piece {id}: {id}.json holds a different piece ({}) — rename or remove that file first",
+                piece.id
+            ));
+        }
+        return Ok(Some(piece));
+    }
+    // No canonical file: the id may live in a hand-copied stale-named file.
+    Ok(load_pieces(dir)?.into_iter().find(|p| p.id == id))
+}
+
 /// Create (no id) or update (id present) a piece. Versioning per the
 /// contract: a body change pushes the old body (with its timestamp) onto
 /// `versions`, newest-first; metadata-only saves don't version. An id that
@@ -217,7 +252,7 @@ pub fn load_pieces(dir: &Path) -> Result<Vec<Piece>, String> {
 pub fn save_piece_at(dir: &Path, input: PieceInput, now: u64) -> Result<Piece, String> {
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let existing = match &input.id {
-        Some(id) => load_pieces(dir)?.into_iter().find(|p| &p.id == id),
+        Some(id) => resolve_existing(dir, id)?,
         None => None,
     };
     let piece = match existing {
@@ -536,15 +571,58 @@ mod tests {
     #[test]
     fn create_assigns_uuid_and_writes_canonical_file() {
         let dir = tmp_dir("create");
-        let p = save_piece_at(&dir, input("t", "b {{ticket}} {{ticket}} {{ env }}"), 100).unwrap();
+        let p = save_piece_at(&dir, input("t", "b {{ticket}} {{ticket}} {{env}}"), 100).unwrap();
         assert!(uuid::Uuid::parse_str(&p.id).is_ok());
         assert_eq!(p.created_at, p.updated_at);
         assert!(dir.join(format!("{}.json", p.id)).is_file());
         assert_eq!(
             p.placeholders,
             vec![Placeholder { name: "ticket".into() }, Placeholder { name: "env".into() }],
-            "derived, deduped, trimmed"
+            "derived and deduped"
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn save_refuses_to_overwrite_unparseable_canonical_file() {
+        // Audit L2: the loader skips a broken <id>.json, so resolving through
+        // it would silently turn this save into a CREATE that overwrites the
+        // broken file — destroying whatever versions/extra it held. The save
+        // must refuse instead, and the file must stay byte-identical.
+        let dir = tmp_dir("refuse-broken");
+        let broken = r#"{"id":"x","title":"t","body":"b","versions":[{"body":"precious"#; // truncated JSON
+        fs::write(dir.join("x.json"), broken).unwrap();
+
+        let mut inp = input("t2", "new body");
+        inp.id = Some("x".to_string());
+        let err = save_piece_at(&dir, inp, 2).unwrap_err();
+        assert!(err.contains("x.json"), "error must name the file: {err}");
+        assert!(err.contains("cannot be parsed"), "error must say why: {err}");
+        assert_eq!(
+            fs::read_to_string(dir.join("x.json")).unwrap(),
+            broken,
+            "the refused save must leave the broken file byte-identical"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn save_refuses_when_canonical_file_holds_another_pieces_id() {
+        // Same overwrite hazard, different cause: a hand-edit changed the id
+        // INSIDE x.json, so that file now belongs to piece "y". Writing piece
+        // "x" to x.json would destroy y's data.
+        let dir = tmp_dir("refuse-mismatch");
+        fs::write(
+            dir.join("x.json"),
+            r#"{"id":"y","title":"t","body":"b","created_at":1,"updated_at":1}"#,
+        )
+        .unwrap();
+
+        let mut inp = input("t", "b");
+        inp.id = Some("x".to_string());
+        let err = save_piece_at(&dir, inp, 2).unwrap_err();
+        assert!(err.contains("different piece"), "{err}");
+        assert!(dir.join("x.json").is_file(), "the mismatched file is untouched");
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -559,6 +637,16 @@ mod tests {
         assert!(
             derive_placeholders("{{multi\nline}}").is_empty(),
             "newline inside braces is prose, not a placeholder"
+        );
+        // Grammar is the frontend's [\w.-]+ EXACTLY (audit M2) — a looser
+        // rule here would store placeholders the fill popover never shows.
+        assert!(derive_placeholders("{{bad token}}").is_empty(), "spaces are prose (frontend pins this)");
+        assert!(derive_placeholders("{{ padded }}").is_empty(), "no trimming — space is a mismatch");
+        assert!(derive_placeholders("{{tickét}}").is_empty(), "ASCII \\w only, like the JS regex");
+        assert_eq!(
+            derive_placeholders("{{a-b.c_d9}}"),
+            vec![Placeholder { name: "a-b.c_d9".into() }],
+            "the full [\\w.-]+ class is accepted"
         );
     }
 
