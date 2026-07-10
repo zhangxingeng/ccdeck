@@ -11,6 +11,13 @@ mod search;
 // CC Deck's own preference store (terminal launcher choice + resume-launch command).
 mod appconfig;
 
+// ccdeck's own data root (~/.ccdeck) + the startup migration that moves
+// legacy ccdeck-owned state (backups, config) out of ~/.claude.
+mod datadir;
+
+// Prompt Library (issue #24): piece store + hybrid match engine + commands.
+mod prompts;
+
 // Claude Code's own settings.json (schema-driven read/merge/conflict/write across tiers).
 mod settings;
 
@@ -474,21 +481,24 @@ fn read_session(path: String) -> Result<String, String> {
     fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
-/// Resolve `<backup-root>/<sanitized-session-id>` for `path`, requiring it be
-/// under `projects`. Shared by [`snapshot_at`] and [`list_backups_at`].
-fn backup_root_for(projects: &Path, home: &Path, path: &str) -> Result<PathBuf, String> {
+/// Resolve `<backups_root>/<sanitized-session-id>` for `path`, requiring it
+/// be under `projects`. Shared by [`snapshot_at`] and [`list_backups_at`].
+/// The root is a parameter (callers pass `<data root>/backups`, or the legacy
+/// `~/.claude/.ccstudio-backups` on the read-fallback path) — issue #24 moved
+/// backups out of `~/.claude`.
+fn backup_root_for(projects: &Path, backups_root: &Path, path: &str) -> Result<PathBuf, String> {
     let file_path = Path::new(path);
     let rel = file_path
         .strip_prefix(projects)
         .map_err(|_| "Session file is not under the projects directory".to_string())?;
     let session_id = sanitize_id(&rel.to_string_lossy());
-    Ok(home.join(".claude").join(".ccstudio-backups").join(&session_id))
+    Ok(backups_root.join(&session_id))
 }
 
 /// Copy the current on-disk file into the backup store before an override,
-/// resolving paths against `projects`/`home` (parameterized so this is
-/// testable without touching `CLAUDE_CONFIG_DIR`/`HOME`; the `#[tauri::command]`
-/// wrapper below resolves the real ones).
+/// resolving paths against `projects`/`backups_root` (parameterized so this
+/// is testable without touching `CLAUDE_CONFIG_DIR`/`CCDECK_DATA_DIR`; the
+/// `#[tauri::command]` wrapper below resolves the real ones).
 ///
 /// There is exactly one backup slot per session — any existing backup file(s)
 /// in the session's backup directory are deleted before the new one is
@@ -496,10 +506,10 @@ fn backup_root_for(projects: &Path, home: &Path, path: &str) -> Result<PathBuf, 
 /// behind.
 ///
 /// Backup location:
-///   ~/.claude/.ccstudio-backups/<sanitized_session_id>/v001-<unixsecs>.jsonl
-fn snapshot_at(projects: &Path, home: &Path, path: &str) -> Result<BackupVersion, String> {
+///   ~/.ccdeck/backups/<sanitized_session_id>/v001-<unixsecs>.jsonl
+fn snapshot_at(projects: &Path, backups_root: &Path, path: &str) -> Result<BackupVersion, String> {
     let file_path = Path::new(path);
-    let backup_root = backup_root_for(projects, home, path)?;
+    let backup_root = backup_root_for(projects, backups_root, path)?;
 
     fs::create_dir_all(&backup_root).map_err(|e| e.to_string())?;
 
@@ -536,17 +546,18 @@ fn snapshot_at(projects: &Path, home: &Path, path: &str) -> Result<BackupVersion
 fn snapshot(path: String) -> Result<BackupVersion, String> {
     let projects = projects_dir_inner()
         .ok_or_else(|| "Projects directory not found".to_string())?;
-    let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
-    snapshot_at(&projects, &home, &path)
+    // Writes always target the new root — even if the startup migration
+    // failed, new snapshots must not re-contaminate ~/.claude.
+    snapshot_at(&projects, &datadir::data_root()?.join("backups"), &path)
 }
 
 /// List the session's backup(s), newest first. Since [`snapshot_at`] keeps
 /// only a single backup slot, this returns at most one entry — the `Vec`
 /// return shape is kept as-is since the frontend's list rendering already
 /// handles it generically. See [`snapshot_at`] for why this is parameterized
-/// on `projects`/`home`.
-fn list_backups_at(projects: &Path, home: &Path, session_path: &str) -> Result<Vec<BackupVersion>, String> {
-    let backup_root = backup_root_for(projects, home, session_path)?;
+/// on `projects`/`backups_root`.
+fn list_backups_at(projects: &Path, backups_root: &Path, session_path: &str) -> Result<Vec<BackupVersion>, String> {
+    let backup_root = backup_root_for(projects, backups_root, session_path)?;
 
     if !backup_root.is_dir() {
         return Ok(Vec::new());
@@ -588,8 +599,21 @@ fn list_backups_at(projects: &Path, home: &Path, session_path: &str) -> Result<V
 fn list_backups(session_path: String) -> Result<Vec<BackupVersion>, String> {
     let projects = projects_dir_inner()
         .ok_or_else(|| "Projects directory not found".to_string())?;
-    let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
-    list_backups_at(&projects, &home, &session_path)
+    let found = list_backups_at(&projects, &datadir::data_root()?.join("backups"), &session_path)?;
+    if !found.is_empty() {
+        return Ok(found);
+    }
+    // Migration-failure fallback (contract: read whichever dir has the file):
+    // if the new root has nothing for this session but the legacy dir still
+    // exists, an old backup may be stranded there — surface it rather than
+    // reporting "no backup" for data that exists.
+    if let Some(home) = dirs::home_dir() {
+        let legacy = datadir::legacy_backups_dir(&home);
+        if legacy.is_dir() {
+            return list_backups_at(&projects, &legacy, &session_path);
+        }
+    }
+    Ok(found)
 }
 
 /// Overwrite the original .jsonl. By convention, a caller that's overwriting
@@ -931,37 +955,37 @@ mod session_scan_tests {
 mod write_session_snapshot_tests {
     use super::*;
 
-    /// Returns (base dir to clean up, projects root, home dir), with a fresh
-    /// `<projects>/proj1/` directory already created — parameterized so these
-    /// tests never touch the real `CLAUDE_CONFIG_DIR`/`HOME`.
+    /// Returns (base dir to clean up, projects root, backups root), with a
+    /// fresh `<projects>/proj1/` directory already created — parameterized so
+    /// these tests never touch the real `CLAUDE_CONFIG_DIR`/`CCDECK_DATA_DIR`.
     fn setup() -> (PathBuf, PathBuf, PathBuf) {
         let base = std::env::temp_dir().join(format!(
             "ccstudio-snapshot-test-{}",
             uuid::Uuid::new_v4()
         ));
-        let home = base.join("home");
-        let projects = home.join(".claude").join("projects");
+        let projects = base.join("home").join(".claude").join("projects");
+        let backups_root = base.join("home").join(".ccdeck").join("backups");
         fs::create_dir_all(projects.join("proj1")).unwrap();
-        (base, projects, home)
+        (base, projects, backups_root)
     }
 
     #[test]
     fn snapshot_at_keeps_exactly_one_backup_file_across_repeated_calls() {
-        let (base, projects, home) = setup();
+        let (base, projects, backups_root) = setup();
         let session = projects.join("proj1").join("session.jsonl");
         let session_path = session.to_string_lossy().into_owned();
 
         fs::write(&session, "v1 content\n").unwrap();
-        snapshot_at(&projects, &home, &session_path).unwrap();
+        snapshot_at(&projects, &backups_root, &session_path).unwrap();
 
         fs::write(&session, "v2 content\n").unwrap();
-        snapshot_at(&projects, &home, &session_path).unwrap();
+        snapshot_at(&projects, &backups_root, &session_path).unwrap();
 
-        let backup_root = backup_root_for(&projects, &home, &session_path).unwrap();
+        let backup_root = backup_root_for(&projects, &backups_root, &session_path).unwrap();
         let files_on_disk: Vec<_> = fs::read_dir(&backup_root).unwrap().flatten().collect();
         assert_eq!(files_on_disk.len(), 1, "only one backup file must exist on disk after two snapshots");
 
-        let backups = list_backups_at(&projects, &home, &session_path).unwrap();
+        let backups = list_backups_at(&projects, &backups_root, &session_path).unwrap();
         assert_eq!(backups.len(), 1, "list_backups_at must report exactly one entry");
         assert_eq!(
             fs::read_to_string(&backups[0].path).unwrap(),
@@ -974,7 +998,7 @@ mod write_session_snapshot_tests {
 
     #[test]
     fn write_session_does_not_auto_snapshot() {
-        let (base, projects, home) = setup();
+        let (base, projects, backups_root) = setup();
         let session = projects.join("proj1").join("session.jsonl");
         fs::write(&session, "original content\n").unwrap();
         let session_path = session.to_string_lossy().into_owned();
@@ -983,7 +1007,7 @@ mod write_session_snapshot_tests {
         // — write_session must no longer take a backup as a side effect.
         write_session_at(&session_path, "new content\n").unwrap();
 
-        let backups = list_backups_at(&projects, &home, &session_path).unwrap();
+        let backups = list_backups_at(&projects, &backups_root, &session_path).unwrap();
         assert!(backups.is_empty(), "write_session must not create a backup as a side effect");
         assert_eq!(fs::read_to_string(&session).unwrap(), "new content\n");
 
@@ -1061,6 +1085,11 @@ mod cleanup_tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Move legacy ccdeck-owned state (backups, config) out of ~/.claude
+    // before anything reads either location. Non-fatal by design: the app
+    // must boot even if a rename fails (reads fall back to the legacy paths).
+    datadir::migrate_legacy_state();
+
     // Build the search state up front (opens the SQLite cache). If it fails
     // (e.g. no home dir), the app still runs — search is just unavailable.
     let search_state = search::state::SearchState::new(projects_dir_inner(), dirs::home_dir());
@@ -1070,6 +1099,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(prompts::state::PromptsState::new())
         .invoke_handler(tauri::generate_handler![
             find_projects_dir,
             home_dir,
@@ -1095,6 +1125,14 @@ pub fn run() {
             providers::set_provider_key,
             providers::provider_key_status,
             providers::provider_probe_keychain,
+            prompts::state::list_pieces,
+            prompts::state::save_piece,
+            prompts::state::delete_piece,
+            prompts::state::piece_load_errors,
+            prompts::state::match_pieces,
+            prompts::state::embed_status,
+            prompts::state::embed_download,
+            prompts::state::set_embed_enabled,
         ]);
 
     match search_state {
