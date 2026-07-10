@@ -51,6 +51,22 @@ console.log('deriveNotices');
   );
   eq(both.map((n) => n.kind), ['repaired', 'repaired', 'unreadable'], 'repairs precede unreadable, order stable');
   eq(noticeBadgeCount(both), 3, 'badge counts every unresolved data event');
+
+  // Config events (a hand-edited hotkey that fell back to its default) are the
+  // third source — a durable trace, not a silent drop. They sort last.
+  const cfg = deriveNotices(
+    [{ id: 's1', title: 'a' }],
+    [{ file: 'x.json', error: 'boom' }],
+    [{ command: 'copyPrompt', label: 'Copy full prompt', chord: 'c', reason: 'needs Ctrl or Cmd.' }]
+  );
+  eq(cfg.map((n) => n.kind), ['repaired', 'unreadable', 'config'], 'config events sort after snippet events');
+  const configNotice = cfg.find((n) => n.kind === 'config');
+  eq(configNotice.id, 'hotkey:copyPrompt', 'config notice keyed by hotkey command');
+  assert(/copy full prompt/i.test(configNotice.title), 'config notice titled by the command label');
+  assert(configNotice.detail.includes('c') && /shortcuts/i.test(configNotice.detail), 'config detail carries the chord + the re-bind nudge');
+  eq(noticeBadgeCount(cfg), 3, 'the config event counts toward the badge');
+  // Absent third arg stays backward-compatible (default []).
+  eq(deriveNotices([{ id: 's1', title: 'a' }], []).length, 1, 'invalidHotkeys defaults to none');
 }
 
 if (failures > 0) {

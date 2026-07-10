@@ -46,7 +46,12 @@ import {
   spanStarts,
 } from './compose/doc';
 import { copyText } from './compose/variables';
-import { resolveHotkeys, type HotkeyCommand } from './prompts/hotkeys';
+import {
+  resolveHotkeys,
+  resolveHotkeysReport,
+  HOTKEY_LABELS,
+  type HotkeyCommand,
+} from './prompts/hotkeys';
 import { deriveNotices, type Notice } from './prompts/notices';
 import { toasts } from './prompts/toasts.svelte';
 
@@ -149,33 +154,58 @@ export async function initPrompts(): Promise<void> {
       // Defaults stand (resolveHotkeys handles an empty map); a persist
       // failure surfaces on rebind, not here.
     }
-    // Data events (repairs / unreadable files) flash a 5s toast on first load;
-    // the durable trace lives on in the gear's Notices (contract §S13).
-    announceDataEvents();
   }
+  // Data events (repairs / unreadable files / a reset hotkey) flash a 5s toast;
+  // the durable trace lives on in the gear's Notices (contract §S13). Runs on
+  // EVERY view entry, not just the first — a repair discovered on a later load
+  // is a new data event and must announce too — but toasts only what's new
+  // since the last announcement, so re-entering a view with the same unresolved
+  // events stays quiet.
+  announceDataEvents();
 }
 
 /** The durable data-event notices (contract §S13 / §Store robustness): loader-
  *  repaired snippets first (a one-click re-save fixes them), then unreadable
  *  files. Derived, not stored — the sources are the snippet list + load errors. */
 export function notices(): Notice[] {
+  // Invalid hotkey overrides (hand-edited config that fell back to a default)
+  // are a config data event — derived from the same overrides resolveHotkeys
+  // reads, so the trace stays consistent with what actually bound.
+  const invalidHotkeys = resolveHotkeysReport(prompts.hotkeyOverrides).invalid.map((e) => ({
+    command: e.command,
+    label: HOTKEY_LABELS[e.command],
+    chord: e.chord,
+    reason: e.reason,
+  }));
   return deriveNotices(
     prompts.snippets.filter((s) => s.recovered).map((s) => ({ id: s.id, title: s.title })),
-    prompts.snippetLoadErrors
+    prompts.snippetLoadErrors,
+    invalidHotkeys
   );
 }
 
-/** Flash a single 5s toast summarizing the data events found on load. The toast
- *  is the transient announce; the gear badge + Notices section is the record
- *  that outlives it. */
+/** Notice ids already announced this session — so a data event toasts once, when
+ *  it first appears, and re-entering the view with the same unresolved events
+ *  stays quiet. Keyed by the stable notice id (snippet id / file path / hotkey
+ *  command), the same key the Notices list and badge use. */
+const announcedNoticeIds = new Set<string>();
+
+/** Flash a single 5s toast summarizing the data events that are NEW since the
+ *  last announcement (contract §S13's transient half). The toast is the
+ *  transient announce; the gear badge + Notices section is the record that
+ *  outlives it. Announcing per-new-event (not once per session) is why a repair
+ *  surfaced on a later view entry still toasts. */
 function announceDataEvents(): void {
-  const current = notices();
-  if (current.length === 0) return;
-  const repaired = current.filter((n) => n.kind === 'repaired').length;
-  const unreadable = current.filter((n) => n.kind === 'unreadable').length;
+  const fresh = notices().filter((n) => !announcedNoticeIds.has(n.id));
+  if (fresh.length === 0) return;
+  for (const n of fresh) announcedNoticeIds.add(n.id);
+  const repaired = fresh.filter((n) => n.kind === 'repaired').length;
+  const unreadable = fresh.filter((n) => n.kind === 'unreadable').length;
+  const config = fresh.filter((n) => n.kind === 'config').length;
   const parts: string[] = [];
   if (repaired) parts.push(`${repaired} snippet${repaired === 1 ? '' : 's'} auto-repaired`);
   if (unreadable) parts.push(`${unreadable} file${unreadable === 1 ? '' : 's'} couldn't be read`);
+  if (config) parts.push(`${config} shortcut${config === 1 ? '' : 's'} reset to default`);
   toasts.push(`${parts.join(' · ')} — see the gear for details.`);
 }
 
@@ -254,12 +284,20 @@ async function runMatch(): Promise<void> {
       return snippet ? [{ snippet, score: h.score, source: h.source }] : [];
     });
     prompts.matching = false;
-  } catch {
+  } catch (e) {
     if (id !== matchId) return;
-    // Matching is a live suggestion strip — a failed run degrades to "no
-    // suggestions" without nuking the panel; store errors surface on save.
-    prompts.hits = [];
     prompts.matching = false;
+    prompts.hits = [];
+    // The one failure we expect here is a transient backend/IPC error — Tauri's
+    // Result<_, String> rejects with a *string*. The match panel is a
+    // suggestion strip, not a save path, so that degrades quietly to "no
+    // suggestions" (store errors surface on the save path, which is guarded).
+    if (typeof e === 'string') return;
+    // Anything else is a programming error wearing a "No matching snippets."
+    // costume — a user reads that as "nothing matched," not "matching is
+    // broken." Don't let it hide: log and re-throw so it surfaces as a failure.
+    console.error('Prompt match failed unexpectedly:', e);
+    throw e;
   }
 }
 
