@@ -32,24 +32,24 @@ migration).
 
 ```
 ~/.ccdeck/
-  prompts/            # the piece library — one JSON file per piece, hand-editable, git-able
+  prompts/            # the snippet library — one JSON file per snippet, hand-editable, git-able
     <uuid>.json
   projects.json       # the project roster — one small file (records are tiny and few;
-                      # one-file-per-record earns nothing here, unlike pieces)
+                      # one-file-per-record earns nothing here, unlike snippets)
   backups/            # session edit backups
   models/             # opt-in embedding model files
   cache/
-    embeddings.sqlite # piece-embedding cache (piece_id, model_id, body_hash, vector blob)
+    embeddings.sqlite # snippet-embedding cache (piece_id, model_id, body_hash, vector blob)
 ```
 
-`prompts/` holds **only** hand-editable piece JSON. One piece per file (LLM-ingestable whole,
-per-piece diffs). `id` is canonical; the loader trusts content over filename; saves write
+`prompts/` holds **only** hand-editable snippet JSON. One snippet per file (LLM-ingestable whole,
+per-snippet diffs). `id` is canonical; the loader trusts content over filename; saves write
 `<id>.json`.
 
 ## Project model (new this round)
 
-A project is a named, colored grouping for pieces — the unit the tabs, the compose-box tint,
-and piece-span hues all key off.
+A project is a named, colored grouping for snippets — the unit the tabs, the compose-box tint,
+and snippet-span hues all key off.
 
 ```json
 {
@@ -75,10 +75,10 @@ and piece-span hues all key off.
   tab (white/neutral — it is not a project record).
 - `path` is optional metadata (absolute project dir) for future auto-scoping; no behavior hangs
   on it in this round.
-- **Delete semantics: deleting a project rescopes its pieces to global.** Nothing a user wrote
-  ever vanishes as a side effect; the pieces surface again under Global.
+- **Delete semantics: deleting a project rescopes its snippets to global.** Nothing a user wrote
+  ever vanishes as a side effect; the snippets surface again under Global.
 
-Piece `scope` (v2) references projects by id:
+Snippet `scope` (v2) references projects by id:
 
 ```json
 "scope": { "kind": "global" }
@@ -86,11 +86,11 @@ Piece `scope` (v2) references projects by id:
 ```
 
 Legacy/unknown scope shapes (the pre-revision path-keyed form, or a `project_id` that matches no
-roster entry) load as **global** plus an entry in `piece_load_errors` — visible, non-fatal, file
+roster entry) load as **global** plus an entry in `snippet_load_errors` — visible, non-fatal, file
 untouched. (Migration reality: the feature never shipped in a release; only founder feel-check
 data exists. No dual-schema machinery — the honest notice is the whole path.)
 
-## Piece schema (canonical)
+## Snippet schema (canonical)
 
 ```json
 {
@@ -114,8 +114,8 @@ data exists. No dual-schema machinery — the honest notice is the whole path.)
   `name` and optional `default`. The body is the single source of truth.
 - Unknown extra fields in hand-edited files are preserved on round-trip (serde flatten).
 - `keywords`/`tags`/`category` are **metadata** — no top-level UI prominence; they live in the
-  piece modal's Metadata tab. Fuzzy match still searches them.
-- `list_pieces` may additionally mark a piece with transient `"recovered": true` (never written
+  snippet modal's Metadata tab. Fuzzy match still searches them.
+- `list_snippets` may additionally mark a snippet with transient `"recovered": true` (never written
   to disk) — see § Store robustness.
 
 ## Variable grammar (shared spec — Rust and TS MUST implement identically)
@@ -134,7 +134,7 @@ Scan left-to-right:
 3. Any other braced run (invalid name, spaces, quotes, nesting) is left **verbatim** — JSON
    examples inside prompt bodies never parse as variables.
 4. The same name is the **same variable everywhere** in a composed document — one fill value
-   serves every occurrence across every inserted piece and typed text (this is the point:
+   serves every occurrence across every inserted snippet and typed text (this is the point:
    standardized names like `{task}` fill once).
 5. When the same name appears with differing defaults, **the first occurrence's default wins**
    (consistent with first-appearance ordering everywhere else in this contract).
@@ -228,26 +228,26 @@ All async, `Result<T, String>`, snake_case, registered in `invoke_handler`. Modu
 `src-tauri/src/prompts/`.
 
 ```
-list_pieces() -> Piece[]                       // may carry transient recovered: true
-save_piece(piece: PieceInput) -> Piece         // create (no id) / update; versioning per schema
-delete_piece(id: string) -> null
-piece_load_errors() -> { file: string, error: string }[]
-    // Skipped/degraded piece files: broken JSON that repair could not recover, shadowed
+list_snippets() -> Snippet[]                       // may carry transient recovered: true
+save_snippet(snippet: SnippetInput) -> Snippet         // create (no id) / update; versioning per schema
+delete_snippet(id: string) -> null
+snippet_load_errors() -> { file: string, error: string }[]
+    // Skipped/degraded snippet files: broken JSON that repair could not recover, shadowed
     // duplicate ids, legacy/unknown scope fallbacks. Fresh scan; files stay intact on disk.
 
 list_projects() -> Project[]
 save_project(project: ProjectInput) -> Project // create (no id) / update (rename, color, pin)
-delete_project(id: string) -> null             // rescopes the project's pieces to global
+delete_project(id: string) -> null             // rescopes the project's snippets to global
 
-match_pieces(query: string, project_id: string | null, limit: number) -> MatchHit[]
+match_snippets(query: string, project_id: string | null, limit: number) -> MatchHit[]
     // MatchHit { id, score, source: "lexical" | "semantic" | "hybrid" }
-    // Pool: global pieces + pieces scoped to project_id (null = global only).
+    // Pool: global snippets + snippets scoped to project_id (null = global only).
 
 embed_status() -> EmbedStatus                  // unchanged from Core (state, model_id,
                                                // model_size_mb, runtime_size_mb, error?)
 embed_download(channel) -> null
     // Progress events: { stage: "runtime" | "model" | "index", done: number, total: number }
-    // — bytes for the two download stages, piece counts for "index" (embedding the existing
+    // — bytes for the two download stages, snippet counts for "index" (embedding the existing
     // library, which now runs as part of the same one-click flow). Terminal signal is the
     // command Result + an embed_status re-fetch, as in Core.
 set_embed_enabled(enabled: bool) -> null
@@ -259,21 +259,21 @@ Unchanged from Core (fzf-style weighted lexical always on; fastembed-rs
 `Qdrant/bge-small-en-v1.5-onnx-Q` opt-in; ort `load-dynamic` with pinned sha256-verified
 artifacts; linear cosine KNN over `cache/embeddings.sqlite`; fusion where an exact title hit is
 never buried). The only surface change: the download flow now ends with the **index** stage
-(embed every existing piece) so the popover's promise — "Download & index" — is literally what
+(embed every existing snippet) so the popover's promise — "Download & index" — is literally what
 the one click does.
 
 ## Compose surface — behavioral contract (revised)
 
 The compose box holds **raw literal text** — including `{var}` tokens, which are substituted
-only at copy time. Spans track provenance as before: **typed**, **linked** (from a piece,
-unchanged), **linked-modified** (edited inline; never touches the stored piece).
+only at copy time. Spans track provenance as before: **typed**, **linked** (from a snippet,
+unchanged), **linked-modified** (edited inline; never touches the stored snippet).
 
 Switching tabs **never edits the draft**: composed text survives a tab switch untouched, and
 cross-project reference is allowed. Scope is a decision made at save time, never a mode the draft
 lives inside — so the app never nags a user to move what they wrote.
 
 - **Tabs**: Global plus every pinned project, atop the view. The active tab is the scope — it
-  sets the match pool (`match_pieces` project_id), the *default* save target for new pieces, and
+  sets the match pool (`match_snippets` project_id), the *default* save target for new snippets, and
   the visual tint. Unpinned projects are reachable through the project manager popover. The tab
   row is a roving-tabindex widget (`←`/`→` move, `Enter`/`Space` activate).
 - **Situational affordances, with exactly one persistent control**:
@@ -287,7 +287,7 @@ lives inside — so the app never nags a user to move what they wrote.
   - The *variable fill list* auto-appears beneath the box whenever parsing finds variables: one
     row per distinct name (first-appearance order) showing the name, its default as the input's
     placeholder text, a fill input, and that variable's **as-variable toggle** (§ Copy output).
-    The fill-at-insert popover from Core is retired — inserting a piece with variables just
+    The fill-at-insert popover from Core is retired — inserting a snippet with variables just
     merges its names into this unified list.
 - **Insertion is one path with two triggers** (click a hit, or `↓` into the panel then `Enter`).
   Either way the inserted body **replaces the query line** — the text from the current line's
@@ -304,14 +304,14 @@ lives inside — so the app never nags a user to move what they wrote.
   - Compose-box background: a *faint hint* of the active project's `--project-<key>` (via
     `color-mix`, low single-digit percent); plain neutral/white on Global. The tint is contained
     to the compose box, never the whole app.
-  - Piece spans: translucent fills — greyish for global pieces, a darker-hue translucent mix of
-    the piece's project color for project pieces.
+  - Snippet spans: translucent fills — greyish for global snippets, a darker-hue translucent mix of
+    the snippet's project color for project snippets.
   - Text selection inside the box: `--highlight` (highlighter yellow — light but bright, defined
     for both themes) via `::selection` scoped to the compose surface.
   - The active project's color reaches components through one CSS custom property
     (`--project-color`) set at the view wrapper from the palette token — components never branch
     on color keys.
-- **Piece modal**: two tabs — **Content** (title, body, and a read-only variable preview:
+- **Snippet modal**: two tabs — **Content** (title, body, and a read-only variable preview:
   parsed names + defaults) and **Metadata** (keywords, tags, category). Editing reached from the
   match panel or a linked span, as in Core. Opened from a span, the body defaults to the span's
   **current edited text**, not the stored body — the user edited it because they meant to, and
@@ -342,7 +342,7 @@ lives inside — so the app never nags a user to move what they wrote.
 
 - On JSON parse failure the loader attempts an **in-memory jsonrepair-style recovery** (vetted
   mature crate if one exists — builder verifies — else a bounded port: unquoted keys, trailing
-  commas, comments, single quotes, truncation). A recovered piece loads flagged
+  commas, comments, single quotes, truncation). A recovered snippet loads flagged
   `recovered: true` (transient).
 
   **How the UI shows it needs attention** (revised): a repair is a *data event* — it touched the
@@ -353,18 +353,18 @@ lives inside — so the app never nags a user to move what they wrote.
   A transient surface must never be the only record of something that changed a user's data —
   and a permanent banner for a routine event is the clutter this design otherwise refuses.
 - **The user's file on disk is never rewritten by the loader.** The repaired form persists only
-  on the user's next explicit save of that piece — which appends a version like any body change.
-- Unrecoverable files stay in `piece_load_errors` exactly as in Core: visible, intact on disk.
+  on the user's next explicit save of that snippet — which appends a version like any body change.
+- Unrecoverable files stay in `snippet_load_errors` exactly as in Core: visible, intact on disk.
 - **Every write path sees what the loader sees.** Save, delete, twin cleanup, and
   delete-project rescope operate on the loader's repair-aware, canonical-filename-wins view —
   never on a stricter parse. A write/delete decision made from a narrower view than the
   loader's can destroy data the loader would surface (rescope overwriting the canonical body
-  with a stale twin) or fail to remove data the loader will resurrect (a deleted piece
+  with a stale twin) or fail to remove data the loader will resurrect (a deleted snippet
   reappearing from a repairable twin). When neither same-id twin is canonically named, the
   surviving winner is deterministic (lexicographic filename order), never directory-iteration
   order.
 - The same in-memory repair applies to `projects.json`. A roster repair that *succeeds*
-  surfaces as a `piece_load_errors` entry naming the file (repair can silently drop truncated
+  surfaces as a `snippet_load_errors` entry naming the file (repair can silently drop truncated
   records, and the roster has no per-record recovered flag — the notice is the user's cue to
   inspect before the next project save rewrites the file); an unrepairable roster is a loud
   `Err`, never a silent-empty roster.

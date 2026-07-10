@@ -1,6 +1,6 @@
 //! In-memory jsonrepair-style recovery for hand-edited JSON (contract
 //! § Store robustness): unquoted keys, trailing commas, comments, single
-//! quotes, truncation. Used by the piece loader and the project roster; both
+//! quotes, truncation. Used by the snippet loader and the project roster; both
 //! honor the same invariant — **repair never rewrites the user's file**, the
 //! repaired form persists only through the user's next explicit save.
 //!

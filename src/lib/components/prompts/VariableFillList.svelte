@@ -3,7 +3,7 @@
    * The unified variable fill list (contract §Compose surface): auto-appears
    * beneath the box whenever parsing finds variables — one row per distinct
    * name in first-appearance order, the default as placeholder text. One
-   * name = one variable document-wide (grammar rule 4), so inserting a piece
+   * name = one variable document-wide (grammar rule 4), so inserting a snippet
    * just merges its names into this list; values substitute only at copy.
    */
   import { prompts, setFill } from '$lib/prompts.svelte';
@@ -67,6 +67,6 @@
   }
   .fill-list__row input:focus {
     outline: none;
-    border-color: color-mix(in srgb, var(--project-color, var(--accent-piece)) 60%, var(--border));
+    border-color: color-mix(in srgb, var(--project-color, var(--accent-snippet)) 60%, var(--border));
   }
 </style>

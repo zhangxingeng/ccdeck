@@ -1,6 +1,6 @@
 /**
  * Prompt Library data model (issue #24) — mirrors the CONTRACT
- * (project_docs/prompts-design.md §Project model, §Piece schema, §Command
+ * (project_docs/prompts-design.md §Project model, §Snippet schema, §Command
  * contract), not the Rust source: the contract is the seam both sides build
  * against. Pure TypeScript — no DOM, no Tauri, no Svelte.
  */
@@ -21,8 +21,8 @@ export const PALETTE_KEYS = [
 ] as const;
 export type PaletteKey = (typeof PALETTE_KEYS)[number];
 
-/** A named, colored grouping for pieces — the unit tabs, the compose-box
- *  tint, and piece-span hues key off. */
+/** A named, colored grouping for snippets — the unit tabs, the compose-box
+ *  tint, and snippet-span hues key off. */
 export interface Project {
   readonly id: string;
   name: string;
@@ -44,14 +44,14 @@ export interface ProjectInput {
   path: string | null;
 }
 
-/** Where a piece is available: everywhere, or one project (by roster id).
- *  Legacy/unknown scope shapes load as global + a piece_load_errors entry —
+/** Where a snippet is available: everywhere, or one project (by roster id).
+ *  Legacy/unknown scope shapes load as global + a snippet_load_errors entry —
  *  the backend owns that fallback; this type only names the v2 shape. */
-export type PieceScope = { kind: 'global' } | { kind: 'project'; project_id: string };
+export type SnippetScope = { kind: 'global' } | { kind: 'project'; project_id: string };
 
 /** A prior body pushed onto the history on body-changing save (newest-first).
  *  Product promise (issue #7 F7): a save never destroys the previous body. */
-export interface PieceVersion {
+export interface SnippetVersion {
   body: string;
   saved_at: number; // unix seconds
 }
@@ -60,41 +60,41 @@ export interface PieceVersion {
  *  ~/.ccdeck/prompts/<id>.json. Unknown extra fields in hand-edited files are
  *  preserved by the backend on round-trip; this interface only names the
  *  fields the UI reads. */
-export interface Piece {
+export interface Snippet {
   id: string;
   title: string;
   body: string;
   keywords: string[];
   tags: string[];
   category: string | null;
-  scope: PieceScope;
+  scope: SnippetScope;
   /** Derived from the variable grammar at save time (body is the single
    *  source of truth; this array exists so consumers don't re-parse). */
   placeholders: { name: string; default?: string }[];
   created_at: number;
   updated_at: number;
   /** Newest-first, append-only on body change. */
-  versions: PieceVersion[];
-  /** Transient, never written to disk: the loader repaired this piece from
+  versions: SnippetVersion[];
+  /** Transient, never written to disk: the loader repaired this snippet from
    *  invalid JSON in memory — it needs attention (the repaired form persists
-   *  only on the user's next explicit save of the piece). */
+   *  only on the user's next explicit save of the snippet). */
   recovered?: boolean;
 }
 
-/** save_piece input: no `id` = create; `id` present = update (backend handles
+/** save_snippet input: no `id` = create; `id` present = update (backend handles
  *  versioning). Derived fields (placeholders, timestamps, versions) are the
  *  backend's to compute — never sent. */
-export interface PieceInput {
+export interface SnippetInput {
   id?: string;
   title: string;
   body: string;
   keywords: string[];
   tags: string[];
   category: string | null;
-  scope: PieceScope;
+  scope: SnippetScope;
 }
 
-/** One match_pieces result. Callers never know which engine ran beyond the
+/** One match_snippets result. Callers never know which engine ran beyond the
  *  provenance tag. */
 export interface MatchHit {
   id: string;
@@ -102,12 +102,12 @@ export interface MatchHit {
   source: 'lexical' | 'semantic' | 'hybrid';
 }
 
-/** A piece JSON file that failed to load cleanly on the last scan: broken
+/** A snippet JSON file that failed to load cleanly on the last scan: broken
  *  JSON that repair could not recover, shadowed duplicate ids, legacy scope
- *  fallbacks. Pieces are hand-editable by design (F7) — without this surface
+ *  fallbacks. Snippets are hand-editable by design (F7) — without this surface
  *  a broken file silently vanishes from the library, which reads as data
  *  loss to exactly the hand-editing persona the feature bets on. */
-export interface PieceLoadError {
+export interface SnippetLoadError {
   file: string;
   error: string;
 }
@@ -127,7 +127,7 @@ export interface EmbedStatus {
 
 /** Progress event streamed over the embed_download Channel. Three stages:
  *  the two downloads report bytes; 'index' (embedding the existing library,
- *  part of the same one-click flow) reports piece counts. Completion and
+ *  part of the same one-click flow) reports snippet counts. Completion and
  *  errors are NOT channel events: when the embed_download promise settles,
  *  re-fetch embed_status and render from that. */
 export interface EmbedProgress {

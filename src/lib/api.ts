@@ -17,9 +17,9 @@ import type {
   KeyBackend,
 } from './types';
 import type {
-  Piece,
-  PieceInput,
-  PieceLoadError,
+  Snippet,
+  SnippetInput,
+  SnippetLoadError,
   MatchHit,
   EmbedStatus,
   EmbedProgress,
@@ -412,48 +412,48 @@ export async function indexStatus(): Promise<IndexStatus | null> {
 }
 
 // ---------------------------------------------------------------------------
-// Prompt Library (issue #24) — pieces, matching, opt-in embeddings.
+// Prompt Library (issue #24) — snippets, matching, opt-in embeddings.
 // Contract: project_docs/prompts-design.md. All payloads are serde-default
 // snake_case, like SessionMeta.
 // ---------------------------------------------------------------------------
 
-/** List every piece in the store (the corpus is small by design — the
+/** List every snippet in the store (the corpus is small by design — the
  *  frontend filters by scope/project). */
-export async function listPieces(): Promise<Piece[]> {
-  if (!isTauri()) return devPieces.map((p) => structuredClone(p));
-  return call<Piece[]>('list_pieces');
+export async function listSnippets(): Promise<Snippet[]> {
+  if (!isTauri()) return devSnippets.map((p) => structuredClone(p));
+  return call<Snippet[]>('list_snippets');
 }
 
-/** Create (no id) or update (id present) a piece. The backend owns derived
+/** Create (no id) or update (id present) a snippet. The backend owns derived
  *  fields: placeholders re-derived from the body, `versions` gets the prior
  *  body pushed on when the body changed (append-only — a save never destroys
- *  the previous body), timestamps. Returns the stored piece. */
-export async function savePiece(piece: PieceInput): Promise<Piece> {
-  if (!isTauri()) return devSavePiece(piece);
-  return call<Piece>('save_piece', { piece });
+ *  the previous body), timestamps. Returns the stored snippet. */
+export async function saveSnippet(snippet: SnippetInput): Promise<Snippet> {
+  if (!isTauri()) return devSaveSnippet(snippet);
+  return call<Snippet>('save_snippet', { snippet });
 }
 
-export async function deletePiece(id: string): Promise<void> {
+export async function deleteSnippet(id: string): Promise<void> {
   if (!isTauri()) {
-    const i = devPieces.findIndex((p) => p.id === id);
-    if (i >= 0) devPieces.splice(i, 1);
+    const i = devSnippets.findIndex((p) => p.id === id);
+    if (i >= 0) devSnippets.splice(i, 1);
     return;
   }
-  await call<null>('delete_piece', { id });
+  await call<null>('delete_snippet', { id });
 }
 
-/** Rank pieces against `query`. Pool: global pieces + pieces scoped to
+/** Rank snippets against `query`. Pool: global snippets + snippets scoped to
  *  `projectId` (null = global only). Which engine ran (lexical / semantic /
  *  hybrid) is the backend's business — callers only see the hit list.
  *  Seam note: Rust param `project_id` ⇒ invoke key `projectId` (Tauri's
  *  camelCase convention, pinned at the gate for both lanes). */
-export async function matchPieces(
+export async function matchSnippets(
   query: string,
   projectId: string | null,
   limit: number
 ): Promise<MatchHit[]> {
-  if (!isTauri()) return devMatchPieces(query, projectId, limit);
-  return call<MatchHit[]>('match_pieces', { query, projectId, limit });
+  if (!isTauri()) return devMatchSnippets(query, projectId, limit);
+  return call<MatchHit[]>('match_snippets', { query, projectId, limit });
 }
 
 /** The project roster (~/.ccdeck/projects.json) — small, loaded whole. */
@@ -468,8 +468,8 @@ export async function saveProject(project: ProjectInput): Promise<Project> {
   return call<Project>('save_project', { project });
 }
 
-/** Delete a project. The backend rescopes its pieces to GLOBAL — nothing a
- *  user wrote ever vanishes as a side effect; re-list pieces afterwards. */
+/** Delete a project. The backend rescopes its snippets to GLOBAL — nothing a
+ *  user wrote ever vanishes as a side effect; re-list snippets afterwards. */
 export async function deleteProject(id: string): Promise<void> {
   if (!isTauri()) {
     devDeleteProject(id);
@@ -478,11 +478,11 @@ export async function deleteProject(id: string): Promise<void> {
   await call<null>('delete_project', { id });
 }
 
-/** Piece JSON files that failed to parse on the last load pass — surfaced so
- *  a hand-edit typo never reads as a silently vanished piece. */
-export async function pieceLoadErrors(): Promise<PieceLoadError[]> {
-  if (!isTauri()) return devPieceLoadErrors.map((e) => ({ ...e }));
-  return call<PieceLoadError[]>('piece_load_errors');
+/** Snippet JSON files that failed to parse on the last load pass — surfaced so
+ *  a hand-edit typo never reads as a silently vanished snippet. */
+export async function snippetLoadErrors(): Promise<SnippetLoadError[]> {
+  if (!isTauri()) return devSnippetLoadErrors.map((e) => ({ ...e }));
+  return call<SnippetLoadError[]>('snippet_load_errors');
 }
 
 export async function embedStatus(): Promise<EmbedStatus> {
@@ -510,14 +510,14 @@ export async function setEmbedEnabled(enabled: boolean): Promise<void> {
   await call<null>('set_embed_enabled', { enabled });
 }
 
-// --- Browser-dev piece + project store: real save/versioning/rescope --------
+// --- Browser-dev snippet + project store: real save/versioning/rescope --------
 // semantics over seeded samples, so `pnpm dev` exercises the whole Prompts
 // view (tabs, variables, recovery notice, embed flow) with no native shell —
 // this is how the founder feel-checks.
 
 // One seeded broken-file case so the load-errors notice is exercisable in
 // browser dev (dismiss it to see the common path).
-const devPieceLoadErrors: PieceLoadError[] = [
+const devSnippetLoadErrors: SnippetLoadError[] = [
   {
     file: '~/.ccdeck/prompts/broken-example.json',
     error: 'expected `,` or `}` at line 3 column 14',
@@ -572,20 +572,20 @@ function devSaveProject(input: ProjectInput): Project {
   return structuredClone(project);
 }
 
-/** Contract delete semantics: the project's pieces rescope to global. */
+/** Contract delete semantics: the project's snippets rescope to global. */
 function devDeleteProject(id: string): void {
   const i = devProjects.findIndex((p) => p.id === id);
   if (i >= 0) devProjects.splice(i, 1);
-  for (const piece of devPieces) {
-    if (piece.scope.kind === 'project' && piece.scope.project_id === id) {
-      piece.scope = { kind: 'global' };
+  for (const snippet of devSnippets) {
+    if (snippet.scope.kind === 'project' && snippet.scope.project_id === id) {
+      snippet.scope = { kind: 'global' };
     }
   }
 }
 
-const devPieces: Piece[] = [
+const devSnippets: Snippet[] = [
   {
-    id: 'dev-piece-reviewer',
+    id: 'dev-snippet-reviewer',
     title: 'senior-reviewer',
     body: 'You are a senior reviewer. Be rigorous about correctness, but do not nitpick style that a formatter owns.',
     keywords: ['review', 'role'],
@@ -598,7 +598,7 @@ const devPieces: Piece[] = [
     versions: [],
   },
   {
-    id: 'dev-piece-terse',
+    id: 'dev-snippet-terse',
     title: 'be-terse',
     body: 'Be terse and concrete. Lead with the answer; skip preamble and hedging.',
     keywords: ['style', 'tone'],
@@ -611,7 +611,7 @@ const devPieces: Piece[] = [
     versions: [{ body: 'Be terse.', saved_at: 1751000000 }],
   },
   {
-    id: 'dev-piece-checklist',
+    id: 'dev-snippet-checklist',
     title: 'pr-review-checklist',
     body: 'Review the PR for {ticket:ABC-123}. Focus especially on {concern}. Check error handling, tests, and naming.',
     keywords: ['review', 'checklist', 'pr'],
@@ -624,7 +624,7 @@ const devPieces: Piece[] = [
     versions: [],
   },
   {
-    id: 'dev-piece-project',
+    id: 'dev-snippet-project',
     title: 'demo-project-context',
     body: 'This project is a Tauri + Svelte desktop app. Prefer the existing store idioms over new abstractions.',
     keywords: ['context'],
@@ -639,7 +639,7 @@ const devPieces: Piece[] = [
   {
     // Exercises the store-robustness surface: an in-memory jsonrepair rescue,
     // flagged transient — the UI shows it needs attention until re-saved.
-    id: 'dev-piece-recovered',
+    id: 'dev-snippet-recovered',
     title: 'tone-notes',
     body: 'Prefer plain words over jargon. Say {audience:teammates} when addressing the reader.',
     keywords: ['tone'],
@@ -654,11 +654,11 @@ const devPieces: Piece[] = [
   },
 ];
 
-async function devSavePiece(input: PieceInput): Promise<Piece> {
+async function devSaveSnippet(input: SnippetInput): Promise<Snippet> {
   const { parseVariables } = await import('./compose/variables');
   const now = Math.floor(Date.now() / 1000);
   const placeholders = parseVariables(input.body);
-  const existing = input.id ? devPieces.find((p) => p.id === input.id) : undefined;
+  const existing = input.id ? devSnippets.find((p) => p.id === input.id) : undefined;
   if (existing) {
     if (existing.body !== input.body) {
       existing.versions.unshift({ body: existing.body, saved_at: existing.updated_at });
@@ -671,12 +671,12 @@ async function devSavePiece(input: PieceInput): Promise<Piece> {
     existing.scope = { ...input.scope };
     existing.placeholders = placeholders;
     existing.updated_at = now;
-    // An explicit save persists the repaired form — the piece no longer
+    // An explicit save persists the repaired form — the snippet no longer
     // needs attention (mirrors the backend's transient-flag semantics).
     delete existing.recovered;
     return structuredClone(existing);
   }
-  const piece: Piece = {
+  const snippet: Snippet = {
     id: crypto.randomUUID(),
     title: input.title,
     body: input.body,
@@ -689,8 +689,8 @@ async function devSavePiece(input: PieceInput): Promise<Piece> {
     updated_at: now,
     versions: [],
   };
-  devPieces.push(piece);
-  return structuredClone(piece);
+  devSnippets.push(snippet);
+  return structuredClone(snippet);
 }
 
 // A stand-in weighted fuzzy scorer for browser-dev — deliberately a fixture,
@@ -721,9 +721,9 @@ function devFuzzyScore(query: string, target: string): number {
   return Math.max(0, matched * 8 - gaps);
 }
 
-function devMatchPieces(query: string, projectId: string | null, limit: number): MatchHit[] {
+function devMatchSnippets(query: string, projectId: string | null, limit: number): MatchHit[] {
   if (!query.trim()) return [];
-  const pool = devPieces.filter(
+  const pool = devSnippets.filter(
     (p) => p.scope.kind === 'global' || (projectId !== null && p.scope.project_id === projectId)
   );
   const hits: MatchHit[] = [];
@@ -751,14 +751,14 @@ let devEmbed: EmbedStatus = {
 async function devEmbedDownload(onProgress: (p: EmbedProgress) => void): Promise<void> {
   devEmbed.state = 'downloading';
   // Three stages — the contract's Channel shape: two byte-counted downloads
-  // (ONNX runtime dylib, then the model), then 'index' in piece counts
+  // (ONNX runtime dylib, then the model), then 'index' in snippet counts
   // (embedding the existing library; "Download & index" is literally what
   // the one click does). Completion is signaled by this promise resolving
   // (callers re-fetch embed_status), never by a channel event.
   const stages: { stage: EmbedProgress['stage']; total: number }[] = [
     { stage: 'runtime', total: devEmbed.runtime_size_mb * 1024 * 1024 },
     { stage: 'model', total: devEmbed.model_size_mb * 1024 * 1024 },
-    { stage: 'index', total: devPieces.length },
+    { stage: 'index', total: devSnippets.length },
   ];
   for (const { stage, total } of stages) {
     const steps = stage === 'index' ? total : 6;

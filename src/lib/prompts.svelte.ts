@@ -9,24 +9,24 @@
  * to check a session and coming back must not eat your composition.
  */
 import type {
-  Piece,
+  Snippet,
   MatchHit,
-  PieceInput,
-  PieceLoadError,
+  SnippetInput,
+  SnippetLoadError,
   EmbedStatus,
   EmbedProgress,
   Project,
   ProjectInput,
 } from './prompts/types';
 import {
-  listPieces,
-  pieceLoadErrors,
-  savePiece as apiSavePiece,
-  deletePiece as apiDeletePiece,
+  listSnippets,
+  snippetLoadErrors,
+  saveSnippet as apiSaveSnippet,
+  deleteSnippet as apiDeleteSnippet,
   listProjects,
   saveProject as apiSaveProject,
   deleteProject as apiDeleteProject,
-  matchPieces,
+  matchSnippets,
   embedStatus,
   embedDownload,
   setEmbedEnabled,
@@ -39,7 +39,7 @@ import {
   type Span,
   emptyDoc,
   applyEdit,
-  insertPiece as docInsertPiece,
+  insertSnippet as docInsertSnippet,
   replaceSpan,
   linkRange,
   caretQuery,
@@ -53,18 +53,18 @@ const DEBOUNCE_MS = 110;
 const MATCH_LIMIT = 8;
 
 export interface ResolvedHit {
-  piece: Piece;
+  snippet: Snippet;
   score: number;
   source: MatchHit['source'];
 }
 
 export const prompts = $state({
   // library
-  pieces: [] as Piece[],
+  snippets: [] as Snippet[],
   loadError: null as string | null,
-  /** Hand-edited piece files that failed to parse on the last load pass —
-   *  shown as a dismissable notice so a typo never reads as a lost piece. */
-  pieceLoadErrors: [] as PieceLoadError[],
+  /** Hand-edited snippet files that failed to parse on the last load pass —
+   *  shown as a dismissable notice so a typo never reads as a lost snippet. */
+  snippetLoadErrors: [] as SnippetLoadError[],
   // project roster + active tab (null = the Global tab)
   projects: [] as Project[],
   activeProjectId: null as string | null,
@@ -101,21 +101,21 @@ let configLoaded = false;
 
 // ── lifecycle ────────────────────────────────────────────────────────────────
 
-/** Load pieces, the project roster, embed status, and (once) the persisted
+/** Load snippets, the project roster, embed status, and (once) the persisted
  *  copy-mode toggle. Idempotent per session — re-entering the view refreshes
  *  the library but keeps the compose doc and fills. */
 export async function initPrompts(): Promise<void> {
   try {
-    prompts.pieces = await listPieces();
+    prompts.snippets = await listSnippets();
     prompts.loadError = null;
   } catch (e) {
     prompts.loadError = e instanceof Error ? e.message : String(e);
   }
   try {
-    prompts.pieceLoadErrors = await pieceLoadErrors();
+    prompts.snippetLoadErrors = await snippetLoadErrors();
   } catch {
     // Diagnostic surface only — if the command itself fails, the primary
-    // listPieces error above already tells the user loading is broken;
+    // listSnippets error above already tells the user loading is broken;
     // keep whatever list we last had rather than flapping the notice.
   }
   try {
@@ -152,7 +152,7 @@ export function disposePrompts(): void {
 // ── projects / tabs ──────────────────────────────────────────────────────────
 
 /** Switch the active tab (null = Global). Drives the match pool, the save
- *  scope for new pieces, and the view tint. */
+ *  scope for new snippets, and the view tint. */
 export function setActiveProject(id: string | null): void {
   prompts.activeProjectId = id;
   scheduleMatch();
@@ -173,15 +173,15 @@ export async function saveProject(input: ProjectInput): Promise<Project> {
   return saved;
 }
 
-/** Delete a project. Its pieces rescope to GLOBAL (contract semantics — the
- *  writing never vanishes), so the piece list is re-fetched; an active tab
+/** Delete a project. Its snippets rescope to GLOBAL (contract semantics — the
+ *  writing never vanishes), so the snippet list is re-fetched; an active tab
  *  pointing at it falls back to Global. */
 export async function deleteProject(id: string): Promise<void> {
   await apiDeleteProject(id);
   prompts.projects = prompts.projects.filter((p) => p.id !== id);
   if (prompts.activeProjectId === id) prompts.activeProjectId = null;
   try {
-    prompts.pieces = await listPieces();
+    prompts.snippets = await listSnippets();
   } catch (e) {
     prompts.loadError = e instanceof Error ? e.message : String(e);
   }
@@ -209,12 +209,12 @@ async function runMatch(): Promise<void> {
   }
   prompts.matching = true;
   try {
-    const hits = await matchPieces(query, prompts.activeProjectId, MATCH_LIMIT);
+    const hits = await matchSnippets(query, prompts.activeProjectId, MATCH_LIMIT);
     if (id !== matchId) return; // superseded
-    const byId = new Map(prompts.pieces.map((p) => [p.id, p]));
+    const byId = new Map(prompts.snippets.map((p) => [p.id, p]));
     prompts.hits = hits.flatMap((h) => {
-      const piece = byId.get(h.id);
-      return piece ? [{ piece, score: h.score, source: h.source }] : [];
+      const snippet = byId.get(h.id);
+      return snippet ? [{ snippet, score: h.score, source: h.source }] : [];
     });
     prompts.matching = false;
   } catch {
@@ -246,19 +246,19 @@ export function composeEdit(start: number, end: number, inserted: string): void 
   scheduleMatch();
 }
 
-/** Insert a piece's RAW body at the caret as a linked span — {var} tokens
+/** Insert a snippet's RAW body at the caret as a linked span — {var} tokens
  *  land verbatim and merge into the unified fill list (fill-at-insert is
  *  retired; variables resolve at copy time). */
-export function composeInsertPiece(piece: Piece): Doc {
-  const link: SpanLink = { pieceId: piece.id, title: piece.title, scope: piece.scope };
+export function composeInsertSnippet(snippet: Snippet): Doc {
+  const link: SpanLink = { snippetId: snippet.id, title: snippet.title, scope: snippet.scope };
   const at = prompts.caret;
-  prompts.doc = docInsertPiece(prompts.doc, at, piece.body, link);
-  setSelection(at + piece.body.length, at + piece.body.length);
+  prompts.doc = docInsertSnippet(prompts.doc, at, snippet.body, link);
+  setSelection(at + snippet.body.length, at + snippet.body.length);
   prompts.focusNonce++;
   return prompts.doc;
 }
 
-/** Replace one span's text + metadata (piece-modal save refreshing the
+/** Replace one span's text + metadata (snippet-modal save refreshing the
  *  span's link metadata / provenance state — never the composed text). */
 export function composeReplaceSpan(index: number, newText: string, span: Omit<Span, 'length'>): void {
   const start = spanStarts(prompts.doc)[index];
@@ -267,8 +267,8 @@ export function composeReplaceSpan(index: number, newText: string, span: Omit<Sp
   prompts.focusNonce++;
 }
 
-/** After save-selection-as-piece: the saved selection becomes a linked span
- *  pointing at the new piece (linked-modified when the saved body was edited
+/** After save-selection-as-snippet: the saved selection becomes a linked span
+ *  pointing at the new snippet (linked-modified when the saved body was edited
  *  away from the selection before saving). */
 export function composeLinkRange(
   start: number,
@@ -307,22 +307,22 @@ export async function setAsVariable(value: boolean): Promise<void> {
   }
 }
 
-// ── piece store ──────────────────────────────────────────────────────────────
+// ── snippet store ──────────────────────────────────────────────────────────────
 
-/** Save (create or update) and sync the local list. Returns the stored piece. */
-export async function savePiece(input: PieceInput): Promise<Piece> {
-  const saved = await apiSavePiece(input);
-  const i = prompts.pieces.findIndex((p) => p.id === saved.id);
-  if (i >= 0) prompts.pieces[i] = saved;
-  else prompts.pieces.push(saved);
+/** Save (create or update) and sync the local list. Returns the stored snippet. */
+export async function saveSnippet(input: SnippetInput): Promise<Snippet> {
+  const saved = await apiSaveSnippet(input);
+  const i = prompts.snippets.findIndex((p) => p.id === saved.id);
+  if (i >= 0) prompts.snippets[i] = saved;
+  else prompts.snippets.push(saved);
   scheduleMatch(); // the library changed under the current query
   return saved;
 }
 
-export async function deletePiece(id: string): Promise<void> {
-  await apiDeletePiece(id);
-  const i = prompts.pieces.findIndex((p) => p.id === id);
-  if (i >= 0) prompts.pieces.splice(i, 1);
+export async function deleteSnippet(id: string): Promise<void> {
+  await apiDeleteSnippet(id);
+  const i = prompts.snippets.findIndex((p) => p.id === id);
+  if (i >= 0) prompts.snippets.splice(i, 1);
   scheduleMatch();
 }
 

@@ -10,18 +10,18 @@
  *   - no zero-length spans
  *   - no two adjacent 'typed' spans (merged)
  */
-import type { PieceScope } from '../prompts/types';
+import type { SnippetScope } from '../prompts/types';
 
 export type SpanState = 'typed' | 'linked' | 'linked-modified';
 
-/** Provenance carried by a linked / linked-modified span: which piece the
+/** Provenance carried by a linked / linked-modified span: which snippet the
  *  text came from, nothing more. The document holds RAW literal text —
  *  {var} tokens included — and variables resolve only at copy time, so
  *  there is no per-span template/fills state to carry. */
 export interface SpanLink {
-  pieceId: string;
+  snippetId: string;
   title: string;
-  scope: PieceScope;
+  scope: SnippetScope;
 }
 
 export interface Span {
@@ -105,12 +105,12 @@ export function spanText(doc: Doc, index: number): string {
 }
 
 /**
- * Insert a piece's raw body text at `offset` as a fresh 'linked' span
+ * Insert a snippet's raw body text at `offset` as a fresh 'linked' span
  * ({var} tokens land verbatim — they resolve at copy time). Splitting a
- * linked span in two marks both halves linked-modified — the original piece
+ * linked span in two marks both halves linked-modified — the original snippet
  * no longer appears intact, which is exactly what that state signals.
  */
-export function insertPiece(doc: Doc, offset: number, text: string, link: SpanLink): Doc {
+export function insertSnippet(doc: Doc, offset: number, text: string, link: SpanLink): Doc {
   if (!text) return doc;
   const starts = spanStarts(doc);
   const spans: Span[] = [];
@@ -151,13 +151,13 @@ export function insertPiece(doc: Doc, offset: number, text: string, link: SpanLi
  *
  * - Pure insertion strictly inside a span is absorbed by it; a linked span
  *   absorbing an edit becomes linked-modified (F1: inline edit diverges the
- *   span, never touches the stored piece).
+ *   span, never touches the stored snippet).
  * - Pure insertion at a span boundary is new typed text — typing at the edge
- *   of a linked span must not silently grow the piece's claimed region.
+ *   of a linked span must not silently grow the snippet's claimed region.
  * - A replacement contained in one span (but not covering all of it) is an
  *   inline edit of that span: absorbed, linked → linked-modified.
  * - Replacing a span exactly and entirely removes it; the inserted text is
- *   typed (you replaced the piece's text wholesale with your own).
+ *   typed (you replaced the snippet's text wholesale with your own).
  * - A range crossing span boundaries clips every overlapped span (a clipped
  *   linked span becomes linked-modified; fully covered spans are removed) and
  *   the inserted text lands as a new typed span at the cut.
@@ -244,8 +244,8 @@ export function replaceSpan(doc: Doc, index: number, newText: string, span: Omit
   });
 }
 
-/** Convert [start, end) into one linked span (F4: save-selection-as-piece —
- *  the selection becomes a linked span pointing at the new piece). Text is
+/** Convert [start, end) into one linked span (F4: save-selection-as-snippet —
+ *  the selection becomes a linked span pointing at the new snippet). Text is
  *  unchanged; overlapped spans are clipped (a clipped linked span keeps its
  *  own link but no longer appears intact → linked-modified). */
 export function linkRange(

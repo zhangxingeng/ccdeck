@@ -20,7 +20,7 @@ confident. This doc's voice holds itself to the same bar.
 
 Naming note: **`piece` is renamed to `snippet`** everywhere (UI copy, identifiers, command and
 schema names) as one mechanical commit in the build phase. This doc uses "snippet" throughout;
-where it names a current symbol (`ComposeBox`, `composeInsertPiece`) it names today's symbol so a
+where it names a current symbol (`ComposeBox`, `composeInsertSnippet`) it names today's symbol so a
 builder can find it, and the rename sweep renames those too.
 
 ---
@@ -114,7 +114,7 @@ with the keyboard and it drops in.
   behavior that delighted the founder, and it needs no change. Arrow-nav *within* the panel also
   exists (`MatchPanel.handleKeydown`). **But** three things are missing: (a) there is no keyboard
   path from the box into the panel — you must click a hit; (b) `Enter` never inserts; (c) insert
-  **appends at the caret** (`composeInsertPiece`), it does not replace the query line. So today the
+  **appends at the caret** (`composeInsertSnippet`), it does not replace the query line. So today the
   founder's "arrow and enter, no mouse" is impossible end-to-end.
 - **Change.**
   - `↓` from the box moves focus to the first hit **only when the caret sits at the very end of
@@ -195,8 +195,8 @@ choice**, not one switch over the whole prompt.
   [S9](#s9-copy--button-and-hotkey) map).
 - **Result.** The snippet modal opens prefilled with the **entire box text** as the body, scoped
   to the active tab, title empty and focused. `Enter`/`Save` writes it; `Esc`/`Cancel` closes.
-- **Today.** There is **no way to save the whole box.** The only save affordance (`Save as piece`)
-  floats next to a selection and `saveSelectionAsPiece` early-returns unless `hasSelection`. The
+- **Today.** There is **no way to save the whole box.** The only save affordance (`Save as snippet`)
+  floats next to a selection and `saveSelectionAsSnippet` early-returns unless `hasSelection`. The
   founder may not realize whole-box save is currently impossible — this is the walk-back on
   Round-A's "no persistent buttons."
 - **Change.** Add the always-present `Save as…` control. With a selection it saves the selection
@@ -209,7 +209,7 @@ choice**, not one switch over the whole prompt.
 - **Result.** The snippet modal opens prefilled with the **selected text**, scoped to the active
   tab. On save, the selection becomes a `linked` span pointing at the new snippet
   (`composeLinkRange`).
-- **Today.** Works as described (`ComposeBox` floating `Save as piece`, `saveSelectionAsPiece`).
+- **Today.** Works as described (`ComposeBox` floating `Save as snippet`, `saveSelectionAsSnippet`).
   The floating button's only trigger is the mouse; the selection itself is keyboard-reachable but
   the button is not.
 - **Change.** `Save as…` (S5) is the keyboard-reachable equivalent of the floating button, closing
@@ -233,7 +233,7 @@ stored snippet on its own; the choice happens at save time.
     edited text, leaving the original untouched).
   - `Esc`/`Cancel` leaves both the snippet and the span as they are.
 - **Today.** The modal opens showing the **stored** body, not the edited span text
-  (`PieceModal`: `body = basePiece?.body ?? spanCurrentText`) — the opposite of what the founder
+  (`SnippetModal`: `body = baseSnippet?.body ?? spanCurrentText`) — the opposite of what the founder
   asked. There is no `Original` button. Saving always updates the same snippet id; there is **no
   `Save as new`** branch. So this whole flow is a genuine build, and the default-body inversion is
   a real contradiction of the founder's stated model, worth confirming.
@@ -324,7 +324,7 @@ Three popovers exist: **settings/config** (gear), **project manager** (`⋯`), *
   (they are point-in-time snapshots) but their link dangles; the edit chip falls back to a plain
   state. Deleting a **project** instead re-scopes its snippets to Global — nothing a user wrote
   ever vanishes as a side effect.
-- **Today.** Works (`PieceModal.handleDelete` two-step confirm; `deleteProject` re-scopes). The
+- **Today.** Works (`SnippetModal.handleDelete` two-step confirm; `deleteProject` re-scopes). The
   two-step is a mouse pattern.
 - **Change.** Keyboard parity: the confirm step is reachable by `Enter` on the focused `Delete`
   button (it advances to `Really delete?`, a second `Enter` confirms) — so destructive actions are
@@ -345,7 +345,7 @@ Two classes of message, and the difference matters:
   the "open and re-save to persist the repair" nudge) and any unreadable files. The badge clears
   when the underlying condition clears (the file is re-saved or fixed). This keeps the founder's
   "notifications should be temporary" while honoring "a data event must not disappear forever."
-- **Today.** The recovered-pieces notice and the `pieceLoadErrors` notice are **permanent inline
+- **Today.** The recovered-snippets notice and the `snippetLoadErrors` notice are **permanent inline
   banners** (`PromptsView`); the recovered banner has no dismiss at all, the load-error banner
   dismisses per-mount. So today's behavior is the opposite extreme — permanent, not transient.
 - **Change.** Convert both banners to the toast + settings-badge + Notices model above.
@@ -404,7 +404,7 @@ inferable conventions the whole design rests on.
 **Focus trap + restore (required — folds in the Round-A a11y debt).** While any of the three is
 open: `Tab`/`Shift+Tab` cycle **within** it and never escape to the page behind; the element that
 had focus before opening is remembered and re-focused on close. Today none of the three trap or
-restore focus (`EmbeddingsPopover`, `ProjectManagerPopover`, `PieceModal` have `Esc` handlers
+restore focus (`EmbeddingsPopover`, `ProjectManagerPopover`, `SnippetModal` have `Esc` handlers
 only). Rationale for making this a build requirement rather than deferred debt: a mouse-off
 product where `Tab` silently walks focus behind an open modal is not actually operable without a
 mouse — the trap is load-bearing for the north star, not polish.
@@ -449,7 +449,7 @@ contract from this list; nothing here is built until it lands there.
    default-fallback semantics, persisted via the existing `get_app_config`/`set_app_config`. Add a
    short §Hotkeys to the contract naming the chord-string normalization (`Mod` = Ctrl/Cmd) so both
    platforms store one canonical form.
-4. **Snippet-modal save gains a `Save as new` path** (§Compose surface / piece modal). The modal
+4. **Snippet-modal save gains a `Save as new` path** (§Compose surface / snippet modal). The modal
    today only updates the same id; the contract's modal description must name the two save actions
    and that the edited span text (not the stored body) is the default body when opened from a span.
 5. **Auto-repair notice becomes transient + recoverable** (§Store robustness). The contract says

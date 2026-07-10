@@ -4,7 +4,7 @@
    * and reach unpinned projects (clicking a row activates it as the scope).
    * Colors are palette keys only; swatches render from the --project-<key>
    * tokens via the single palette helper. Deleting rescopes the project's
-   * pieces to Global (backend semantics) — said in the confirm label so the
+   * snippets to Global (backend semantics) — said in the confirm label so the
    * consequence is read before the click, not discovered after.
    */
   import { PALETTE_KEYS, type PaletteKey, type Project } from '$lib/prompts/types';
@@ -118,7 +118,7 @@
         type="button"
         class="proj-mgr__action"
         class:proj-mgr__action--on={p.pinned}
-        title={p.pinned ? 'Unpin — remove the tab (project keeps its pieces)' : 'Pin as a tab'}
+        title={p.pinned ? 'Unpin — remove the tab (project keeps its snippets)' : 'Pin as a tab'}
         onclick={() => togglePin(p)}
       >
         {p.pinned ? 'Pinned' : 'Pin'}
@@ -137,10 +137,10 @@
       <button
         type="button"
         class="proj-mgr__action proj-mgr__action--danger"
-        title="Delete the project — its pieces move to Global, nothing is lost"
+        title="Delete the project — its snippets move to Global, nothing is lost"
         onclick={() => handleDelete(p)}
       >
-        {confirmingDeleteId === p.id ? 'Pieces move to Global — sure?' : 'Delete'}
+        {confirmingDeleteId === p.id ? 'Snippets move to Global — sure?' : 'Delete'}
       </button>
     </div>
     {#if colorPickFor === p.id}

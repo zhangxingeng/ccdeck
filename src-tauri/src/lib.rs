@@ -15,7 +15,7 @@ mod appconfig;
 // legacy ccdeck-owned state (backups, config) out of ~/.claude.
 mod datadir;
 
-// Prompt Library (issue #24): piece store + hybrid match engine + commands.
+// Prompt Library (issue #24): snippet store + hybrid match engine + commands.
 mod prompts;
 
 // Claude Code's own settings.json (schema-driven read/merge/conflict/write across tiers).
@@ -1125,14 +1125,14 @@ pub fn run() {
             providers::set_provider_key,
             providers::provider_key_status,
             providers::provider_probe_keychain,
-            prompts::state::list_pieces,
-            prompts::state::save_piece,
-            prompts::state::delete_piece,
-            prompts::state::piece_load_errors,
+            prompts::state::list_snippets,
+            prompts::state::save_snippet,
+            prompts::state::delete_snippet,
+            prompts::state::snippet_load_errors,
             prompts::state::list_projects,
             prompts::state::save_project,
             prompts::state::delete_project,
-            prompts::state::match_pieces,
+            prompts::state::match_snippets,
             prompts::state::embed_status,
             prompts::state::embed_download,
             prompts::state::set_embed_enabled,

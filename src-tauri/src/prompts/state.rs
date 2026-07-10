@@ -1,10 +1,10 @@
 //! Managed state, hybrid fusion, and the Tauri commands for the Prompt
-//! Library. Command surface per the contract: `list_pieces` / `save_piece` /
-//! `delete_piece` / `piece_load_errors` / `list_projects` / `save_project` /
-//! `delete_project` / `match_pieces` / `embed_status` / `embed_download` /
+//! Library. Command surface per the contract: `list_snippets` / `save_snippet` /
+//! `delete_snippet` / `snippet_load_errors` / `list_projects` / `save_project` /
+//! `delete_project` / `match_snippets` / `embed_status` / `embed_download` /
 //! `set_embed_enabled` — all async, `Result<T, String>`, snake_case.
 //!
-//! Callers never know which engine ran: `match_pieces` fuses lexical and
+//! Callers never know which engine ran: `match_snippets` fuses lexical and
 //! (when ready + enabled) semantic scores internally and only tags each hit's
 //! `source` for observability.
 
@@ -21,7 +21,7 @@ use tauri::State;
 use super::embed::{self, DownloadProgress};
 use super::lexical;
 use super::projects::{self, Project, ProjectInput};
-use super::store::{self, Piece, PieceInput, Scope};
+use super::store::{self, Snippet, SnippetInput, Scope};
 
 /// If one query embedding takes longer than this, the machine is too slow for
 /// per-keystroke inference (the UI debounce budget) — degrade to lexical-only
@@ -29,7 +29,7 @@ use super::store::{self, Piece, PieceInput, Scope};
 /// toggles semantic match off/on (which also reloads the model).
 const INFERENCE_BUDGET_MS: u128 = 250;
 
-/// How many stale pieces one match call will embed before answering. Keeps a
+/// How many stale snippets one match call will embed before answering. Keeps a
 /// huge hand-imported corpus from freezing a single keystroke — the cache
 /// warms over a few queries; the bulk pass runs at download time anyway.
 const EMBED_TOPUP_PER_QUERY: usize = 32;
@@ -97,8 +97,8 @@ fn set_error(inner: &PromptsInner, msg: String) {
 // ---------------------------------------------------------------------------
 
 /// The roster's project ids, for dangling-scope validation. `None` when the
-/// roster itself can't be read — piece loading then suspends id validation
-/// instead of falsely degrading every project piece; the roster failure is
+/// roster itself can't be read — snippet loading then suspends id validation
+/// instead of falsely degrading every project snippet; the roster failure is
 /// surfaced loudly by `list_projects`, not here.
 fn roster_ids() -> Option<HashSet<String>> {
     let root = crate::datadir::data_root().ok()?;
@@ -107,18 +107,18 @@ fn roster_ids() -> Option<HashSet<String>> {
 }
 
 #[tauri::command]
-pub async fn list_pieces() -> Result<Vec<Piece>, String> {
-    store::load_pieces(&store::prompts_dir()?, roster_ids().as_ref())
+pub async fn list_snippets() -> Result<Vec<Snippet>, String> {
+    store::load_snippets(&store::prompts_dir()?, roster_ids().as_ref())
 }
 
 #[tauri::command]
-pub async fn save_piece(piece: PieceInput) -> Result<Piece, String> {
-    store::save_piece(piece)
+pub async fn save_snippet(snippet: SnippetInput) -> Result<Snippet, String> {
+    store::save_snippet(snippet)
 }
 
 #[tauri::command]
-pub async fn delete_piece(id: String) -> Result<(), String> {
-    store::delete_piece_at(&store::prompts_dir()?, &id)
+pub async fn delete_snippet(id: String) -> Result<(), String> {
+    store::delete_snippet_at(&store::prompts_dir()?, &id)
 }
 
 /// Files the loader had to skip or degrade (broken JSON, shadowed duplicate
@@ -126,11 +126,11 @@ pub async fn delete_piece(id: String) -> Result<(), String> {
 /// robustness: a projects.json repair that SUCCEEDS may have dropped
 /// truncated records, so it surfaces here as the same amber warning). Shown
 /// next to the library so a hand-edit typo never reads as a silently
-/// vanished piece. Runs its own fresh scan, so it always reflects the
+/// vanished snippet. Runs its own fresh scan, so it always reflects the
 /// current on-disk state.
 #[tauri::command]
-pub async fn piece_load_errors() -> Result<Vec<store::LoadError>, String> {
-    let (_, mut errors) = store::scan_pieces(&store::prompts_dir()?, roster_ids().as_ref())?;
+pub async fn snippet_load_errors() -> Result<Vec<store::LoadError>, String> {
+    let (_, mut errors) = store::scan_snippets(&store::prompts_dir()?, roster_ids().as_ref())?;
     errors.extend(projects::roster_repair_notice(&crate::datadir::data_root()?));
     Ok(errors)
 }
@@ -149,13 +149,13 @@ pub async fn save_project(project: ProjectInput) -> Result<Project, String> {
     projects::save_project_at(&crate::datadir::data_root()?, project, store::unix_now())
 }
 
-/// Delete a roster entry, rescoping its pieces to global FIRST (contract:
+/// Delete a roster entry, rescoping its snippets to global FIRST (contract:
 /// nothing a user wrote ever vanishes as a side effect). Rescope-then-remove
 /// ordering: a crash in between leaves a still-listed project with global
-/// pieces — harmless and re-deletable — never pieces pointing at a ghost.
+/// snippets — harmless and re-deletable — never snippets pointing at a ghost.
 #[tauri::command]
 pub async fn delete_project(id: String) -> Result<(), String> {
-    store::rescope_project_pieces(&store::prompts_dir()?, &id)?;
+    store::rescope_project_snippets(&store::prompts_dir()?, &id)?;
     projects::delete_project_at(&crate::datadir::data_root()?, &id)
 }
 
@@ -163,10 +163,10 @@ pub async fn delete_project(id: String) -> Result<(), String> {
 // Matching
 // ---------------------------------------------------------------------------
 
-/// Pool rule (contract): global pieces + pieces scoped to `project_id`
+/// Pool rule (contract): global snippets + snippets scoped to `project_id`
 /// (`None` = global only).
-fn in_pool(piece: &Piece, project_id: Option<&str>) -> bool {
-    match &piece.scope {
+fn in_pool(snippet: &Snippet, project_id: Option<&str>) -> bool {
+    match &snippet.scope {
         Scope::Global => true,
         Scope::Project { project_id: p } => project_id == Some(p.as_str()),
     }
@@ -214,7 +214,7 @@ fn semantic_scores(
     inner: &PromptsInner,
     root: &std::path::Path,
     query: &str,
-    pool: &[Piece],
+    pool: &[Snippet],
 ) -> Result<Vec<(String, f32)>, String> {
     let mut guard = inner.embedder.lock().map_err(|e| e.to_string())?;
     if guard.is_none() {
@@ -252,7 +252,7 @@ fn semantic_scores(
 }
 
 #[tauri::command]
-pub async fn match_pieces(
+pub async fn match_snippets(
     state: State<'_, PromptsState>,
     query: String,
     project_id: Option<String>,
@@ -260,13 +260,13 @@ pub async fn match_pieces(
 ) -> Result<Vec<MatchHit>, String> {
     let inner = state.inner.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let pieces = store::load_pieces(&store::prompts_dir()?, roster_ids().as_ref())?;
-        let pool: Vec<Piece> =
-            pieces.into_iter().filter(|p| in_pool(p, project_id.as_deref())).collect();
+        let snippets = store::load_snippets(&store::prompts_dir()?, roster_ids().as_ref())?;
+        let pool: Vec<Snippet> =
+            snippets.into_iter().filter(|p| in_pool(p, project_id.as_deref())).collect();
 
         let lex: Vec<(String, f32, bool)> = pool
             .iter()
-            .filter_map(|p| lexical::score_piece(&query, p).map(|s| (p.id.clone(), s.score, s.exact)))
+            .filter_map(|p| lexical::score_snippet(&query, p).map(|s| (p.id.clone(), s.score, s.exact)))
             .collect();
 
         let root = crate::datadir::data_root()?;
@@ -355,19 +355,19 @@ pub async fn embed_download(
             let _ = on_progress.send(p);
         })?;
         // The "index" stage (contract): embed the existing library while the
-        // user is already watching the popover, streaming piece-count
+        // user is already watching the popover, streaming snippet-count
         // progress — so "Download & index" is literally what one click does
         // and the first real query is instant. Resumable convention matches
-        // the byte stages: already-cached pieces count as done.
+        // the byte stages: already-cached snippets count as done.
         let mut embedder = embed::load_embedder(&root)?;
         // Scope validation is irrelevant for embedding (bodies only) — no
         // roster read needed.
-        let pieces = store::load_pieces(&store::prompts_dir()?, None)?;
+        let snippets = store::load_snippets(&store::prompts_dir()?, None)?;
         let conn = embed::open_cache(&root)?;
-        let total = pieces.len() as u64;
+        let total = snippets.len() as u64;
         loop {
             let stale =
-                embed::ensure_embeddings(&conn, &mut embedder, &pieces, EMBED_TOPUP_PER_QUERY)?;
+                embed::ensure_embeddings(&conn, &mut embedder, &snippets, EMBED_TOPUP_PER_QUERY)?;
             let _ = on_progress.send(DownloadProgress {
                 stage: "index".to_string(),
                 done: total - stale as u64,
@@ -422,8 +422,8 @@ mod tests {
     use super::*;
     use serde_json::Map;
 
-    fn piece(id: &str, scope: Scope) -> Piece {
-        Piece {
+    fn snippet(id: &str, scope: Scope) -> Snippet {
+        Snippet {
             id: id.into(),
             title: id.into(),
             body: String::new(),
@@ -444,9 +444,9 @@ mod tests {
 
     #[test]
     fn pool_is_global_plus_matching_project() {
-        let g = piece("g", Scope::Global);
-        let mine = piece("m", Scope::Project { project_id: "proj-uuid".into() });
-        let other = piece("o", Scope::Project { project_id: "other-uuid".into() });
+        let g = snippet("g", Scope::Global);
+        let mine = snippet("m", Scope::Project { project_id: "proj-uuid".into() });
+        let other = snippet("o", Scope::Project { project_id: "other-uuid".into() });
 
         assert!(in_pool(&g, Some("proj-uuid")));
         assert!(in_pool(&mine, Some("proj-uuid")));

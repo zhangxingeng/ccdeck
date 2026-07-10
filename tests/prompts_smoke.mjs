@@ -15,7 +15,7 @@ const root = join(__dir, '..');
 const {
   emptyDoc,
   docFromText,
-  insertPiece,
+  insertSnippet,
   applyEdit,
   replaceSpan,
   linkRange,
@@ -63,7 +63,7 @@ function checkInvariants(doc, msg) {
 }
 
 const link = (id = 'p1') => ({
-  pieceId: id,
+  snippetId: id,
   title: id,
   scope: { kind: 'global' },
 });
@@ -71,68 +71,68 @@ const link = (id = 'p1') => ({
 const states = (doc) => doc.spans.map((s) => s.state);
 
 // ── span model: insertion ────────────────────────────────────────────────────
-console.log('insertPiece');
+console.log('insertSnippet');
 {
   // Insert into empty doc.
-  let d = insertPiece(emptyDoc(), 0, 'LINKED', link());
+  let d = insertSnippet(emptyDoc(), 0, 'LINKED', link());
   checkInvariants(d, 'insert into empty');
   eq(states(d), ['linked'], 'empty doc: one linked span');
   eq(flatten(d), 'LINKED', 'flatten == visible text');
 
   // Insert at the middle of typed text: typed | linked | typed.
-  d = insertPiece(docFromText('helloworld'), 5, 'LINKED', link());
+  d = insertSnippet(docFromText('helloworld'), 5, 'LINKED', link());
   checkInvariants(d, 'insert mid-typed');
   eq(states(d), ['typed', 'linked', 'typed'], 'mid-typed split');
   eq(flatten(d), 'helloLINKEDworld', 'mid-typed text');
 
   // Insert at boundaries: no split.
-  d = insertPiece(docFromText('abc'), 0, 'X', link());
+  d = insertSnippet(docFromText('abc'), 0, 'X', link());
   eq(states(d), ['linked', 'typed'], 'insert at start');
-  d = insertPiece(docFromText('abc'), 3, 'X', link());
+  d = insertSnippet(docFromText('abc'), 3, 'X', link());
   eq(states(d), ['typed', 'linked'], 'insert at end');
 
   // Inserting into the middle of a linked span splits it into two
   // linked-modified halves (the original no longer appears intact).
-  d = insertPiece(emptyDoc(), 0, 'AABB', link('outer'));
-  d = insertPiece(d, 2, 'X', link('inner'));
+  d = insertSnippet(emptyDoc(), 0, 'AABB', link('outer'));
+  d = insertSnippet(d, 2, 'X', link('inner'));
   checkInvariants(d, 'insert into linked');
   eq(states(d), ['linked-modified', 'linked', 'linked-modified'], 'split linked -> modified halves');
-  eq(d.spans[1].link.pieceId, 'inner', 'inner span links the inserted piece');
+  eq(d.spans[1].link.snippetId, 'inner', 'inner span links the inserted snippet');
 }
 
 // ── span model: the inline-edit transition table ─────────────────────────────
 console.log('applyEdit transitions');
 {
   // Typing inside a linked span -> absorbed, linked-modified.
-  let d = insertPiece(docFromText('ab'), 1, 'LINK', link());
+  let d = insertSnippet(docFromText('ab'), 1, 'LINK', link());
   d = applyEdit(d, 3, 3, 'x'); // strictly inside the linked span [1,5)
   checkInvariants(d, 'type inside linked');
   eq(states(d), ['typed', 'linked-modified', 'typed'], 'interior typing modifies');
   eq(flatten(d), 'aLIxNKb', 'interior typing text');
 
   // Typing at a linked span's trailing edge -> typed text, span untouched.
-  d = insertPiece(docFromText('ab'), 1, 'LINK', link());
+  d = insertSnippet(docFromText('ab'), 1, 'LINK', link());
   d = applyEdit(d, 5, 5, 'x'); // boundary between LINK and 'b'
   checkInvariants(d, 'type at edge');
   eq(states(d), ['typed', 'linked', 'typed'], 'edge typing stays typed');
   eq(flatten(d), 'aLINKxb', 'edge typing lands outside the span');
 
   // Deleting inside a linked span -> linked-modified.
-  d = insertPiece(docFromText(''), 0, 'LINKED', link());
+  d = insertSnippet(docFromText(''), 0, 'LINKED', link());
   d = applyEdit(d, 2, 4, '');
   checkInvariants(d, 'delete inside linked');
   eq(states(d), ['linked-modified'], 'interior deletion modifies');
   eq(flatten(d), 'LIED', 'interior deletion text');
 
   // Deleting a linked span exactly and fully -> span gone.
-  d = insertPiece(docFromText('ab'), 1, 'LINK', link());
+  d = insertSnippet(docFromText('ab'), 1, 'LINK', link());
   d = applyEdit(d, 1, 5, '');
   checkInvariants(d, 'delete whole span');
   eq(states(d), ['typed'], 'whole-span deletion removes it');
   eq(flatten(d), 'ab', 'whole-span deletion text');
 
   // Replacing a whole linked span with typing -> typed (you replaced it).
-  d = insertPiece(docFromText('ab'), 1, 'LINK', link());
+  d = insertSnippet(docFromText('ab'), 1, 'LINK', link());
   d = applyEdit(d, 1, 5, 'mine');
   checkInvariants(d, 'replace whole span');
   eq(states(d), ['typed'], 'whole-span replacement is typed');
@@ -140,14 +140,14 @@ console.log('applyEdit transitions');
 
   // A selection crossing a typed/linked boundary: linked part clipped ->
   // linked-modified, inserted text is typed.
-  d = insertPiece(docFromText('abcd'), 2, 'LINK', link()); // ab LINK cd
+  d = insertSnippet(docFromText('abcd'), 2, 'LINK', link()); // ab LINK cd
   d = applyEdit(d, 1, 4, 'X'); // eats 'b' + 'LI'
   checkInvariants(d, 'cross-boundary edit');
   eq(states(d), ['typed', 'linked-modified', 'typed'], 'cross-boundary states');
   eq(flatten(d), 'aXNKcd', 'cross-boundary text');
 
   // Edits never mutate the input doc (pure transforms).
-  const before = insertPiece(docFromText('ab'), 1, 'LINK', link());
+  const before = insertSnippet(docFromText('ab'), 1, 'LINK', link());
   const snapshot = JSON.stringify(before);
   applyEdit(before, 2, 3, 'zz');
   eq(JSON.stringify(before), snapshot, 'applyEdit does not mutate its input');
@@ -157,7 +157,7 @@ console.log('applyEdit transitions');
 console.log('replaceSpan / linkRange / linkedSpanAt');
 {
   // Instance-mode Apply: replace the span's text, caller sets the state.
-  let d = insertPiece(docFromText('ab'), 1, 'LINK', link());
+  let d = insertSnippet(docFromText('ab'), 1, 'LINK', link());
   d = replaceSpan(d, 1, 'EDITED', { state: 'linked-modified', link: link() });
   checkInvariants(d, 'replaceSpan');
   eq(flatten(d), 'aEDITEDb', 'replaceSpan text');
@@ -166,27 +166,27 @@ console.log('replaceSpan / linkRange / linkedSpanAt');
 
   // F4: a typed selection becomes a linked span; text unchanged.
   d = docFromText('reusable stuff here');
-  d = linkRange(d, 0, 8, link('new-piece'));
+  d = linkRange(d, 0, 8, link('new-snippet'));
   checkInvariants(d, 'linkRange');
   eq(flatten(d), 'reusable stuff here', 'linkRange keeps text');
   eq(states(d), ['linked', 'typed'], 'linkRange states');
-  eq(d.spans[0].link.pieceId, 'new-piece', 'linkRange link identity');
+  eq(d.spans[0].link.snippetId, 'new-snippet', 'linkRange link identity');
 
   // Caret affordance: interior wins; boundary caret still finds the span.
-  d = insertPiece(docFromText('ab'), 1, 'LINK', link('the-piece'));
-  eq(linkedSpanAt(d, 3)?.span.link.pieceId, 'the-piece', 'caret interior');
-  eq(linkedSpanAt(d, 5)?.span.link.pieceId, 'the-piece', 'caret at span end');
-  eq(linkedSpanAt(d, 1)?.span.link.pieceId, 'the-piece', 'caret at span start');
+  d = insertSnippet(docFromText('ab'), 1, 'LINK', link('the-snippet'));
+  eq(linkedSpanAt(d, 3)?.span.link.snippetId, 'the-snippet', 'caret interior');
+  eq(linkedSpanAt(d, 5)?.span.link.snippetId, 'the-snippet', 'caret at span end');
+  eq(linkedSpanAt(d, 1)?.span.link.snippetId, 'the-snippet', 'caret at span start');
   eq(linkedSpanAt(d, 0), null, 'caret in typed text -> null');
 }
 
 // ── copy flattening + raw-document integration ──────────────────────────────
 console.log('copy flattening');
 {
-  // The doc holds RAW text — a piece body's {var} tokens land verbatim as a
+  // The doc holds RAW text — a snippet body's {var} tokens land verbatim as a
   // linked span, unify with typed variables, and resolve only at copy.
   let d = docFromText('intro {ticket} ');
-  d = insertPiece(d, d.text.length, 'Review {ticket:ABC-123} now.', link());
+  d = insertSnippet(d, d.text.length, 'Review {ticket:ABC-123} now.', link());
   d = applyEdit(d, d.text.length, d.text.length, ' outro');
   checkInvariants(d, 'mixed doc');
   eq(flatten(d), 'intro {ticket} Review {ticket:ABC-123} now. outro', 'flatten == raw visible text');

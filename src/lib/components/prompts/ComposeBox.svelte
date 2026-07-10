@@ -10,7 +10,7 @@
    *
    * Interaction guardrail (lead ruling on F1 vs F3): a plain click only sets
    * the caret — inline editing is primary and must never pay a modal tax.
-   * The piece modal opens only through explicit gestures: the chip that
+   * The snippet modal opens only through explicit gestures: the chip that
    * appears above the box while the caret is inside a linked span, or
    * double-clicking the span.
    */
@@ -22,11 +22,11 @@
   import VariableFillList from './VariableFillList.svelte';
 
   interface Props {
-    /** Explicit open-the-piece-modal gesture (chip click / span double-click). */
+    /** Explicit open-the-snippet-modal gesture (chip click / span double-click). */
     onOpenSpan: (spanIndex: number) => void;
     /** Copy Prompt — the parent owns the clipboard call + toast. */
     onCopy: () => void;
-    /** Save the active selection as a piece (opens the modal prefilled). */
+    /** Save the active selection as a snippet (opens the modal prefilled). */
     onSaveSelection: () => void;
   }
 
@@ -42,8 +42,8 @@
   const hasVariables = $derived(parseVariables(prompts.doc.text).length > 0);
 
   /** Highlight-layer render list: span state, its slice of the text, and
-   *  its hue — greyish for global pieces, the OWNING project's color for
-   *  project pieces (a span keeps its own hue even under another tab). */
+   *  its hue — greyish for global snippets, the OWNING project's color for
+   *  project snippets (a span keeps its own hue even under another tab). */
   const renderSpans = $derived.by(() => {
     const starts = spanStarts(prompts.doc);
     return prompts.doc.spans.map((s, i) => {
@@ -93,7 +93,7 @@
     untrack(() => scrollNonce++);
   }
 
-  // ── the floating Save-as-piece affordance ──────────────────────────────────
+  // ── the floating Save-as-snippet affordance ──────────────────────────────────
   // The pixel-matched mirror doubles as a measuring surface: a collapsed
   // Range at the selection-end offset gives the caret rectangle the raw
   // <textarea> cannot expose.
@@ -182,18 +182,18 @@
         type="button"
         class="compose__chip compose__chip--{caretSpan.span.state}"
         onclick={() => onOpenSpan(caretSpan.index)}
-        title="Open this piece (Content / Metadata)"
+        title="Open this snippet (Content / Metadata)"
       >
         <span class="compose__chip-dot" aria-hidden="true"></span>
         {link.title}
         <span class="compose__chip-scope">{caretScopeLabel}</span>
         {#if caretSpan.span.state === 'linked-modified'}<span class="compose__chip-mod">edited</span>{/if}
-        <span class="compose__chip-cta">Edit piece…</span>
+        <span class="compose__chip-cta">Edit snippet…</span>
       </button>
     {:else}
       <span class="compose__chip-hint">
         Type freely — click a match to insert it at the cursor. Double-click a tinted span (or place
-        the caret in it) to open its piece.
+        the caret in it) to open its snippet.
       </span>
     {/if}
   </div>
@@ -229,9 +229,9 @@
         style="left: {savePos.left}px; top: {savePos.top}px"
         onmousedown={(e) => e.preventDefault()}
         onclick={onSaveSelection}
-        title="Turn the selected text into a reusable library piece, scoped to the active tab"
+        title="Turn the selected text into a reusable library snippet, scoped to the active tab"
       >
-        Save as piece
+        Save as snippet
       </button>
     {/if}
 
@@ -282,22 +282,22 @@
     font-size: 0.72rem;
     padding: 0.2rem 0.6rem;
     border-radius: 1rem;
-    border: 1px solid color-mix(in srgb, var(--accent-piece) 45%, var(--border));
-    background: color-mix(in srgb, var(--accent-piece) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent-snippet) 45%, var(--border));
+    background: color-mix(in srgb, var(--accent-snippet) 10%, transparent);
     color: var(--text);
     cursor: pointer;
   }
   .compose__chip:hover {
-    background: color-mix(in srgb, var(--accent-piece) 18%, transparent);
+    background: color-mix(in srgb, var(--accent-snippet) 18%, transparent);
   }
   .compose__chip-dot {
     width: 0.5rem;
     height: 0.5rem;
     border-radius: 50%;
-    background: var(--accent-piece);
+    background: var(--accent-snippet);
   }
   .compose__chip--linked-modified .compose__chip-dot {
-    outline: 2px dotted var(--accent-piece);
+    outline: 2px dotted var(--accent-snippet);
     outline-offset: 1px;
     background: transparent;
   }
@@ -310,7 +310,7 @@
   }
   .compose__chip-cta {
     font-weight: 600;
-    color: var(--accent-piece);
+    color: var(--accent-snippet);
   }
   .compose__chip-hint {
     font-size: 0.7rem;
@@ -368,7 +368,7 @@
   }
   .compose__input:focus {
     outline: none;
-    border-color: color-mix(in srgb, var(--project-color, var(--accent-piece)) 55%, var(--border));
+    border-color: color-mix(in srgb, var(--project-color, var(--accent-snippet)) 55%, var(--border));
   }
   /* Selection reads as a highlighter stroke: bright marker, dark ink — the
      pair is scoped to the compose surface only. */
@@ -378,8 +378,8 @@
   }
 
   /* Provenance tints paint on the back layer, behind the real text:
-     greyish translucent for global pieces, a darker translucent mix of the
-     OWNING project's hue for project pieces (--span-color set per span).
+     greyish translucent for global snippets, a darker translucent mix of the
+     OWNING project's hue for project snippets (--span-color set per span).
      The linked-modified marker is a dotted underline drawn as a border —
      "tint + subtle marker", same hue family (issue #7 F1). */
   .compose__span--linked,
@@ -412,7 +412,7 @@
     white-space: nowrap;
   }
   .compose__save-sel:hover {
-    border-color: color-mix(in srgb, var(--project-color, var(--accent-piece)) 60%, var(--border));
+    border-color: color-mix(in srgb, var(--project-color, var(--accent-snippet)) 60%, var(--border));
   }
   .compose__copy {
     position: absolute;

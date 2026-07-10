@@ -1,8 +1,8 @@
 //! The project roster: `<data root>/projects.json`, one small file (records
-//! are tiny and few — one-file-per-record earns nothing here, unlike pieces).
-//! A project is a named, colored grouping for pieces; tabs, the compose-box
-//! tint, and piece-span hues all key off it. Pieces reference projects by
-//! `id`, so a rename or recolor never touches piece files.
+//! are tiny and few — one-file-per-record earns nothing here, unlike snippets).
+//! A project is a named, colored grouping for snippets; tabs, the compose-box
+//! tint, and snippet-span hues all key off it. Snippets reference projects by
+//! `id`, so a rename or recolor never touches snippet files.
 //!
 //! Colors are palette KEYS, never hex — the fixed preset set below, each
 //! mapping to a `--project-<key>` CSS token the theme file owns (stored data
@@ -47,14 +47,14 @@ pub struct Project {
     #[serde(default)]
     pub path: Option<String>,
     pub created_at: u64,
-    /// Hand-added extra fields survive round-trip, same bet as piece files.
+    /// Hand-added extra fields survive round-trip, same bet as snippet files.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
 
 /// What `save_project` accepts: the editable fields. `created_at` and
 /// unknown extras are backend-owned, merged from the stored record on
-/// update — mirroring `PieceInput` so a frontend round-trip can't drop them.
+/// update — mirroring `SnippetInput` so a frontend round-trip can't drop them.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProjectInput {
     #[serde(default)]
@@ -84,11 +84,11 @@ fn roster_path(root: &Path) -> PathBuf {
 
 /// Load the roster, reporting whether repair was needed. A missing file is
 /// an empty roster (fresh install); a corrupted file gets an in-memory
-/// jsonrepair attempt (same § Store robustness posture as pieces — the file
+/// jsonrepair attempt (same § Store robustness posture as snippets — the file
 /// is never rewritten; the repaired roster persists on the next explicit
 /// project save); a file that still cannot be parsed is an ERROR naming the
 /// file — never a silent empty roster, which would read as every project
-/// vanishing (and would cascade every project-scoped piece into
+/// vanishing (and would cascade every project-scoped snippet into
 /// global-with-error).
 fn read_roster(root: &Path) -> Result<(Roster, bool), String> {
     let path = roster_path(root);
@@ -116,7 +116,7 @@ fn load_roster(root: &Path) -> Result<Roster, String> {
 /// The amber notice for a roster repair that SUCCEEDED (contract § Store
 /// robustness): repair can silently drop truncated records, and the roster
 /// has no per-record recovered flag — so even a successful repair must
-/// surface, as a `piece_load_errors` entry naming the file, cueing the user
+/// surface, as a `snippet_load_errors` entry naming the file, cueing the user
 /// to inspect before the next project save persists the repaired form.
 /// `None` when the roster is absent, clean, or unrepairable (the loud `Err`
 /// from `list_projects` owns that last case).
@@ -131,7 +131,7 @@ pub fn roster_repair_notice(root: &Path) -> Option<LoadError> {
 }
 
 /// Atomic write (temp sibling + rename), pretty-printed + trailing newline —
-/// the same hand-editing-surface conventions as piece files.
+/// the same hand-editing-surface conventions as snippet files.
 fn save_roster(root: &Path, roster: &Roster) -> Result<(), String> {
     fs::create_dir_all(root).map_err(|e| e.to_string())?;
     let mut pretty = serde_json::to_string_pretty(roster).map_err(|e| e.to_string())?;
@@ -147,7 +147,7 @@ pub fn load_projects(root: &Path) -> Result<Vec<Project>, String> {
 
 /// Create (no id) or update (id present) a roster entry. An update keeps
 /// `created_at` and hand-added extras; an id that matches no entry is an
-/// upsert-create with that id (same rationale as pieces: erroring would
+/// upsert-create with that id (same rationale as snippets: erroring would
 /// strand an edit made while the roster changed underneath).
 pub fn save_project_at(root: &Path, input: ProjectInput, now: u64) -> Result<Project, String> {
     let name = input.name.trim();
@@ -189,8 +189,8 @@ pub fn save_project_at(root: &Path, input: ProjectInput, now: u64) -> Result<Pro
 
 /// Remove a roster entry. Idempotent (an absent id is Ok, matching the
 /// command contract's `null` return). The caller rescopes the project's
-/// pieces FIRST — so a crash between the two steps leaves a still-listed
-/// project with global pieces (harmless, re-deletable), never pieces
+/// snippets FIRST — so a crash between the two steps leaves a still-listed
+/// project with global snippets (harmless, re-deletable), never snippets
 /// pointing at a ghost.
 pub fn delete_project_at(root: &Path, id: &str) -> Result<(), String> {
     let mut roster = load_roster(root)?;

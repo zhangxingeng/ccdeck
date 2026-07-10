@@ -1,6 +1,6 @@
-//! The piece store: one hand-editable JSON file per piece under
+//! The snippet store: one hand-editable JSON file per snippet under
 //! `<data root>/prompts/`. Product bets this file enforces (issue #24):
-//! a user can hand any piece file to any LLM and load it back — so unknown
+//! a user can hand any snippet file to any LLM and load it back — so unknown
 //! fields are never silently dropped — and a save never destroys the previous
 //! body (append-only `versions`).
 //!
@@ -18,11 +18,11 @@ use serde_json::{Map, Value};
 
 use super::grammar::{self, Placeholder};
 
-/// Where a piece applies: everywhere, or one roster project referenced by id
-/// (the roster owns name/color, so a rename or recolor never touches piece
+/// Where a snippet applies: everywhere, or one roster project referenced by id
+/// (the roster owns name/color, so a rename or recolor never touches snippet
 /// files). Legacy/unknown scope shapes — the pre-revision path-keyed form, or
-/// an id no roster entry matches — load as Global plus a `piece_load_errors`
-/// entry, file untouched (see [`scan_pieces`]).
+/// an id no roster entry matches — load as Global plus a `snippet_load_errors`
+/// entry, file untouched (see [`scan_snippets`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Scope {
@@ -32,7 +32,7 @@ pub enum Scope {
 }
 
 /// One prior body, pushed when a save changes the body. `saved_at` is when
-/// that body was last saved (the piece's `updated_at` at push time).
+/// that body was last saved (the snippet's `updated_at` at push time).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Version {
     pub body: String,
@@ -42,10 +42,10 @@ pub struct Version {
     pub extra: Map<String, Value>,
 }
 
-/// The canonical piece schema (contract). Field order here is the on-disk
+/// The canonical snippet schema (contract). Field order here is the on-disk
 /// order (serde serializes declaration-first, flattened extras last).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Piece {
+pub struct Snippet {
     pub id: String,
     pub title: String,
     pub body: String,
@@ -67,7 +67,7 @@ pub struct Piece {
     /// this file's JSON in memory. Never persisted — a clean parse forces it
     /// false (so a hand-written `"recovered": true` can't fake the signal;
     /// the key is schema-reserved, not a preserved extra), saves construct
-    /// pieces with false, and the skip keeps a false flag off disk and wire.
+    /// snippets with false, and the skip keeps a false flag off disk and wire.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recovered: bool,
     /// Unknown fields from hand-edited files, preserved verbatim on
@@ -78,12 +78,12 @@ pub struct Piece {
     pub extra: Map<String, Value>,
 }
 
-/// What `save_piece` accepts from the frontend: the editable fields only.
+/// What `save_snippet` accepts from the frontend: the editable fields only.
 /// `versions`, timestamps, and unknown extras are owned by the backend —
-/// merged from the stored piece on update so a frontend round-trip can never
+/// merged from the stored snippet on update so a frontend round-trip can never
 /// drop a hand-edited field it doesn't know about.
 #[derive(Debug, Clone, Deserialize)]
-pub struct PieceInput {
+pub struct SnippetInput {
     #[serde(default)]
     pub id: Option<String>,
     pub title: String,
@@ -110,19 +110,19 @@ pub(super) fn unix_now() -> u64 {
         .as_secs()
 }
 
-/// Parse one piece file's content: strict JSON first; on failure an
-/// in-memory jsonrepair attempt (§ Store robustness) — a recovered piece
+/// Parse one snippet file's content: strict JSON first; on failure an
+/// in-memory jsonrepair attempt (§ Store robustness) — a recovered snippet
 /// loads flagged `recovered: true` and the file stays untouched. Then scope
 /// normalization: a legacy/unknown scope (or, when the roster is readable, a
 /// `project_id` no roster entry matches) loads as Global and comes back as a
-/// load error alongside the piece: visible, non-fatal, file untouched.
+/// load error alongside the snippet: visible, non-fatal, file untouched.
 /// `known_project_ids: None` means the roster could not be consulted — id
-/// validation is suspended rather than falsely degrading every project piece.
-fn parse_piece(
+/// validation is suspended rather than falsely degrading every project snippet.
+fn parse_snippet(
     content: &str,
     fname: &str,
     known_project_ids: Option<&HashSet<String>>,
-) -> Result<(Piece, Option<LoadError>), String> {
+) -> Result<(Snippet, Option<LoadError>), String> {
     let (mut value, repaired) = match serde_json::from_str::<Value>(content) {
         Ok(v) => (v, false),
         Err(strict_err) => match super::repair::repair_to_value(content) {
@@ -133,9 +133,9 @@ fn parse_piece(
         },
     };
     let scope_error = normalize_scope(&mut value, fname, known_project_ids);
-    let mut piece: Piece = serde_json::from_value(value).map_err(|e| e.to_string())?;
-    piece.recovered = repaired;
-    Ok((piece, scope_error))
+    let mut snippet: Snippet = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    snippet.recovered = repaired;
+    Ok((snippet, scope_error))
 }
 
 /// Rewrite an unusable `scope` IN MEMORY to global, returning the honest
@@ -175,10 +175,10 @@ fn normalize_scope(
     }
 }
 
-/// A piece file the loader could not honor: broken JSON, or shadowed by a
-/// duplicate id. Surfaced to the UI via the `piece_load_errors` command —
+/// A snippet file the loader could not honor: broken JSON, or shadowed by a
+/// duplicate id. Surfaced to the UI via the `snippet_load_errors` command —
 /// the hand-editing user (this feature's core persona) never sees stderr, so
-/// without this a broken comma makes a piece silently vanish from the
+/// without this a broken comma makes a snippet silently vanish from the
 /// library, which reads as data loss. The file itself always stays intact on
 /// disk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -187,25 +187,25 @@ pub struct LoadError {
     pub error: String,
 }
 
-/// Load every piece in `dir`, collecting per-file errors. A file that fails
+/// Load every snippet in `dir`, collecting per-file errors. A file that fails
 /// to parse is reported and skipped — never deleted or rewritten (the user's
 /// hand-edit stays intact on disk to fix; failing the whole library for one
-/// bad file would hide every other piece). Duplicate ids (hand-copied files):
+/// bad file would hide every other snippet). Duplicate ids (hand-copied files):
 /// the file actually named `<id>.json` wins — else the lexicographically
 /// first filename (deterministic; write paths key off this view) — and the
-/// shadowed ones are reported. Pieces sorted newest-updated first as a
+/// shadowed ones are reported. Snippets sorted newest-updated first as a
 /// sensible default.
-pub fn scan_pieces(
+pub fn scan_snippets(
     dir: &Path,
     known_project_ids: Option<&HashSet<String>>,
-) -> Result<(Vec<Piece>, Vec<LoadError>), String> {
+) -> Result<(Vec<Snippet>, Vec<LoadError>), String> {
     if !dir.is_dir() {
         return Ok((Vec::new(), Vec::new()));
     }
-    // (piece, filename_is_canonical, filename) — filename kept so a
+    // (snippet, filename_is_canonical, filename) — filename kept so a
     // duplicate-id error can name the actual shadowed file, whichever scan
     // order the two arrived in.
-    let mut pieces: Vec<(Piece, bool, String)> = Vec::new();
+    let mut snippets: Vec<(Snippet, bool, String)> = Vec::new();
     let mut errors: Vec<LoadError> = Vec::new();
     for entry in fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
         let path = entry.path();
@@ -215,9 +215,9 @@ pub fn scan_pieces(
         if !fname.ends_with(".json") || fname.starts_with('.') {
             continue; // dotfiles include our own crash-leftover temp files
         }
-        let piece: Piece = match fs::read_to_string(&path)
+        let snippet: Snippet = match fs::read_to_string(&path)
             .map_err(|e| e.to_string())
-            .and_then(|s| parse_piece(&s, fname, known_project_ids))
+            .and_then(|s| parse_snippet(&s, fname, known_project_ids))
         {
             Ok((p, scope_notice)) => {
                 errors.extend(scope_notice);
@@ -228,93 +228,93 @@ pub fn scan_pieces(
                 continue;
             }
         };
-        let canonical = fname == format!("{}.json", piece.id);
-        if let Some(existing) = pieces.iter_mut().find(|(p, _, _)| p.id == piece.id) {
+        let canonical = fname == format!("{}.json", snippet.id);
+        if let Some(existing) = snippets.iter_mut().find(|(p, _, _)| p.id == snippet.id) {
             // Winner: the canonically-named file; when NEITHER is canonical,
             // the lexicographically-first filename (contract: a deterministic
             // winner, never directory-iteration order — write paths key off
             // this view, so a flaky winner is flaky data destruction).
             let new_wins = !existing.1 && (canonical || *fname < *existing.2);
             let loser = if new_wins {
-                std::mem::replace(existing, (piece, canonical, fname.to_string())).2
+                std::mem::replace(existing, (snippet, canonical, fname.to_string())).2
             } else {
                 fname.to_string()
             };
             let id = &existing.0.id;
             errors.push(LoadError {
                 file: loser.clone(),
-                error: format!("duplicate piece id {id} — {} wins; {loser} is ignored", existing.2),
+                error: format!("duplicate snippet id {id} — {} wins; {loser} is ignored", existing.2),
             });
             continue;
         }
-        pieces.push((piece, canonical, fname.to_string()));
+        snippets.push((snippet, canonical, fname.to_string()));
     }
-    let mut out: Vec<Piece> = pieces.into_iter().map(|(p, _, _)| p).collect();
+    let mut out: Vec<Snippet> = snippets.into_iter().map(|(p, _, _)| p).collect();
     out.sort_by_key(|p| std::cmp::Reverse(p.updated_at));
     Ok((out, errors))
 }
 
-/// [`scan_pieces`] for callers that only need the pieces. Errors still land
+/// [`scan_snippets`] for callers that only need the snippets. Errors still land
 /// on stderr so headless contexts keep a trace; the UI-visible surface is the
-/// `piece_load_errors` command, which runs its own fresh scan (stateless —
+/// `snippet_load_errors` command, which runs its own fresh scan (stateless —
 /// it can never serve stale errors from an earlier pass).
-pub fn load_pieces(
+pub fn load_snippets(
     dir: &Path,
     known_project_ids: Option<&HashSet<String>>,
-) -> Result<Vec<Piece>, String> {
-    let (pieces, errors) = scan_pieces(dir, known_project_ids)?;
+) -> Result<Vec<Snippet>, String> {
+    let (snippets, errors) = scan_snippets(dir, known_project_ids)?;
     for e in &errors {
-        eprintln!("[prompts] skipping piece file {}: {}", e.file, e.error);
+        eprintln!("[prompts] skipping snippet file {}: {}", e.file, e.error);
     }
-    Ok(pieces)
+    Ok(snippets)
 }
 
-/// Resolve the stored piece a save to `id` would update — refusing whenever
+/// Resolve the stored snippet a save to `id` would update — refusing whenever
 /// proceeding would overwrite `<id>.json` content we could not read (audit
 /// L2: the loader SKIPS an unparseable file, so resolving through it would
 /// turn the save into a create and destroy the broken file's versions/extra,
 /// violating "a save never destroys a prior body"). Same refusal when the
-/// file parses but holds a DIFFERENT piece's id (hand-edited): writing over
-/// it would destroy that other piece's data.
-fn resolve_existing(dir: &Path, id: &str) -> Result<Option<Piece>, String> {
+/// file parses but holds a DIFFERENT snippet's id (hand-edited): writing over
+/// it would destroy that other snippet's data.
+fn resolve_existing(dir: &Path, id: &str) -> Result<Option<Snippet>, String> {
     let canonical = dir.join(format!("{id}.json"));
     if canonical.is_file() {
         let content = fs::read_to_string(&canonical).map_err(|e| e.to_string())?;
-        // parse_piece (not bare serde): a legacy-scope or repairable file
+        // parse_snippet (not bare serde): a legacy-scope or repairable file
         // must stay saveable — the explicit save is exactly the moment its
         // normalized/repaired form is allowed to persist (versions append,
         // extras merge, like any body change). Scope validation is skipped
         // (None): the save overwrites `scope` from the input anyway.
-        let (piece, _scope_notice) = parse_piece(&content, &format!("{id}.json"), None)
+        let (snippet, _scope_notice) = parse_snippet(&content, &format!("{id}.json"), None)
             .map_err(|e| {
                 format!(
-                    "refusing to save piece {id}: {id}.json exists but cannot be parsed even after repair ({e}) — fix or remove the file first, so the save cannot destroy its contents"
+                    "refusing to save snippet {id}: {id}.json exists but cannot be parsed even after repair ({e}) — fix or remove the file first, so the save cannot destroy its contents"
                 )
             })?;
-        if piece.id != id {
+        if snippet.id != id {
             return Err(format!(
-                "refusing to save piece {id}: {id}.json holds a different piece ({}) — rename or remove that file first",
-                piece.id
+                "refusing to save snippet {id}: {id}.json holds a different snippet ({}) — rename or remove that file first",
+                snippet.id
             ));
         }
-        return Ok(Some(piece));
+        return Ok(Some(snippet));
     }
     // No canonical file: the id may live in a hand-copied stale-named file.
-    Ok(load_pieces(dir, None)?.into_iter().find(|p| p.id == id))
+    Ok(load_snippets(dir, None)?.into_iter().find(|p| p.id == id))
 }
 
-/// Create (no id) or update (id present) a piece. Versioning per the
+/// Create (no id) or update (id present) a snippet. Versioning per the
 /// contract: a body change pushes the old body (with its timestamp) onto
 /// `versions`, newest-first; metadata-only saves don't version. An id that
-/// matches no stored piece is treated as a create with that id (upsert) —
+/// matches no stored snippet is treated as a create with that id (upsert) —
 /// erroring would strand an edit made while the file was deleted on disk.
-pub fn save_piece_at(dir: &Path, input: PieceInput, now: u64) -> Result<Piece, String> {
+pub fn save_snippet_at(dir: &Path, input: SnippetInput, now: u64) -> Result<Snippet, String> {
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let existing = match &input.id {
         Some(id) => resolve_existing(dir, id)?,
         None => None,
     };
-    let piece = match existing {
+    let snippet = match existing {
         Some(mut prev) => {
             if prev.body != input.body {
                 prev.versions.insert(
@@ -322,7 +322,7 @@ pub fn save_piece_at(dir: &Path, input: PieceInput, now: u64) -> Result<Piece, S
                     Version { body: std::mem::take(&mut prev.body), saved_at: prev.updated_at, extra: Map::new() },
                 );
             }
-            Piece {
+            Snippet {
                 id: prev.id,
                 title: input.title,
                 body: input.body.clone(),
@@ -338,7 +338,7 @@ pub fn save_piece_at(dir: &Path, input: PieceInput, now: u64) -> Result<Piece, S
                 extra: prev.extra,
             }
         }
-        None => Piece {
+        None => Snippet {
             id: input.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             title: input.title,
             body: input.body.clone(),
@@ -354,30 +354,30 @@ pub fn save_piece_at(dir: &Path, input: PieceInput, now: u64) -> Result<Piece, S
             extra: Map::new(),
         },
     };
-    write_piece(dir, &piece)?;
-    remove_stale_twins(dir, &piece.id);
-    Ok(piece)
+    write_snippet(dir, &snippet)?;
+    remove_stale_twins(dir, &snippet.id);
+    Ok(snippet)
 }
 
 /// Atomically write `<dir>/<id>.json` (temp file + rename, so a crash never
-/// leaves a truncated piece). Pretty-printed + trailing newline: these files
+/// leaves a truncated snippet). Pretty-printed + trailing newline: these files
 /// are a hand-editing surface.
-fn write_piece(dir: &Path, piece: &Piece) -> Result<(), String> {
-    let mut pretty = serde_json::to_string_pretty(piece).map_err(|e| e.to_string())?;
+fn write_snippet(dir: &Path, snippet: &Snippet) -> Result<(), String> {
+    let mut pretty = serde_json::to_string_pretty(snippet).map_err(|e| e.to_string())?;
     pretty.push('\n');
-    let tmp = dir.join(format!(".tmp-{}.json", piece.id));
+    let tmp = dir.join(format!(".tmp-{}.json", snippet.id));
     fs::write(&tmp, pretty).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, dir.join(format!("{}.json", piece.id))).map_err(|e| e.to_string())
+    fs::rename(&tmp, dir.join(format!("{}.json", snippet.id))).map_err(|e| e.to_string())
 }
 
-/// Does this file's content belong to piece `id` **in the loader's view**?
+/// Does this file's content belong to snippet `id` **in the loader's view**?
 /// Repair-aware on purpose (contract: every write path sees what the loader
 /// sees) — a strict-only check here lets a repairable twin hide from cleanup
-/// or survive a delete and resurrect the piece.
-fn file_holds_piece(path: &Path, fname: &str, id: &str) -> bool {
+/// or survive a delete and resurrect the snippet.
+fn file_holds_snippet(path: &Path, fname: &str, id: &str) -> bool {
     fs::read_to_string(path)
         .ok()
-        .and_then(|s| parse_piece(&s, fname, None).ok())
+        .and_then(|s| parse_snippet(&s, fname, None).ok())
         .is_some_and(|(p, _)| p.id == id)
 }
 
@@ -398,7 +398,7 @@ fn remove_stale_twins(dir: &Path, id: &str) {
         if fname == canonical || !fname.ends_with(".json") || fname.starts_with('.') {
             continue;
         }
-        if file_holds_piece(&path, fname, id) {
+        if file_holds_snippet(&path, fname, id) {
             let _ = fs::remove_file(&path);
         }
     }
@@ -408,9 +408,9 @@ fn remove_stale_twins(dir: &Path, id: &str) {
 /// content no longer parses) plus any twin **the loader would recognize**,
 /// repairable ones included (contract: a destructive action must stick; a
 /// strict-only twin check left a repairable twin behind to resurrect the
-/// piece on the next load). Idempotent: deleting an absent id is Ok,
+/// snippet on the next load). Idempotent: deleting an absent id is Ok,
 /// matching the command contract's `null` return.
-pub fn delete_piece_at(dir: &Path, id: &str) -> Result<(), String> {
+pub fn delete_snippet_at(dir: &Path, id: &str) -> Result<(), String> {
     if !dir.is_dir() {
         return Ok(());
     }
@@ -426,46 +426,46 @@ pub fn delete_piece_at(dir: &Path, id: &str) -> Result<(), String> {
         if !fname.ends_with(".json") || fname.starts_with('.') {
             continue;
         }
-        if file_holds_piece(&path, fname, id) {
+        if file_holds_snippet(&path, fname, id) {
             fs::remove_file(&path).map_err(|e| e.to_string())?;
         }
     }
     Ok(())
 }
 
-/// `save_piece` resolved against the real data root and clock.
-pub fn save_piece(input: PieceInput) -> Result<Piece, String> {
-    save_piece_at(&prompts_dir()?, input, unix_now())
+/// `save_snippet` resolved against the real data root and clock.
+pub fn save_snippet(input: SnippetInput) -> Result<Snippet, String> {
+    save_snippet_at(&prompts_dir()?, input, unix_now())
 }
 
-/// Rescope every piece of `project_id` to global — the delete-project
+/// Rescope every snippet of `project_id` to global — the delete-project
 /// semantics (contract: nothing a user wrote ever vanishes as a side effect;
-/// the pieces surface again under Global). Metadata-only by design: no
+/// the snippets surface again under Global). Metadata-only by design: no
 /// version push, `updated_at` untouched — the user changed nothing about the
-/// piece itself.
+/// snippet itself.
 ///
-/// Operates on [`scan_pieces`]' view (contract: every write path sees what
+/// Operates on [`scan_snippets`]' view (contract: every write path sees what
 /// the loader sees — repair-aware, canonical-filename-wins, deterministic).
-/// A parallel stricter parse here once picked a stale twin as "the piece"
+/// A parallel stricter parse here once picked a stale twin as "the snippet"
 /// and overwrote the canonical body with it (audit MED). A winner the loader
 /// flags `recovered` is skipped entirely: a delete-project side effect must
 /// never bake an unsaved repair — the file stays byte-identical and surfaces
 /// under Global via the dangling-id fallback once the roster entry is gone.
-pub fn rescope_project_pieces(dir: &Path, project_id: &str) -> Result<(), String> {
+pub fn rescope_project_snippets(dir: &Path, project_id: &str) -> Result<(), String> {
     if !dir.is_dir() {
         return Ok(());
     }
     let target = Scope::Project { project_id: project_id.to_string() };
-    let (pieces, _notices) = scan_pieces(dir, None)?;
-    for mut piece in pieces {
-        if piece.scope != target || piece.recovered {
+    let (snippets, _notices) = scan_snippets(dir, None)?;
+    for mut snippet in snippets {
+        if snippet.scope != target || snippet.recovered {
             continue;
         }
-        piece.scope = Scope::Global;
-        write_piece(dir, &piece)?;
+        snippet.scope = Scope::Global;
+        write_snippet(dir, &snippet)?;
         // The winner now lives canonically; superseded twins are cleaned
         // exactly as a save does.
-        remove_stale_twins(dir, &piece.id);
+        remove_stale_twins(dir, &snippet.id);
     }
     Ok(())
 }
@@ -480,8 +480,8 @@ mod tests {
         d
     }
 
-    fn input(title: &str, body: &str) -> PieceInput {
-        PieceInput {
+    fn input(title: &str, body: &str) -> SnippetInput {
+        SnippetInput {
             id: None,
             title: title.to_string(),
             body: body.to_string(),
@@ -497,7 +497,7 @@ mod tests {
     #[test]
     fn hostile_unknown_fields_survive_load_save_round_trip() {
         let dir = tmp_dir("hostile");
-        // Hand-edited piece: unknown top-level fields including an integer
+        // Hand-edited snippet: unknown top-level fields including an integer
         // past 2^53 (exact in u64, lossy in a JS float), i64::MIN, a
         // deeply-nested object, and a non-ASCII key.
         let raw = r#"{
@@ -517,7 +517,7 @@ mod tests {
         // Metadata-only save (same body) — the round-trip that must not drop fields.
         let mut inp = input("t2", "b");
         inp.id = Some("abc-1".to_string());
-        save_piece_at(&dir, inp, 2).unwrap();
+        save_snippet_at(&dir, inp, 2).unwrap();
 
         let reread: Value = serde_json::from_str(&fs::read_to_string(dir.join("abc-1.json")).unwrap()).unwrap();
         assert_eq!(reread["my_note"], "user field");
@@ -544,9 +544,9 @@ mod tests {
         )
         .unwrap();
 
-        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
-        assert_eq!(pieces.len(), 1, "good piece must still load");
-        assert_eq!(pieces[0].id, "good");
+        let (snippets, errors) = scan_snippets(&dir, None).unwrap();
+        assert_eq!(snippets.len(), 1, "good snippet must still load");
+        assert_eq!(snippets[0].id, "good");
         assert_eq!(errors.len(), 1, "the broken file must be reported, not silently skipped");
         assert_eq!(errors[0].file, "bad.json");
         assert!(!errors[0].error.is_empty());
@@ -555,8 +555,8 @@ mod tests {
             bad,
             "the bad file must stay byte-identical for the user to fix"
         );
-        // The pieces-only wrapper sees the same world minus the errors.
-        assert_eq!(load_pieces(&dir, None).unwrap().len(), 1);
+        // The snippets-only wrapper sees the same world minus the errors.
+        assert_eq!(load_snippets(&dir, None).unwrap().len(), 1);
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -577,12 +577,12 @@ mod tests {
         )
         .unwrap();
 
-        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
-        assert_eq!(pieces.len(), 1);
-        assert_eq!(pieces[0].title, "canonical");
+        let (snippets, errors) = scan_snippets(&dir, None).unwrap();
+        assert_eq!(snippets.len(), 1);
+        assert_eq!(snippets[0].title, "canonical");
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].file, "copy.json", "the SHADOWED file is the one reported");
-        assert!(errors[0].error.contains("duplicate piece id x"));
+        assert!(errors[0].error.contains("duplicate snippet id x"));
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -600,9 +600,9 @@ mod tests {
         )
         .unwrap();
 
-        let pieces = load_pieces(&dir, None).unwrap();
-        assert_eq!(pieces.len(), 1);
-        assert_eq!(pieces[0].title, "canonical");
+        let snippets = load_snippets(&dir, None).unwrap();
+        assert_eq!(snippets.len(), 1);
+        assert_eq!(snippets[0].title, "canonical");
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -615,15 +615,15 @@ mod tests {
         )
         .unwrap();
 
-        let pieces = load_pieces(&dir, None).unwrap();
-        assert_eq!(pieces[0].id, "real-id", "content id wins over filename");
+        let snippets = load_snippets(&dir, None).unwrap();
+        assert_eq!(snippets[0].id, "real-id", "content id wins over filename");
 
         let mut inp = input("t", "b");
         inp.id = Some("real-id".to_string());
-        save_piece_at(&dir, inp, 2).unwrap();
+        save_snippet_at(&dir, inp, 2).unwrap();
         assert!(dir.join("real-id.json").is_file(), "save lands at <id>.json");
         assert!(!dir.join("hand-copied.json").exists(), "stale twin cleaned up");
-        assert_eq!(load_pieces(&dir, None).unwrap().len(), 1);
+        assert_eq!(load_snippets(&dir, None).unwrap().len(), 1);
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -632,19 +632,19 @@ mod tests {
     #[test]
     fn body_change_pushes_old_body_newest_first() {
         let dir = tmp_dir("versioning");
-        let created = save_piece_at(&dir, input("t", "body v1"), 100).unwrap();
+        let created = save_snippet_at(&dir, input("t", "body v1"), 100).unwrap();
         assert!(created.versions.is_empty());
 
         let mut second = input("t", "body v2");
         second.id = Some(created.id.clone());
-        let v2 = save_piece_at(&dir, second, 200).unwrap();
+        let v2 = save_snippet_at(&dir, second, 200).unwrap();
         assert_eq!(v2.versions.len(), 1);
         assert_eq!(v2.versions[0].body, "body v1");
         assert_eq!(v2.versions[0].saved_at, 100, "prior body carries its own save time");
 
         let mut third = input("t", "body v3");
         third.id = Some(created.id.clone());
-        let v3 = save_piece_at(&dir, third, 300).unwrap();
+        let v3 = save_snippet_at(&dir, third, 300).unwrap();
         assert_eq!(v3.versions.len(), 2);
         assert_eq!(v3.versions[0].body, "body v2", "newest-first");
         assert_eq!(v3.versions[1].body, "body v1");
@@ -656,11 +656,11 @@ mod tests {
     #[test]
     fn metadata_only_save_does_not_version() {
         let dir = tmp_dir("meta-only");
-        let created = save_piece_at(&dir, input("t", "same body"), 100).unwrap();
+        let created = save_snippet_at(&dir, input("t", "same body"), 100).unwrap();
         let mut rename = input("renamed", "same body");
         rename.id = Some(created.id.clone());
         rename.keywords = vec!["k".to_string()];
-        let saved = save_piece_at(&dir, rename, 200).unwrap();
+        let saved = save_snippet_at(&dir, rename, 200).unwrap();
         assert!(saved.versions.is_empty(), "unchanged body must not version");
         assert_eq!(saved.title, "renamed");
         assert_eq!(saved.updated_at, 200);
@@ -670,7 +670,7 @@ mod tests {
     #[test]
     fn create_assigns_uuid_and_writes_canonical_file() {
         let dir = tmp_dir("create");
-        let p = save_piece_at(&dir, input("t", "b {ticket:ABC-123} {ticket} {env}"), 100).unwrap();
+        let p = save_snippet_at(&dir, input("t", "b {ticket:ABC-123} {ticket} {env}"), 100).unwrap();
         assert!(uuid::Uuid::parse_str(&p.id).is_ok());
         assert_eq!(p.created_at, p.updated_at);
         assert!(dir.join(format!("{}.json", p.id)).is_file());
@@ -690,7 +690,7 @@ mod tests {
         // The schema example's exact shape: {"name": "ticket", "default": "ABC-123"}
         // — and a default-less entry omits the key entirely (Option skip).
         let dir = tmp_dir("ph-default");
-        let p = save_piece_at(&dir, input("t", "{ticket:ABC-123} {env}"), 100).unwrap();
+        let p = save_snippet_at(&dir, input("t", "{ticket:ABC-123} {env}"), 100).unwrap();
         let raw: Value =
             serde_json::from_str(&fs::read_to_string(dir.join(format!("{}.json", p.id))).unwrap())
                 .unwrap();
@@ -705,18 +705,18 @@ mod tests {
     }
 
     #[test]
-    fn save_refuses_when_repair_cannot_yield_this_piece() {
+    fn save_refuses_when_repair_cannot_yield_this_snippet() {
         // Audit L2, repair-era form: when even repair can't turn <id>.json
-        // into a piece, resolving through it would silently turn this save
+        // into a snippet, resolving through it would silently turn this save
         // into a CREATE that overwrites the broken file — destroying
         // whatever it held. The save must refuse, file byte-identical.
         let dir = tmp_dir("refuse-broken");
-        let broken = "[1, 2,"; // repairs to a JSON array — never a Piece
+        let broken = "[1, 2,"; // repairs to a JSON array — never a Snippet
         fs::write(dir.join("x.json"), broken).unwrap();
 
         let mut inp = input("t2", "new body");
         inp.id = Some("x".to_string());
-        let err = save_piece_at(&dir, inp, 2).unwrap_err();
+        let err = save_snippet_at(&dir, inp, 2).unwrap_err();
         assert!(err.contains("x.json"), "error must name the file: {err}");
         assert!(err.contains("even after repair"), "error must say why: {err}");
         assert_eq!(
@@ -747,12 +747,12 @@ mod tests {
         }"#;
         fs::write(dir.join("r1.json"), corrupt).unwrap();
 
-        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
-        assert_eq!(pieces.len(), 1, "the piece must recover, not be skipped");
-        assert!(pieces[0].recovered, "recovery must be flagged for the UI");
-        assert_eq!(pieces[0].title, "needs repair");
+        let (snippets, errors) = scan_snippets(&dir, None).unwrap();
+        assert_eq!(snippets.len(), 1, "the snippet must recover, not be skipped");
+        assert!(snippets[0].recovered, "recovery must be flagged for the UI");
+        assert_eq!(snippets[0].title, "needs repair");
         assert_eq!(
-            pieces[0].extra["big"],
+            snippets[0].extra["big"],
             Value::from(18446744073709551615u64),
             "repair must keep u64 past 2^53 exact"
         );
@@ -773,16 +773,16 @@ mod tests {
         fs::write(dir.join("x.json"), truncated).unwrap();
 
         // Loading recovers in memory; disk stays byte-identical.
-        let (pieces, _) = scan_pieces(&dir, None).unwrap();
-        assert!(pieces[0].recovered);
+        let (snippets, _) = scan_snippets(&dir, None).unwrap();
+        assert!(snippets[0].recovered);
         assert_eq!(fs::read_to_string(dir.join("x.json")).unwrap(), truncated);
 
         // The explicit save is the one moment the repaired form persists —
-        // treated as the EXISTING piece: versions append, nothing resets.
+        // treated as the EXISTING snippet: versions append, nothing resets.
         let mut inp = input("t", "new body");
         inp.id = Some("x".to_string());
-        let saved = save_piece_at(&dir, inp, 9).unwrap();
-        assert_eq!(saved.created_at, 1, "repaired parse is the existing piece, not a create");
+        let saved = save_snippet_at(&dir, inp, 9).unwrap();
+        assert_eq!(saved.created_at, 1, "repaired parse is the existing snippet, not a create");
         assert_eq!(saved.versions.first().map(|v| v.body.as_str()), Some("current"));
         assert!(
             saved.versions.iter().any(|v| v.body == "precious"),
@@ -805,16 +805,16 @@ mod tests {
             r#"{"id":"a","title":"t","body":"b","created_at":1,"updated_at":1,"recovered":true}"#,
         )
         .unwrap();
-        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
-        assert!(!pieces[0].recovered);
+        let (snippets, errors) = scan_snippets(&dir, None).unwrap();
+        assert!(!snippets[0].recovered);
         assert!(errors.is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn save_refuses_when_canonical_file_holds_another_pieces_id() {
+    fn save_refuses_when_canonical_file_holds_another_snippets_id() {
         // Same overwrite hazard, different cause: a hand-edit changed the id
-        // INSIDE x.json, so that file now belongs to piece "y". Writing piece
+        // INSIDE x.json, so that file now belongs to snippet "y". Writing snippet
         // "x" to x.json would destroy y's data.
         let dir = tmp_dir("refuse-mismatch");
         fs::write(
@@ -825,8 +825,8 @@ mod tests {
 
         let mut inp = input("t", "b");
         inp.id = Some("x".to_string());
-        let err = save_piece_at(&dir, inp, 2).unwrap_err();
-        assert!(err.contains("different piece"), "{err}");
+        let err = save_snippet_at(&dir, inp, 2).unwrap_err();
+        assert!(err.contains("different snippet"), "{err}");
         assert!(dir.join("x.json").is_file(), "the mismatched file is untouched");
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -843,9 +843,9 @@ mod tests {
         let raw = r#"{"id":"a","title":"t","body":"b","created_at":1,"updated_at":1,"scope":{"kind":"project","project":"/home/u/proj"}}"#;
         fs::write(dir.join("a.json"), raw).unwrap();
 
-        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
-        assert_eq!(pieces.len(), 1, "the piece must LOAD, not be skipped");
-        assert_eq!(pieces[0].scope, Scope::Global);
+        let (snippets, errors) = scan_snippets(&dir, None).unwrap();
+        assert_eq!(snippets.len(), 1, "the snippet must LOAD, not be skipped");
+        assert_eq!(snippets[0].scope, Scope::Global);
         assert_eq!(errors.len(), 1, "the degradation must be visible");
         assert_eq!(errors[0].file, "a.json");
         assert!(errors[0].error.contains("unrecognized scope"), "{}", errors[0].error);
@@ -864,21 +864,21 @@ mod tests {
         fs::write(dir.join("a.json"), raw).unwrap();
 
         let known: HashSet<String> = ["real".to_string()].into();
-        let (pieces, errors) = scan_pieces(&dir, Some(&known)).unwrap();
-        assert_eq!(pieces[0].scope, Scope::Global);
+        let (snippets, errors) = scan_snippets(&dir, Some(&known)).unwrap();
+        assert_eq!(snippets[0].scope, Scope::Global);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].error.contains("unknown project ghost"), "{}", errors[0].error);
         assert_eq!(fs::read_to_string(dir.join("a.json")).unwrap(), raw);
 
         // Roster unreadable (None): validation suspends, the scope holds.
-        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
-        assert_eq!(pieces[0].scope, Scope::Project { project_id: "ghost".into() });
+        let (snippets, errors) = scan_snippets(&dir, None).unwrap();
+        assert_eq!(snippets[0].scope, Scope::Project { project_id: "ghost".into() });
         assert!(errors.is_empty());
 
         // Known id: no degradation, no notice.
         let known: HashSet<String> = ["ghost".to_string()].into();
-        let (pieces, errors) = scan_pieces(&dir, Some(&known)).unwrap();
-        assert_eq!(pieces[0].scope, Scope::Project { project_id: "ghost".into() });
+        let (snippets, errors) = scan_snippets(&dir, Some(&known)).unwrap();
+        assert_eq!(snippets[0].scope, Scope::Project { project_id: "ghost".into() });
         assert!(errors.is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -886,7 +886,7 @@ mod tests {
     #[test]
     fn save_over_legacy_scope_file_proceeds_and_persists_clean_scope() {
         // The explicit save is the one moment normalization may persist:
-        // loading never rewrites, but a user edit of a legacy-scope piece
+        // loading never rewrites, but a user edit of a legacy-scope snippet
         // must not be refused (versions/extras still merge).
         let dir = tmp_dir("legacy-save");
         let raw = r#"{"id":"a","title":"t","body":"old","created_at":1,"updated_at":1,"scope":{"kind":"project","project":"/p"},"my_note":"kept"}"#;
@@ -894,7 +894,7 @@ mod tests {
 
         let mut inp = input("t", "new");
         inp.id = Some("a".to_string());
-        let saved = save_piece_at(&dir, inp, 2).unwrap();
+        let saved = save_snippet_at(&dir, inp, 2).unwrap();
         assert_eq!(saved.scope, Scope::Global, "input scope wins on save");
         assert_eq!(saved.versions.len(), 1, "body change still versions");
         assert_eq!(saved.versions[0].body, "old");
@@ -909,26 +909,26 @@ mod tests {
     // --- delete-project rescope ---
 
     #[test]
-    fn rescope_moves_target_pieces_to_global_without_versioning() {
+    fn rescope_moves_target_snippets_to_global_without_versioning() {
         let dir = tmp_dir("rescope");
         let mut mine = input("mine", "b");
         mine.scope = Scope::Project { project_id: "target".into() };
-        let mine = save_piece_at(&dir, mine, 100).unwrap();
+        let mine = save_snippet_at(&dir, mine, 100).unwrap();
         let mut other = input("other", "b");
         other.scope = Scope::Project { project_id: "different".into() };
-        let other = save_piece_at(&dir, other, 100).unwrap();
+        let other = save_snippet_at(&dir, other, 100).unwrap();
 
-        rescope_project_pieces(&dir, "target").unwrap();
+        rescope_project_snippets(&dir, "target").unwrap();
 
-        let pieces = load_pieces(&dir, None).unwrap();
-        let by_id = |id: &str| pieces.iter().find(|p| p.id == id).unwrap();
-        assert_eq!(by_id(&mine.id).scope, Scope::Global, "target pieces rescoped");
+        let snippets = load_snippets(&dir, None).unwrap();
+        let by_id = |id: &str| snippets.iter().find(|p| p.id == id).unwrap();
+        assert_eq!(by_id(&mine.id).scope, Scope::Global, "target snippets rescoped");
         assert!(by_id(&mine.id).versions.is_empty(), "rescope is metadata-only: no version");
         assert_eq!(by_id(&mine.id).updated_at, 100, "rescope is metadata-only: updated_at holds");
         assert_eq!(
             by_id(&other.id).scope,
             Scope::Project { project_id: "different".into() },
-            "other projects' pieces untouched"
+            "other projects' snippets untouched"
         );
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -949,7 +949,7 @@ mod tests {
         fs::write(dir.join("x.json"), canonical).unwrap();
         fs::write(dir.join("copy.json"), twin).unwrap();
 
-        rescope_project_pieces(&dir, "target").unwrap();
+        rescope_project_snippets(&dir, "target").unwrap();
 
         assert_eq!(
             fs::read_to_string(dir.join("x.json")).unwrap(),
@@ -980,21 +980,21 @@ mod tests {
         )
         .unwrap();
 
-        rescope_project_pieces(&dir, "target").unwrap();
+        rescope_project_snippets(&dir, "target").unwrap();
 
-        let pieces = load_pieces(&dir, None).unwrap();
-        assert_eq!(pieces.len(), 1);
-        assert_eq!(pieces[0].body, "canonical-body", "loader-winner content survives");
-        assert_eq!(pieces[0].scope, Scope::Global);
+        let snippets = load_snippets(&dir, None).unwrap();
+        assert_eq!(snippets.len(), 1);
+        assert_eq!(snippets[0].body, "canonical-body", "loader-winner content survives");
+        assert_eq!(snippets[0].scope, Scope::Global);
         assert!(!dir.join("copy.json").exists(), "the superseded twin is cleaned up");
         fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn delete_removes_repairable_twins_so_the_delete_sticks() {
-        // Audit MED 2: the loader recognizes a repairable twin as this piece,
+        // Audit MED 2: the loader recognizes a repairable twin as this snippet,
         // so a delete that only strict-parses leaves it behind — and the
-        // "deleted" piece resurrects (recovered) on the next load. A
+        // "deleted" snippet resurrects (recovered) on the next load. A
         // destructive action must stick.
         let dir = tmp_dir("delete-repairable-twin");
         fs::write(
@@ -1009,12 +1009,12 @@ mod tests {
         )
         .unwrap();
 
-        delete_piece_at(&dir, "x").unwrap();
+        delete_snippet_at(&dir, "x").unwrap();
 
         assert!(!dir.join("twin.json").exists(), "the repairable twin must go too");
         assert!(
-            load_pieces(&dir, None).unwrap().is_empty(),
-            "no file may resurrect the deleted piece"
+            load_snippets(&dir, None).unwrap().is_empty(),
+            "no file may resurrect the deleted snippet"
         );
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -1036,9 +1036,9 @@ mod tests {
         )
         .unwrap();
 
-        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
-        assert_eq!(pieces.len(), 1);
-        assert_eq!(pieces[0].title, "from-aaa", "lexicographically first filename wins");
+        let (snippets, errors) = scan_snippets(&dir, None).unwrap();
+        assert_eq!(snippets.len(), 1);
+        assert_eq!(snippets[0].title, "from-aaa", "lexicographically first filename wins");
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].file, "bbb.json", "the loser is the one reported");
         fs::remove_dir_all(&dir).unwrap();
@@ -1050,7 +1050,7 @@ mod tests {
         let broken = r#"{"id":"x","scope":{"kind":"project","project_id":"target"},"title":"t""#;
         fs::write(dir.join("x.json"), broken).unwrap();
 
-        rescope_project_pieces(&dir, "target").unwrap();
+        rescope_project_snippets(&dir, "target").unwrap();
 
         assert_eq!(
             fs::read_to_string(dir.join("x.json")).unwrap(),
@@ -1076,9 +1076,9 @@ mod tests {
         )
         .unwrap();
 
-        delete_piece_at(&dir, "x").unwrap();
-        assert!(load_pieces(&dir, None).unwrap().is_empty(), "no file may resurrect the piece");
-        delete_piece_at(&dir, "x").unwrap(); // idempotent
+        delete_snippet_at(&dir, "x").unwrap();
+        assert!(load_snippets(&dir, None).unwrap().is_empty(), "no file may resurrect the snippet");
+        delete_snippet_at(&dir, "x").unwrap(); // idempotent
         fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -29,7 +29,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use super::store::Piece;
+use super::store::Snippet;
 
 /// The pinned embedding model: the fastembed-blessed quantized
 /// BGE-small-en-v1.5 (Cls pooling, static quantization, 384 dims) — the
@@ -110,7 +110,7 @@ const ORT_ARTIFACT: Option<OrtArtifact> = None;
 /// Progress event streamed over the `embed_download` Channel (contract):
 /// stage `runtime` (the ONNX Runtime archive, bytes), `model` (all five
 /// model files under one fixed byte total), then `index` (embedding the
-/// existing library, PIECE counts — emitted by the command's warm-up loop,
+/// existing library, SNIPPET counts — emitted by the command's warm-up loop,
 /// so the popover's "Download & index" is literally what one click does).
 /// Completion and error are NOT channel events: the command's Result is the
 /// terminal signal and the frontend re-fetches `embed_status` afterward.
@@ -333,20 +333,26 @@ pub fn load_embedder(root: &Path) -> Result<TextEmbedding, String> {
 // prompts/ at any time — deliberately outside the hand-editable prompts dir.
 // ---------------------------------------------------------------------------
 
-/// The text a piece is embedded from. Title carries strong signal; keywords
+/// The text a snippet is embedded from. Title carries strong signal; keywords
 /// add the user's own vocabulary; body carries the substance.
-pub fn embedding_text(piece: &Piece) -> String {
-    format!("{}\n{}\n{}", piece.title, piece.keywords.join(" "), piece.body)
+pub fn embedding_text(snippet: &Snippet) -> String {
+    format!("{}\n{}\n{}", snippet.title, snippet.keywords.join(" "), snippet.body)
 }
 
-pub fn body_hash(piece: &Piece) -> String {
-    sha256_hex(embedding_text(piece).as_bytes())
+pub fn body_hash(snippet: &Snippet) -> String {
+    sha256_hex(embedding_text(snippet).as_bytes())
 }
 
 pub fn open_cache(root: &Path) -> Result<Connection, String> {
     let dir = root.join("cache");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let conn = Connection::open(dir.join("embeddings.sqlite")).map_err(|e| e.to_string())?;
+    // The `piece_id` column keeps its legacy name deliberately: the snippet
+    // rename stops at the storage boundary. Renaming it would need a schema
+    // migration under the founder's existing cache file (CREATE TABLE IF NOT
+    // EXISTS won't alter an existing table, so a `SELECT snippet_id` would
+    // then error on it) for zero user-visible gain — this cache is derived and
+    // internal. It maps 1:1 to `Snippet::id`.
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS embeddings (
             piece_id  TEXT NOT NULL,
@@ -368,14 +374,14 @@ fn blob_to_vector(b: &[u8]) -> Vec<f32> {
     b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 
-/// Bring the cache up to date for `pieces`: embed missing/stale entries (at
+/// Bring the cache up to date for `snippets`: embed missing/stale entries (at
 /// most `limit` per call, so a huge hand-imported corpus warms up over a few
-/// queries instead of blocking one) and drop rows for deleted pieces.
-/// Returns how many pieces are still stale after this pass.
+/// queries instead of blocking one) and drop rows for deleted snippets.
+/// Returns how many snippets are still stale after this pass.
 pub fn ensure_embeddings(
     conn: &Connection,
     embedder: &mut TextEmbedding,
-    pieces: &[Piece],
+    snippets: &[Snippet],
     limit: usize,
 ) -> Result<usize, String> {
     let cached: Vec<(String, String)> = {
@@ -387,26 +393,26 @@ pub fn ensure_embeddings(
             .map_err(|e| e.to_string())?;
         rows.filter_map(|r| r.ok()).collect()
     };
-    // Drop rows for pieces that no longer exist.
-    let live: std::collections::HashSet<&str> = pieces.iter().map(|p| p.id.as_str()).collect();
+    // Drop rows for snippets that no longer exist.
+    let live: std::collections::HashSet<&str> = snippets.iter().map(|p| p.id.as_str()).collect();
     for (piece_id, _) in cached.iter().filter(|(id, _)| !live.contains(id.as_str())) {
         conn.execute("DELETE FROM embeddings WHERE piece_id = ?1 AND model_id = ?2", (piece_id, MODEL_ID))
             .map_err(|e| e.to_string())?;
     }
-    let is_fresh = |p: &&Piece| {
+    let is_fresh = |p: &&Snippet| {
         cached
             .iter()
             .any(|(id, hash)| id == &p.id && hash == &body_hash(p))
     };
-    let stale: Vec<&Piece> = pieces.iter().filter(|p| !is_fresh(p)).collect();
-    let batch: Vec<&Piece> = stale.iter().take(limit).copied().collect();
+    let stale: Vec<&Snippet> = snippets.iter().filter(|p| !is_fresh(p)).collect();
+    let batch: Vec<&Snippet> = stale.iter().take(limit).copied().collect();
     if !batch.is_empty() {
         let texts: Vec<String> = batch.iter().map(|p| embedding_text(p)).collect();
         let vectors = embedder.embed(texts, None).map_err(|e| e.to_string())?;
-        for (piece, vector) in batch.iter().zip(vectors) {
+        for (snippet, vector) in batch.iter().zip(vectors) {
             conn.execute(
                 "INSERT OR REPLACE INTO embeddings (piece_id, model_id, body_hash, vector) VALUES (?1, ?2, ?3, ?4)",
-                (&piece.id, MODEL_ID, body_hash(piece), vector_to_blob(&vector)),
+                (&snippet.id, MODEL_ID, body_hash(snippet), vector_to_blob(&vector)),
             )
             .map_err(|e| e.to_string())?;
         }
@@ -415,7 +421,7 @@ pub fn ensure_embeddings(
 }
 
 /// All cached vectors for the current model — the in-memory pool the linear
-/// cosine scan runs over (microseconds at ≤10k pieces; no vector DB by design).
+/// cosine scan runs over (microseconds at ≤10k snippets; no vector DB by design).
 pub fn cached_vectors(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>, String> {
     let mut stmt = conn
         .prepare("SELECT piece_id, vector FROM embeddings WHERE model_id = ?1")

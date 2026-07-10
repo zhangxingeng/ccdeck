@@ -3,7 +3,7 @@
    * Semantic-matching config popover (contract §Compose surface) — replaces
    * the inline panel. One "Download & index" action gated on an informed
    * decline (TOTAL size disclosed: model + ONNX runtime), then two bars:
-   * Download (runtime + model stages aggregated) and Index (piece counts).
+   * Download (runtime + model stages aggregated) and Index (snippet counts).
    * Lexical matching always works; nothing here blocks the common path.
    */
   import { prompts, startEmbedDownload, toggleEmbedEnabled } from '$lib/prompts.svelte';
@@ -37,7 +37,7 @@
   });
   const indexCounts = $derived.by(() => {
     const p = prompts.embedProgress;
-    return p?.stage === 'index' ? `${p.done} / ${p.total} pieces` : '';
+    return p?.stage === 'index' ? `${p.done} / ${p.total} snippets` : '';
   });
 
   function handleKeydown(e: KeyboardEvent): void {
@@ -144,7 +144,7 @@
     background: var(--bg-subtle);
   }
   .embed-pop__trigger--on {
-    color: var(--accent-piece);
+    color: var(--accent-snippet);
   }
   .embed-pop__backdrop {
     position: fixed;
@@ -201,7 +201,7 @@
   }
   .embed-pop__bar-fill {
     height: 100%;
-    background: var(--accent-piece);
+    background: var(--accent-snippet);
     transition: width 0.15s ease;
   }
   .embed-pop__stage-pct {

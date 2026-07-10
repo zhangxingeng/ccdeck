@@ -70,7 +70,7 @@ sha2 = "0.10"
 # just the shared library.
 flate2 = "1"
 tar = "0.4"
-# jsonrepair-style recovery for hand-edited piece/roster JSON (contract
+# jsonrepair-style recovery for hand-edited snippet/roster JSON (contract
 # § Store robustness): Rust port of python json_repair, org-backed
 # (oramasearch), 1.x, steady releases — chosen over the single-release
 # `jsonrepair` and the stale `json-repair` crates (researched 2026-07).

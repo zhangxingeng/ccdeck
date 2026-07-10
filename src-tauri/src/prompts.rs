@@ -1,13 +1,13 @@
-//! Prompt Library (issue #24): the JSON piece store, the hybrid match engine,
+//! Prompt Library (issue #24): the JSON snippet store, the hybrid match engine,
 //! and their Tauri commands. Engineering contract: the prompts design doc in
-//! project_docs — storage layout, piece schema, command surface, engine rules.
+//! project_docs — storage layout, snippet schema, command surface, engine rules.
 //!
 //! Modules:
-//!   `store`   — one-JSON-per-piece store under `<data root>/prompts/`,
+//!   `store`   — one-JSON-per-snippet store under `<data root>/prompts/`,
 //!               hand-editable, unknown fields preserved, append-only body
 //!               versioning.
 //!   `projects` — the project roster (`<data root>/projects.json`): named,
-//!               colored, pinnable groupings pieces reference by id.
+//!               colored, pinnable groupings snippets reference by id.
 //!   `grammar` — the shared single-brace variable grammar (seam contract:
 //!               the TS lane implements the identical spec, both assert the
 //!               contract's shared vectors).

@@ -5,23 +5,23 @@
    * tab drives match pool, save scope, and tint); the compose box is the
    * primary surface with situational affordances only; the library/match
    * panel sits left and collapses for a distraction-free box. Orchestrates
-   * the piece modal, save-selection-as-piece, and the Copy toast.
+   * the snippet modal, save-selection-as-snippet, and the Copy toast.
    */
   import { onDestroy, onMount } from 'svelte';
-  import type { Piece } from '$lib/prompts/types';
+  import type { Snippet } from '$lib/prompts/types';
   import {
     prompts,
     initPrompts,
     disposePrompts,
     activeProject,
-    composeInsertPiece,
+    composeInsertSnippet,
     copyOutput,
   } from '$lib/prompts.svelte';
   import { projectColorVar } from '$lib/prompts/palette';
   import { copyToClipboard } from '$lib/copy';
   import ComposeBox from './prompts/ComposeBox.svelte';
   import MatchPanel from './prompts/MatchPanel.svelte';
-  import PieceModal, { type PieceModalContext } from './prompts/PieceModal.svelte';
+  import SnippetModal, { type SnippetModalContext } from './prompts/SnippetModal.svelte';
   import ProjectTabs from './prompts/ProjectTabs.svelte';
   import ProjectManagerPopover from './prompts/ProjectManagerPopover.svelte';
   import EmbeddingsPopover from './prompts/EmbeddingsPopover.svelte';
@@ -32,7 +32,7 @@
   // the next visit, and a data-loss warning that never comes back would
   // itself be the silent loss it exists to prevent.
   let loadErrorsDismissed = $state(false);
-  let modalContext = $state<PieceModalContext | null>(null);
+  let modalContext = $state<SnippetModalContext | null>(null);
   let copyMsg = $state<string | null>(null);
   let copyMsgTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -44,9 +44,9 @@
     const active = activeProject();
     return active ? `--project-color: ${projectColorVar(active.color)}` : '';
   });
-  /** Loader-repaired pieces (transient flag): fine to use, but the repair
+  /** Loader-repaired snippets (transient flag): fine to use, but the repair
    *  persists only on an explicit re-save — worth a quiet nudge. */
-  const recoveredPieces = $derived(prompts.pieces.filter((p) => p.recovered));
+  const recoveredSnippets = $derived(prompts.snippets.filter((p) => p.recovered));
 
   onMount(() => {
     initPrompts();
@@ -57,16 +57,16 @@
   });
 
   // ── insert flow: the raw body lands as-is; variables go to the fill list ──
-  function handleInsert(piece: Piece): void {
-    composeInsertPiece(piece);
+  function handleInsert(snippet: Snippet): void {
+    composeInsertSnippet(snippet);
   }
 
-  // ── piece modal (F3 / F4) ──────────────────────────────────────────────────
+  // ── snippet modal (F3 / F4) ──────────────────────────────────────────────────
   function openSpan(spanIndex: number): void {
     modalContext = { kind: 'span', spanIndex };
   }
 
-  function saveSelectionAsPiece(): void {
+  function saveSelectionAsSnippet(): void {
     if (!hasSelection) return;
     modalContext = {
       kind: 'new',
@@ -94,36 +94,36 @@
   </div>
 
   {#if prompts.loadError}
-    <div class="prompts-view__error">Couldn't load the piece library: {prompts.loadError}</div>
+    <div class="prompts-view__error">Couldn't load the snippet library: {prompts.loadError}</div>
   {/if}
   {#if prompts.configError}
     <div class="prompts-view__error">{prompts.configError}</div>
   {/if}
 
-  {#if recoveredPieces.length}
+  {#if recoveredSnippets.length}
     <div class="prompts-view__load-warn" role="status">
       <div class="prompts-view__load-warn-text">
         <strong>
-          {recoveredPieces.length} piece file{recoveredPieces.length === 1 ? '' : 's'} auto-repaired
+          {recoveredSnippets.length} snippet file{recoveredSnippets.length === 1 ? '' : 's'} auto-repaired
         </strong>
         — the JSON was invalid and was recovered in memory (the file on disk is untouched). Open
-        and save {recoveredPieces.length === 1 ? 'it' : 'each'} to keep the repair:
-        {#each recoveredPieces as p, i (p.id)}{i > 0 ? ', ' : ' '}<code>{p.title}</code>{/each}
+        and save {recoveredSnippets.length === 1 ? 'it' : 'each'} to keep the repair:
+        {#each recoveredSnippets as p, i (p.id)}{i > 0 ? ', ' : ' '}<code>{p.title}</code>{/each}
       </div>
     </div>
   {/if}
 
-  {#if prompts.pieceLoadErrors.length && !loadErrorsDismissed}
+  {#if prompts.snippetLoadErrors.length && !loadErrorsDismissed}
     <div class="prompts-view__load-warn" role="status">
       <div class="prompts-view__load-warn-text">
         <strong>
-          {prompts.pieceLoadErrors.length} piece file{prompts.pieceLoadErrors.length === 1 ? '' : 's'}
+          {prompts.snippetLoadErrors.length} snippet file{prompts.snippetLoadErrors.length === 1 ? '' : 's'}
           couldn't be read
         </strong>
-        — fix or remove {prompts.pieceLoadErrors.length === 1 ? 'it' : 'them'} (the rest of the
+        — fix or remove {prompts.snippetLoadErrors.length === 1 ? 'it' : 'them'} (the rest of the
         library loaded fine):
         <ul>
-          {#each prompts.pieceLoadErrors as e (e.file)}
+          {#each prompts.snippetLoadErrors as e (e.file)}
             <li><code>{e.file}</code>: {e.error}</li>
           {/each}
         </ul>
@@ -132,7 +132,7 @@
         type="button"
         class="btn btn--ghost btn--sm"
         onclick={() => (loadErrorsDismissed = true)}
-        aria-label="Dismiss piece-file warning"
+        aria-label="Dismiss snippet-file warning"
       >
         ✕
       </button>
@@ -171,13 +171,13 @@
     {/if}
 
     <section class="prompts-view__compose">
-      <ComposeBox onOpenSpan={openSpan} onCopy={copyPrompt} onSaveSelection={saveSelectionAsPiece} />
+      <ComposeBox onOpenSpan={openSpan} onCopy={copyPrompt} onSaveSelection={saveSelectionAsSnippet} />
     </section>
   </div>
 </div>
 
 {#if modalContext}
-  <PieceModal context={modalContext} onClose={() => (modalContext = null)} />
+  <SnippetModal context={modalContext} onClose={() => (modalContext = null)} />
 {/if}
 
 {#if copyMsg}
@@ -197,7 +197,7 @@
     position: relative; /* anchors the project-manager popover */
   }
 
-  /* Non-blocking, dismissable: pieces that DID load work normally; this only
+  /* Non-blocking, dismissable: snippets that DID load work normally; this only
      flags the files that didn't. Amber (template accent), not error red —
      the library isn't broken, some files are. */
   .prompts-view__load-warn {

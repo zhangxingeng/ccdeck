@@ -4,13 +4,13 @@
 //! corpora (chat search); over a few hundred curated snippets, subsequence
 //! match + field weights is better-fitting and dependency-free (contract).
 
-use super::store::Piece;
+use super::store::Snippet;
 
 const W_TITLE: f32 = 3.0;
 const W_KEYWORD: f32 = 2.0;
 const W_BODY: f32 = 1.0;
 
-/// A piece's lexical result. `exact` marks a full-query title/keyword/tag hit
+/// A snippet's lexical result. `exact` marks a full-query title/keyword/tag hit
 /// — the fusion layer gives these a hard rank floor (contract: an exact hit
 /// is never buried by a middling semantic score).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -19,22 +19,22 @@ pub struct LexScore {
     pub exact: bool,
 }
 
-/// Score `query` against one piece. `None` = no match. Multi-token queries
+/// Score `query` against one snippet. `None` = no match. Multi-token queries
 /// use AND semantics (every whitespace token must hit somewhere), scored as
 /// the mean of per-token best-field scores so longer queries aren't inflated.
-pub fn score_piece(query: &str, piece: &Piece) -> Option<LexScore> {
+pub fn score_snippet(query: &str, snippet: &Snippet) -> Option<LexScore> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
         return None;
     }
-    let title = piece.title.to_lowercase();
-    let keywords: Vec<String> = piece
+    let title = snippet.title.to_lowercase();
+    let keywords: Vec<String> = snippet
         .keywords
         .iter()
-        .chain(piece.tags.iter())
+        .chain(snippet.tags.iter())
         .map(|k| k.to_lowercase())
         .collect();
-    let body = piece.body.to_lowercase();
+    let body = snippet.body.to_lowercase();
 
     let mut total = 0.0;
     for token in q.split_whitespace() {
@@ -119,8 +119,8 @@ mod tests {
     use super::*;
     use crate::prompts::store::Scope;
 
-    fn piece(title: &str, keywords: &[&str], body: &str) -> Piece {
-        Piece {
+    fn snippet(title: &str, keywords: &[&str], body: &str) -> Snippet {
+        Snippet {
             id: "t".into(),
             title: title.into(),
             body: body.into(),
@@ -139,58 +139,58 @@ mod tests {
 
     #[test]
     fn title_match_outranks_body_match() {
-        let in_title = piece("review checklist", &[], "unrelated");
-        let in_body = piece("unrelated", &[], "review checklist");
-        let t = score_piece("review", &in_title).unwrap();
-        let b = score_piece("review", &in_body).unwrap();
+        let in_title = snippet("review checklist", &[], "unrelated");
+        let in_body = snippet("unrelated", &[], "review checklist");
+        let t = score_snippet("review", &in_title).unwrap();
+        let b = score_snippet("review", &in_body).unwrap();
         assert!(t.score > b.score, "title weight must dominate: {} vs {}", t.score, b.score);
     }
 
     #[test]
     fn keyword_match_outranks_body_match() {
-        let in_kw = piece("unrelated", &["review"], "nothing");
-        let in_body = piece("unrelated", &[], "review here");
-        assert!(score_piece("review", &in_kw).unwrap().score > score_piece("review", &in_body).unwrap().score);
+        let in_kw = snippet("unrelated", &["review"], "nothing");
+        let in_body = snippet("unrelated", &[], "review here");
+        assert!(score_snippet("review", &in_kw).unwrap().score > score_snippet("review", &in_body).unwrap().score);
     }
 
     #[test]
     fn exact_title_and_keyword_hits_are_flagged() {
-        let p = piece("senior-reviewer", &["role"], "body");
-        assert!(score_piece("senior-reviewer", &p).unwrap().exact);
-        assert!(score_piece("SENIOR-REVIEWER", &p).unwrap().exact, "case-insensitive");
-        assert!(score_piece("role", &p).unwrap().exact, "keyword equality is exact too");
-        assert!(!score_piece("senior", &p).unwrap().exact, "prefix is a match, not an exact hit");
+        let p = snippet("senior-reviewer", &["role"], "body");
+        assert!(score_snippet("senior-reviewer", &p).unwrap().exact);
+        assert!(score_snippet("SENIOR-REVIEWER", &p).unwrap().exact, "case-insensitive");
+        assert!(score_snippet("role", &p).unwrap().exact, "keyword equality is exact too");
+        assert!(!score_snippet("senior", &p).unwrap().exact, "prefix is a match, not an exact hit");
     }
 
     #[test]
     fn subsequence_finds_but_ranks_below_substring() {
-        let p = piece("senior-reviewer", &[], "");
-        let scattered = score_piece("snrev", &p).unwrap();
-        let substring = score_piece("senior", &p).unwrap();
+        let p = snippet("senior-reviewer", &[], "");
+        let scattered = score_snippet("snrev", &p).unwrap();
+        let substring = score_snippet("senior", &p).unwrap();
         assert!(scattered.score > 0.0, "subsequence must still match");
         assert!(substring.score > scattered.score);
     }
 
     #[test]
     fn and_semantics_all_tokens_must_match() {
-        let p = piece("senior reviewer", &[], "checks the PR");
-        assert!(score_piece("senior pr", &p).is_some(), "tokens may hit different fields");
-        assert!(score_piece("senior zebra", &p).is_none(), "one dead token kills the match");
+        let p = snippet("senior reviewer", &[], "checks the PR");
+        assert!(score_snippet("senior pr", &p).is_some(), "tokens may hit different fields");
+        assert!(score_snippet("senior zebra", &p).is_none(), "one dead token kills the match");
     }
 
     #[test]
     fn empty_query_matches_nothing() {
-        let p = piece("anything", &[], "b");
-        assert!(score_piece("", &p).is_none());
-        assert!(score_piece("   ", &p).is_none());
+        let p = snippet("anything", &[], "b");
+        assert!(score_snippet("", &p).is_none());
+        assert!(score_snippet("   ", &p).is_none());
     }
 
     #[test]
     fn body_requires_substring_not_subsequence() {
-        let p = piece("x", &[], "the quick brown fox jumps");
-        assert!(score_piece("quick", &p).is_some());
+        let p = snippet("x", &[], "the quick brown fox jumps");
+        assert!(score_snippet("quick", &p).is_some());
         assert!(
-            score_piece("tqbfj", &p).is_none(),
+            score_snippet("tqbfj", &p).is_none(),
             "scatter-matching prose would make body weight pure noise"
         );
     }

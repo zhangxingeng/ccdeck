@@ -5,13 +5,13 @@
    * within the list once it has focus (the BrowseView keyboard-nav idiom,
    * kept minimal — the panel is a suggestion strip, not a browser).
    */
-  import type { Piece } from '$lib/prompts/types';
+  import type { Snippet } from '$lib/prompts/types';
   import { prompts } from '$lib/prompts.svelte';
 
   let {
     onInsert,
   }: {
-    onInsert: (piece: Piece) => void;
+    onInsert: (snippet: Snippet) => void;
   } = $props();
 
   let listEl: HTMLDivElement | undefined = $state(undefined);
@@ -33,36 +33,36 @@
   }
 </script>
 
-<div class="match-panel" bind:this={listEl} onkeydown={handleKeydown} role="listbox" tabindex="-1" aria-label="Matching pieces">
+<div class="match-panel" bind:this={listEl} onkeydown={handleKeydown} role="listbox" tabindex="-1" aria-label="Matching snippets">
   {#if prompts.hits.length}
-    {#each prompts.hits as hit (hit.piece.id)}
+    {#each prompts.hits as hit (hit.snippet.id)}
       <button
         type="button"
         class="match-hit"
         role="option"
         aria-selected="false"
-        onclick={() => onInsert(hit.piece)}
+        onclick={() => onInsert(hit.snippet)}
         title="Insert at cursor"
       >
         <span class="match-hit__head">
-          <span class="match-hit__title">{hit.piece.title}</span>
-          <span class="match-hit__scope">{hit.piece.scope.kind === 'global' ? 'global' : 'project'}</span>
-          {#if hit.piece.placeholders.length}
+          <span class="match-hit__title">{hit.snippet.title}</span>
+          <span class="match-hit__scope">{hit.snippet.scope.kind === 'global' ? 'global' : 'project'}</span>
+          {#if hit.snippet.placeholders.length}
             <span class="match-hit__ph" title="Has variables — fill them in the list under the compose box">
               {'{'}…{'}'}
             </span>
           {/if}
         </span>
-        <span class="match-hit__snippet">{snippet(hit.piece.body)}</span>
+        <span class="match-hit__snippet">{snippet(hit.snippet.body)}</span>
       </button>
     {/each}
   {:else if prompts.matchQuery.trim()}
     <div class="match-panel__empty">
-      {prompts.matching ? 'Matching…' : 'No matching pieces.'}
+      {prompts.matching ? 'Matching…' : 'No matching snippets.'}
     </div>
   {:else}
     <div class="match-panel__empty">
-      Start typing in the compose box — pieces whose title, keywords, or body match what you write
+      Start typing in the compose box — snippets whose title, keywords, or body match what you write
       show up here. Click one to drop it in at the cursor.
     </div>
   {/if}
@@ -89,8 +89,8 @@
   }
   .match-hit:hover,
   .match-hit:focus-visible {
-    border-color: color-mix(in srgb, var(--accent-piece) 55%, var(--border));
-    background: color-mix(in srgb, var(--accent-piece) 7%, var(--bg-card));
+    border-color: color-mix(in srgb, var(--accent-snippet) 55%, var(--border));
+    background: color-mix(in srgb, var(--accent-snippet) 7%, var(--bg-card));
     outline: none;
   }
   .match-hit__head {
