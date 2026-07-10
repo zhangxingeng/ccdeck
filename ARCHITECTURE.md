@@ -120,3 +120,26 @@ decodeProject(raw: string): string           // encoded dir name -> readable
 Internal-echo prefixes to filter from user text / titles:
 `<command-name>` `<local-command-stdout>` `<command-message>` `<command-args>`
 `<local-command-caveat>` `<system-reminder>` `<teammate-message` `<task-notification>`
+
+## Prompt Library (issue #24)
+
+Full engineering contract: [`project_docs/prompts-design.md`](project_docs/prompts-design.md)
+(storage layout, piece schema, match engine, compose-surface behavior). Summary of the command
+surface (same conventions as above):
+
+```
+list_pieces() -> Piece[]                 // one JSON file per piece at ~/.ccdeck/prompts/
+save_piece(piece) -> Piece               // create/update; append-only body versioning
+delete_piece(id) -> null
+piece_load_errors() -> {file,error}[]    // broken hand-edited files, surfaced not hidden
+match_pieces(query, project, limit) -> MatchHit[]   // lexical always; +semantic when opted in
+embed_status() -> EmbedStatus            // incl. model+runtime download sizes (decimal MB)
+embed_download(channel) -> null          // streams {stage, downloaded_bytes, total_bytes}
+set_embed_enabled(bool) -> null
+```
+
+**Data root `~/.ccdeck/`** (env `CCDECK_DATA_DIR` overrides; `src-tauri/src/datadir.rs`): pieces,
+`backups/` (session-edit backups), `index/` (search cache), `models/` + `cache/` (opt-in
+embeddings). On startup `migrate_legacy_state()` moves the pre-0.12 artifacts out of `~/.claude`
+(`.ccstudio-backups`, `.ccstudio-config.json`, `.ccstudio-index`) — invariant since: nothing
+ccdeck-owned lives under `~/.claude`.

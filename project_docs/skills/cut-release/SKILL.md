@@ -12,6 +12,10 @@ creates the GitHub Release. There is no release wrapper script — the steps bel
 ## Steps
 
 1. **Green tree first.** `pnpm check && pnpm run test:smoke && cargo test --lib --manifest-path src-tauri/Cargo.toml` — never tag a red tree; the tag is what users' updaters see.
+   Also run `cargo test --lib --manifest-path src-tauri/Cargo.toml -- --ignored` once (network
+   e2e, ~20s): it live-verifies the pinned embedding-artifact URLs + sha256s in
+   `src-tauri/src/prompts/embed.rs` — the one contract no offline test can check, and a stale
+   pin ships a broken opt-in download.
 2. **Bump the version in all THREE files** (they must agree — Tauri reads its own two, npm reads the third):
    - `package.json`
    - `src-tauri/tauri.conf.json`

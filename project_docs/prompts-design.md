@@ -1,6 +1,7 @@
 # Prompt Library — Engineering Contract
 
-Status: **CONTRACT — being built** (Core scope = design milestones M1+M2+M3). The product design
+Status: **CONTRACT — Core built 2026-07-09** (design milestones M1+M2+M3, issue #24; on branch
+`prompt-library` pending the founder's hands-on feel-check and merge). The product design
 and its vision live in [issue #7's pinned design comment](https://github.com/zhangxingeng/ccdeck/issues/7)
 — vocabulary, happy-path narrative, F1–F8 specs, settled decisions. This doc is the *engineering*
 contract that design maps onto: storage, schema, the Rust↔JS command surface, the match-engine
