@@ -635,6 +635,7 @@ let devEmbed: EmbedStatus = {
   state: 'not_downloaded',
   model_id: 'bge-small-en-v1.5',
   model_size_mb: 85,
+  runtime_size_mb: 30,
 };
 
 async function devEmbedDownload(onProgress: (p: EmbedProgress) => void): Promise<void> {
@@ -644,7 +645,7 @@ async function devEmbedDownload(onProgress: (p: EmbedProgress) => void): Promise
   // this promise resolving (callers re-fetch embed_status), never by a
   // channel event.
   const stages: { stage: EmbedProgress['stage']; totalMb: number }[] = [
-    { stage: 'runtime', totalMb: 30 },
+    { stage: 'runtime', totalMb: devEmbed.runtime_size_mb },
     { stage: 'model', totalMb: devEmbed.model_size_mb },
   ];
   for (const { stage, totalMb } of stages) {

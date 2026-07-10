@@ -74,6 +74,14 @@
     };
   }
 
+  /** Blank-slate creation path: on an empty library the only other entry
+   *  ("Save selection as piece") is disabled until text is selected, leaving
+   *  a fresh user with no call-to-action. Same F4 save path, empty body, no
+   *  selection to relink (the zero-length range is a no-op link). */
+  function newPiece(): void {
+    modalContext = { kind: 'new', selStart: 0, selEnd: 0, selectionText: '' };
+  }
+
   // ── Copy Prompt (F8) ───────────────────────────────────────────────────────
   async function copyPrompt(): Promise<void> {
     const ok = await copyToClipboard(flatten(prompts.doc));
@@ -162,6 +170,17 @@
   <div class="prompts-view__cols">
     {#if !panelCollapsed}
       <aside class="prompts-view__panel">
+        <div class="prompts-view__panel-head">
+          <span class="prompts-view__panel-title">Library</span>
+          <button
+            type="button"
+            class="btn btn--ghost btn--sm"
+            onclick={newPiece}
+            title="Create a piece from scratch (template mode)"
+          >
+            + New piece
+          </button>
+        </div>
         <MatchPanel onInsert={handleInsert} />
         <EmbeddingsPanel />
       </aside>
@@ -262,6 +281,18 @@
     flex: 1;
     align-items: stretch;
     min-height: 0;
+  }
+  .prompts-view__panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.4rem;
+  }
+  .prompts-view__panel-title {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-faint);
   }
   .prompts-view__panel {
     width: 15.5rem;

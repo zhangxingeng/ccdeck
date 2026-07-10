@@ -19,6 +19,9 @@
   const stageLabel = $derived(
     prompts.embedProgress?.stage === 'model' ? 'model (2/2)' : 'ONNX runtime (1/2)'
   );
+  /** The decline-informed gate discloses the TOTAL download (model + ONNX
+   *  runtime) — the model number alone understates it, badly on Windows. */
+  const totalMb = $derived((embed?.model_size_mb ?? 0) + (embed?.runtime_size_mb ?? 0));
 </script>
 
 <details class="embed-panel">
@@ -28,12 +31,13 @@
   {:else}
     {#if embed.state === 'not_downloaded'}
       <p class="embed-panel__note">
-        Optional: a small local embedding model ({embed.model_id}, ~{embed.model_size_mb} MB on
-        disk) improves matching by meaning, not just spelling. CPU-only inference, fully offline —
-        nothing ever leaves this machine. Lexical matching keeps working without it.
+        Optional: a small local embedding model ({embed.model_id}) improves matching by meaning,
+        not just spelling. ~{totalMb} MB on disk total ({embed.model_size_mb} MB model +
+        {embed.runtime_size_mb} MB runtime), CPU-only inference, fully offline — nothing ever
+        leaves this machine. Lexical matching keeps working without it.
       </p>
       <button type="button" class="btn btn--sm" onclick={startEmbedDownload}>
-        Download model (~{embed.model_size_mb} MB)
+        Download (~{totalMb} MB)
       </button>
     {:else if embed.state === 'downloading'}
       <p class="embed-panel__note">Downloading {stageLabel}…</p>
@@ -54,7 +58,10 @@
       <p class="embed-panel__note embed-panel__note--err">
         Engine error: {embed.error ?? 'unknown'}
       </p>
-      <button type="button" class="btn btn--sm" onclick={startEmbedDownload}>Retry download</button>
+      <!-- "Retry", not "Retry download": the error may be transient inference
+           with everything already on disk — the recovery path is the same
+           either way, so the label must not promise a re-download. -->
+      <button type="button" class="btn btn--sm" onclick={startEmbedDownload}>Retry</button>
     {/if}
   {/if}
   {#if prompts.embedError}

@@ -73,6 +73,10 @@ export interface EmbedStatus {
   state: 'off' | 'not_downloaded' | 'downloading' | 'ready' | 'error';
   model_id: string;
   model_size_mb: number;
+  /** The ONNX runtime dylib downloaded alongside the model (platform-sized —
+   *  ~64 MB on Windows). The decline-informed gate must disclose the TOTAL
+   *  (model + runtime); showing only the model understates the download. */
+  runtime_size_mb: number;
   error?: string;
 }
 
