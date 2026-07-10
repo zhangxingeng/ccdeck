@@ -1,44 +1,84 @@
 # Prompt Library — Engineering Contract
 
-Status: **CONTRACT — Core built 2026-07-09** (design milestones M1+M2+M3, issue #24; on branch
-`prompt-library` pending the founder's hands-on feel-check and merge). The product design
-and its vision live in [issue #7's pinned design comment](https://github.com/zhangxingeng/ccdeck/issues/7)
-— vocabulary, happy-path narrative, F1–F8 specs, settled decisions. This doc is the *engineering*
-contract that design maps onto: storage, schema, the Rust↔JS command surface, the match-engine
-architecture, and the compose-surface behavior model. It ages with the code, like
-[search-design.md](search-design.md) does for chat search.
+Status: **CONTRACT — Revision round in build 2026-07-10** (founder's post-feel-check design
+revision on top of Core M1+M2+M3, issue #24; on branch `prompt-library`, unmerged, no shipped
+release contains this feature). The product design and its vision live in
+[issue #7's pinned design comment](https://github.com/zhangxingeng/ccdeck/issues/7). This doc is
+the *engineering* contract that design maps onto: storage, schema, the Rust↔JS command surface,
+the variable grammar, the match-engine architecture, and the compose-surface behavior model. It
+ages with the code, like [search-design.md](search-design.md) does for chat search.
 
-Decisions here were aligned with the founder 2026-07-09: **hybrid matching, lexical by default,
-embeddings opt-in behind a user-clicked model download; JSON one-piece-per-file; storage in
-ccdeck's own directory, not `~/.claude`** (and existing ccdeck data contamination in `~/.claude`
-migrates out — see § Backups migration).
+Founder directives folded in 2026-07-10: **projects are first-class (creatable, colored,
+pinnable as tabs); variables are single-brace f-string style with defaults; the compose surface
+is the only typing surface (situational affordances, no persistent buttons); keywords/tags are
+demoted to metadata; embeddings collapse into a config popover; the store survives hand-edit
+JSON corruption. Apple vibe, not geek vibe: simple per page, split meaningfully.**
 
 ## Storage layout — `~/.ccdeck/`
 
-ccdeck gets its own data root. Rationale: `~/.claude` belongs to Claude Code; parking our data
-there bloats a directory users audit and other tools parse (we already did it once with
-`.ccstudio-backups` — that moves out too).
+ccdeck's own data root (env `CCDECK_DATA_DIR` overrides for tests, else `<home>/.ccdeck` via
+`dirs`). Rationale and the `~/.claude` de-contamination invariant are unchanged (§ Legacy-state
+migration).
 
 ```
 ~/.ccdeck/
   prompts/            # the piece library — one JSON file per piece, hand-editable, git-able
     <uuid>.json
-  backups/            # session edit backups (migrated from ~/.claude/.ccstudio-backups)
-    <sanitized-session-id>/v001-<unixsecs>.jsonl
-  models/             # opt-in embedding model files (fastembed cache dir)
+  projects.json       # the project roster — one small file (records are tiny and few;
+                      # one-file-per-record earns nothing here, unlike pieces)
+  backups/            # session edit backups
+  models/             # opt-in embedding model files
   cache/
     embeddings.sqlite # piece-embedding cache (piece_id, model_id, body_hash, vector blob)
 ```
 
-- Root resolution: env `CCDECK_DATA_DIR` if set (tests need this — same pattern as
-  `CLAUDE_CONFIG_DIR`), else `<home>/.ccdeck` via the `dirs` crate.
-- `prompts/` holds **only** hand-editable piece JSON — no caches, no binaries — so a user can
-  `git init` it or feed any file straight to an LLM. Derived data (embeddings) lives in `cache/`
-  and is rebuildable from `prompts/` at any time.
-- One piece per file: no file ever grows past what an LLM can ingest whole, and hand edits/git
-  diffs stay per-piece. The `id` field is canonical; the loader reads every `prompts/*.json` and
-  trusts content over filename (a hand-copied file with a stale name still loads); saves always
-  write to `<id>.json`.
+`prompts/` holds **only** hand-editable piece JSON. One piece per file (LLM-ingestable whole,
+per-piece diffs). `id` is canonical; the loader trusts content over filename; saves write
+`<id>.json`.
+
+## Project model (new this round)
+
+A project is a named, colored grouping for pieces — the unit the tabs, the compose-box tint,
+and piece-span hues all key off.
+
+```json
+{
+  "projects": [
+    {
+      "id": "uuid-v4",
+      "name": "ccdeck",
+      "color": "blue",
+      "pinned": true,
+      "path": null,
+      "created_at": 1770000000
+    }
+  ]
+}
+```
+
+- **`color` is a palette key, never a hex value** — one of the fixed preset keys
+  `red | orange | yellow | green | teal | blue | purple | pink | graphite`. Each key maps to a
+  `--project-<key>` CSS token defined in `app.css` for light AND dark (color-token protocol:
+  stored data carries intent, the theme file owns the hue — dark-mode contrast stays retunable
+  in one file, and a user can never pick an unreadable arbitrary hex).
+- `pinned: true` renders the project as a tab atop the Prompts view. Global is always the first
+  tab (white/neutral — it is not a project record).
+- `path` is optional metadata (absolute project dir) for future auto-scoping; no behavior hangs
+  on it in this round.
+- **Delete semantics: deleting a project rescopes its pieces to global.** Nothing a user wrote
+  ever vanishes as a side effect; the pieces surface again under Global.
+
+Piece `scope` (v2) references projects by id:
+
+```json
+"scope": { "kind": "global" }
+"scope": { "kind": "project", "project_id": "uuid-v4" }
+```
+
+Legacy/unknown scope shapes (the pre-revision path-keyed form, or a `project_id` that matches no
+roster entry) load as **global** plus an entry in `piece_load_errors` — visible, non-fatal, file
+untouched. (Migration reality: the feature never shipped in a release; only founder feel-check
+data exists. No dual-schema machinery — the honest notice is the whole path.)
 
 ## Piece schema (canonical)
 
@@ -46,152 +86,182 @@ there bloats a directory users audit and other tools parse (we already did it on
 {
   "id": "3f2a…-uuid-v4",
   "title": "senior-reviewer",
-  "body": "You are a senior reviewer. Review the PR for {{ticket}}…",
+  "body": "You are a senior reviewer. Review the PR for {ticket:ABC-123}…",
   "keywords": ["review", "role"],
   "tags": [],
   "category": null,
   "scope": { "kind": "global" },
-  "placeholders": [{ "name": "ticket" }],
+  "placeholders": [{ "name": "ticket", "default": "ABC-123" }],
   "created_at": 1770000000,
   "updated_at": 1770000000,
   "versions": [ { "body": "…prior body…", "saved_at": 1769990000 } ]
 }
 ```
 
-- `scope` is `{"kind":"global"}` or `{"kind":"project","project":"<absolute project path>"}` —
-  the decoded cwd the app's project picker shows, readable in hand-edited JSON.
-- `versions` is newest-first, **append-only on body change**: saving a piece whose body differs
-  from the stored body pushes the old body (with its timestamp) onto `versions`. Product promise
-  (issue #7 F7): a save never destroys the previous body. Metadata-only saves don't version.
-- `placeholders` is derived from `{{token}}` occurrences in `body` at save time (single source of
-  truth is the body; the array exists so consumers don't re-parse). Unknown extra fields in
-  hand-edited files are preserved on round-trip (serde `flatten`/passthrough) — hand-editability
-  means we never silently drop a user's field.
-- `tags`/`category` are stored but have **no management UI in Core** — that's the M4 follow-up
-  issue. Fuzzy match already searches them so hand-tagged pieces benefit today.
+- `versions` is newest-first, **append-only on body change** — a save never destroys the
+  previous body. Metadata-only saves don't version. (Unchanged from Core.)
+- `placeholders` is derived from the variable grammar (below) at save time; each entry carries
+  `name` and optional `default`. The body is the single source of truth.
+- Unknown extra fields in hand-edited files are preserved on round-trip (serde flatten).
+- `keywords`/`tags`/`category` are **metadata** — no top-level UI prominence; they live in the
+  piece modal's Metadata tab. Fuzzy match still searches them.
+- `list_pieces` may additionally mark a piece with transient `"recovered": true` (never written
+  to disk) — see § Store robustness.
+
+## Variable grammar (shared spec — Rust and TS MUST implement identically)
+
+Single-brace, python-f-string flavored. This section is the seam contract: last round's audit
+caught the two sides diverging on exactly this class of rule, so both implementations test
+against the shared vectors below.
+
+Scan left-to-right:
+
+1. `{{` emits literal `{`; `}}` emits literal `}` (escapes consume first).
+2. `{name}` or `{name:default}` is a **variable** when `name` matches `[A-Za-z0-9_-]+`
+   (case-sensitive). The first `:` separates name from default; the default is everything up to
+   the closing `}` and may not contain braces. Equivalent token regex after escape handling:
+   `\{([A-Za-z0-9_-]+)(?::([^{}]*))?\}`.
+3. Any other braced run (invalid name, spaces, quotes, nesting) is left **verbatim** — JSON
+   examples inside prompt bodies never parse as variables.
+4. The same name is the **same variable everywhere** in a composed document — one fill value
+   serves every occurrence across every inserted piece and typed text (this is the point:
+   standardized names like `{task}` fill once).
+
+Shared test vectors (both sides assert all of these):
+
+| input | result |
+|-|-|
+| `{task}` | variable `task`, no default |
+| `{task:write tests}` | variable `task`, default `write tests` |
+| `{task:}` | variable `task`, default `""` (fills as empty when unfilled) |
+| `{x:a:b}` | variable `x`, default `a:b` (first colon splits) |
+| `{{task}}` | literal `{task}` — no variable |
+| `{"a": 1}` | literal — invalid name |
+| `{my var}` | literal — space |
+| `{x-1_Y}` | variable `x-1_Y` |
+| `{:x}` | literal — empty name |
+| `{{{task}}}` | literal `{` + variable `task` + literal `}` |
+
+## Copy output — the "as variable" toggle
+
+A compose-box toggle, default **ON**, persisted in app config (`prompts_as_variable`). Copy
+always resolves escapes (`{{`→`{`).
+
+- **ON** (dedup mode — a long value is stated once, never repeated inline): every variable
+  occurrence becomes `<prompt_var name="x"/>`, and a block is appended after the body listing
+  each distinct variable in first-appearance order:
+
+  ```
+  Review the PR for <prompt_var name="ticket"/> and summarize.
+
+  <prompt_vars>
+  <prompt_var name="ticket">ABC-123</prompt_var>
+  </prompt_vars>
+  ```
+
+  Value resolution: user-filled value, else default, else empty element (an empty
+  `<prompt_var name="x"></prompt_var>` is an honest "fill me" signal to the reading LLM).
+  The wrapper form `<prompt_var name="x">` is used (not `<x>`) because variable names may start
+  with digits or hyphens, which are invalid XML element names.
+- **OFF** (substitute in place): each occurrence is replaced by user value, else default, else
+  the literal `{x}` stays — visible, so an unfilled variable is never silently blanked.
 
 ## Rust ↔ JS command contract
 
-All async, `Result<T, String>` errors, snake_case, registered in `invoke_handler` — the existing
-convention. New module: `src-tauri/src/prompts/`.
+All async, `Result<T, String>`, snake_case, registered in `invoke_handler`. Module:
+`src-tauri/src/prompts/`.
 
 ```
-list_pieces() -> Piece[]
-    // Every piece in the store (corpus is small; frontend filters by scope/project).
-save_piece(piece: PieceInput) -> Piece
-    // Create (no id) or update (id present). Handles versioning per the schema
-    // rules above. Returns the stored piece.
+list_pieces() -> Piece[]                       // may carry transient recovered: true
+save_piece(piece: PieceInput) -> Piece         // create (no id) / update; versioning per schema
 delete_piece(id: string) -> null
 piece_load_errors() -> { file: string, error: string }[]
-    // Piece files the loader had to skip (broken JSON from a hand-edit,
-    // shadowed duplicate id). Call alongside list_pieces and show a warning —
-    // a skipped file must never read as a silently vanished piece (the file
-    // itself always stays intact on disk for the user to fix). Runs a fresh
-    // scan of the store, so it reflects current on-disk state.
-match_pieces(query: string, project: string | null, limit: number) -> MatchHit[]
-    // MatchHit { id: string, score: number, source: "lexical" | "semantic" | "hybrid" }
-    // Pool: global pieces + pieces scoped to `project` (null = global only).
-    // Engine per § Match engine; callers never know which engine ran.
-embed_status() -> EmbedStatus
-    // { state: "off" | "not_downloaded" | "downloading" | "ready" | "error",
-    //   model_id: string, model_size_mb: number, runtime_size_mb: number,
-    //   error?: string }
-    // runtime_size_mb: the ONNX Runtime download (see § Match engine, dynamic
-    // loading) — the UI's requirements note quotes model + runtime, the TOTAL
-    // opt-in download. Platforms with no pinned runtime build (macOS Intel:
-    // Microsoft ships no 1.24.x artifact) report state "error" with an
-    // explanatory message; matching stays lexical-only there.
+    // Skipped/degraded piece files: broken JSON that repair could not recover, shadowed
+    // duplicate ids, legacy/unknown scope fallbacks. Fresh scan; files stay intact on disk.
+
+list_projects() -> Project[]
+save_project(project: ProjectInput) -> Project // create (no id) / update (rename, color, pin)
+delete_project(id: string) -> null             // rescopes the project's pieces to global
+
+match_pieces(query: string, project_id: string | null, limit: number) -> MatchHit[]
+    // MatchHit { id, score, source: "lexical" | "semantic" | "hybrid" }
+    // Pool: global pieces + pieces scoped to project_id (null = global only).
+
+embed_status() -> EmbedStatus                  // unchanged from Core (state, model_id,
+                                               // model_size_mb, runtime_size_mb, error?)
 embed_download(channel) -> null
-    // Streams progress events over a tauri Channel (same pattern as `search`):
-    // { stage: "runtime" | "model", downloaded_bytes, total_bytes } — one
-    // stage per artifact (the ONNX Runtime archive, then the model files
-    // under one fixed total). Completion/error are NOT channel events: the
-    // command's Result is the terminal signal, and the frontend re-fetches
-    // embed_status afterward (which reflects the true post-download state,
-    // including a failed download's error message).
+    // Progress events: { stage: "runtime" | "model" | "index", done: number, total: number }
+    // — bytes for the two download stages, piece counts for "index" (embedding the existing
+    // library, which now runs as part of the same one-click flow). Terminal signal is the
+    // command Result + an embed_status re-fetch, as in Core.
 set_embed_enabled(enabled: bool) -> null
-    // Persisted app-config toggle (appconfig.rs); "ready" + enabled = hybrid
-    // on. Toggling is also the retry affordance: it clears sticky
-    // error/degradation state, and off unloads the model from RAM.
 ```
 
 ## Match engine — hybrid, lexical default, embeddings opt-in
 
-- **Lexical (always on, zero deps):** fzf-style fuzzy subsequence scoring with field weighting
-  (title > keywords/tags > body). NOT tantivy/BM25 — BM25's term-frequency statistics earn their
-  keep on large noisy corpora (chat search); over a few hundred curated snippets, subsequence
-  match + field weights is both better-fitting and dependency-free.
-- **Semantic (opt-in):** fastembed-rs (ONNX, CPU) with a small, mature retrieval model (builder
-  picks the concrete model — constraints: fastembed-supported, ≤~130MB download, strong
-  MTEB-retrieval-per-MB; e.g. bge-small-en-v1.5 class). Built as: the fastembed-blessed
-  quantized `Qdrant/bge-small-en-v1.5-onnx-Q` (~67MB, 384 dims, Cls pooling; all size figures
-  are decimal MB), pinned to an
-  exact HF revision. Model downloads to `~/.ccdeck/models/`
-  **only when the user clicks Download** in the Prompts view — never at install, never silently.
-  The UI states the requirements before download (~size on disk, CPU-only inference, indicative
-  RAM) so weak-machine users can decline informed.
-- **ONNX Runtime is dynamically loaded, not statically linked** (Gate-1 ruling): fastembed's
-  default would bake a 15–30MB runtime into every shipped binary for a feature most users never
-  enable. Instead the build uses ort's `load-dynamic`, and the single Download click fetches
-  BOTH the runtime and the model. Security posture (downloading native code is an RCE vector
-  if done sloppily): the runtime is the official Microsoft release archive at a pinned exact
-  version, the model files a pinned HF revision, and every artifact is verified against a
-  hardcoded sha256 BEFORE any use — a mismatch deletes the file and reports error state, never
-  loads. A missing/failed runtime degrades to lexical-only; the app never blocks on it.
-- **No vector database.** Piece embeddings are cached in `cache/embeddings.sqlite` keyed by
-  (piece_id, model_id, body_hash) and KNN is a **linear cosine scan in memory** — microseconds
-  at ≤10k pieces. sqlite-vec (named in the original design comment) is deliberately dropped
-  until scale demands it; the design comment's own engine reasoning survives, the dependency
-  doesn't.
-- **Hybrid fusion:** when embeddings are ready+enabled, `match_pieces` runs both engines and
-  fuses (reciprocal-rank or normalized-score fusion — builder's call, contract only requires:
-  an exact title/keyword hit must never be buried by a middling semantic score). Query embedding
-  is computed per debounced keystroke — acceptable because the corpus is small and the model is
-  CPU-cheap; if inference latency exceeds the UI debounce budget, degrade to lexical for that
-  query rather than blocking the panel.
+Unchanged from Core (fzf-style weighted lexical always on; fastembed-rs
+`Qdrant/bge-small-en-v1.5-onnx-Q` opt-in; ort `load-dynamic` with pinned sha256-verified
+artifacts; linear cosine KNN over `cache/embeddings.sqlite`; fusion where an exact title hit is
+never buried). The only surface change: the download flow now ends with the **index** stage
+(embed every existing piece) so the popover's promise — "Download & index" — is literally what
+the one click does.
 
-## Compose surface — provenance model (behavioral contract)
+## Compose surface — behavioral contract (revised)
 
-The compose box state machine (issue #7 F1) that the frontend must honor, however it is
-implemented (contenteditable, span overlay — builder's call):
+The compose box holds **raw literal text** — including `{var}` tokens, which are substituted
+only at copy time. Spans track provenance as before: **typed**, **linked** (from a piece,
+unchanged), **linked-modified** (edited inline; never touches the stored piece).
 
-- Span states: **typed** (plain), **linked** (from a piece, unchanged — tinted), **linked-modified**
-  (linked, then edited inline — tinted + marker). Editing a linked span in place transitions it to
-  linked-modified and never touches the stored piece.
-- Insertion lands at the cursor as a linked span; a piece with placeholders shows the fill-in
-  popover first, and the filled span remembers its template + fill values.
-- **Copy prompt** flattens the box to plain text: provenance stripped, placeholder values
-  substituted. What you see (text content) is exactly what you get.
-- Provenance colors come from CSS variables in `app.css` following the existing `--accent-*`
-  token pattern (with `color-mix` tints), themed for light + dark.
+- **Tabs**: Global plus every pinned project, atop the view. The active tab is the scope — it
+  sets the match pool (`match_pieces` project_id), the save target for new pieces, and the
+  visual tint. Unpinned projects are reachable through the project manager popover.
+- **Situational affordances — no persistent buttons**:
+  - *Copy Prompt* appears bottom-right only while the box has content.
+  - *Save as piece* floats next to an active text selection; it opens the piece modal prefilled
+    with the selection, scoped to the active tab. (This is also how new pieces are born — there
+    is no "+ New piece" button; everything is typed in the compose box first.)
+  - The *variable fill list* auto-appears beneath the box whenever parsing finds variables: one
+    row per distinct name (first-appearance order) showing the name, its default as the input's
+    placeholder text, and a fill input. The fill-at-insert popover from Core is retired —
+    inserting a piece with variables just merges its names into this unified list.
+- **Color language** (all values are `app.css` tokens or `color-mix` over tokens — no hex in
+  components; light + dark both defined):
+  - Compose-box background: a *faint hint* of the active project's `--project-<key>` (via
+    `color-mix`, low single-digit percent); plain neutral/white on Global. The tint is contained
+    to the compose box, never the whole app.
+  - Piece spans: translucent fills — greyish for global pieces, a darker-hue translucent mix of
+    the piece's project color for project pieces.
+  - Text selection inside the box: `--highlight` (highlighter yellow — light but bright, defined
+    for both themes) via `::selection` scoped to the compose surface.
+  - The active project's color reaches components through one CSS custom property
+    (`--project-color`) set at the view wrapper from the palette token — components never branch
+    on color keys.
+- **Piece modal**: two tabs — **Content** (title, body, and a read-only variable preview:
+  parsed names + defaults) and **Metadata** (keywords, tags, category). Editing reached from the
+  match panel or a linked span, as in Core.
+- **Embeddings/config popover**: replaces the inline embeddings panel. One "Download & index"
+  action with the requirements note (sizes, CPU-only), then two progress bars — Download
+  (runtime + model stages aggregated) and Index (the "index" stage) — plus the enable toggle.
+
+## Store robustness — hand-edit corruption (new this round)
+
+- On JSON parse failure the loader attempts an **in-memory jsonrepair-style recovery** (vetted
+  mature crate if one exists — builder verifies — else a bounded port: unquoted keys, trailing
+  commas, comments, single quotes, truncation). A recovered piece loads flagged
+  `recovered: true` (transient) and the UI shows it needs attention.
+- **The user's file on disk is never rewritten by the loader.** The repaired form persists only
+  on the user's next explicit save of that piece — which appends a version like any body change.
+- Unrecoverable files stay in `piece_load_errors` exactly as in Core: visible, intact on disk.
 
 ## Legacy-state migration — de-contaminate `~/.claude`
 
-Shipped installs park two ccdeck-owned artifacts inside Claude Code's directory:
-session-edit backups at `~/.claude/.ccstudio-backups` and the app config at
-`~/.claude/.ccstudio-config.json`. Both move out (founder directive: existing contamination
-moves too, not just new writes) — backups to `~/.ccdeck/backups/`, config to
-`~/.ccdeck/config.json`.
+Unchanged from Core: `.ccstudio-backups` → `~/.ccdeck/backups`, `.ccstudio-config.json` →
+`~/.ccdeck/config.json`, `.ccstudio-index` → `~/.ccdeck/index`; non-fatal, collision rules as
+implemented; invariant: **nothing ccdeck-owned lives under `~/.claude`**.
 
-- On startup (in `run()`), if the legacy backups dir exists and `~/.ccdeck/backups` does not:
-  rename (same filesystem — it's the same home dir) and leave nothing behind. If both exist (a
-  half migration or downgrade-then-upgrade), merge legacy session dirs that don't collide,
-  prefer the new location on collision (the colliding legacy dir is left in place — deleting a
-  backup a user might still want is worse than leaving residue), and remove the legacy dir only
-  when emptied.
-- The config file migrates in the same pass: legacy-only → rename; both exist → the new
-  location wins (written by a newer install) and the superseded legacy file is removed, so the
-  invariant below reads literally true.
-- Migration failure is non-fatal: the app must still boot (backups and config are conveniences,
-  not core data); log and fall back to reading whichever location has the file. New writes
-  always target `~/.ccdeck/` — a failed migration never re-contaminates.
-- After this change **nothing ccdeck-owned lives under `~/.claude`** — invariant to keep for
-  every future feature.
+## Deliberately out of this round (filed, not dropped)
 
-## Deliberately out of Core (filed, not dropped)
-
-- **M4 Organization** (tag/category management UI, browse-by-tag panel) — follow-up issue.
-- **Presets, RAG auto-assembly, sharing/export** — issue #7's deferred list, unchanged.
-- **e2e test for the compose surface** — Core ships Rust unit tests (store round-trip with
-  hostile fixtures, versioning invariants, matcher ranking) + a `tests/prompts_smoke.mjs`;
-  a Playwright spec follows once the founder's hands-on pass settles the interaction details.
+- **M4 Organization** (browse-by-tag panel, bulk metadata) — issue #25.
+- **Presets, RAG auto-assembly, sharing/export** — issue #7's deferred list.
+- **Playwright e2e for the compose surface** — after this round's interactions settle.
+- **`path`-driven auto-scoping of projects** — the field exists, no behavior yet.
