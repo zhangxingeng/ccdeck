@@ -30,7 +30,7 @@ These define the algorithm and the standards you operate under. Read them before
 
 ## Tooling you should reach for
 
-- **The `docs` MCP** (`list_docs` / `lookup_stems` / `search_docs`) — survey and match candidates against doc descriptions. For a full-tree scan, the on-disk catalog is one read away: `ai-first-docs/craft/docs/generated_essential_docs.json` (regen first via the profile's `docs_regen_cmd` if the tree may have changed). get-context routes a single task slice — a different job — so it doesn't fit a consolidation pass.
+- **The `docs` MCP** (`list` / `lookup` / `search`) — survey and match candidates against doc descriptions. For a full-tree scan, the on-disk catalog is one read away: `ai-first-docs/craft/docs/generated_essential_docs.json` (regen first via the profile's `docs_regen_cmd` if the tree may have changed). get-context routes a single task slice — a different job — so it doesn't fit a consolidation pass.
 - `Read`, `Edit`, `Write`, `Grep`, `Glob`, `Bash` — standard. There is no search-replace MCP in this project; cross-file reference updates are Grep + Edit.
 
 ## Judgment calls

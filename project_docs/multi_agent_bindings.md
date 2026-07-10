@@ -12,7 +12,7 @@ investigate → implement+commit → update-issue pipeline; teammates never pull
 on their own.
 
 - **Issue-claim mechanism: N/A.** The claim requirement in
-  `issue_driven_development_protocol.mdx` (§ Claiming) only bites when agents *self-select* work
+  `ai-first-docs/craft/workflow/issue_driven/issue_driven_development_protocol.mdx` (§ Claiming) only bites when agents *self-select* work
   from a shared backlog. ccdeck's concurrency is lead-assigned, not backlog-pulled — the lead hands
   each teammate its issue in the spawn brief, so there is no race to arbitrate and no claim
   primitive to bind.

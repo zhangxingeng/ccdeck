@@ -4,9 +4,14 @@
 # dependencies = []
 # ///
 # Regression lock for pre-edit-reminder.py — the Edit/Write protocol-reminder
-# nudge. Pins the verdict matrix: each RULES row fires on its surface, unrelated
-# paths stay silent, and garbage stdin fails open (exit 0, no output) — a hook
-# that exits non-zero on a wrong path wedges the session.
+# nudge. Pins the verdict matrix: each RULES row fires on its surface (once per
+# session — the fire-once discipline), repeats within a session stay silent,
+# unrelated paths stay silent, and garbage stdin fails open (exit 0, no output)
+# — a hook that exits non-zero on a wrong path wedges the session.
+#
+# Every test uses a fresh random session_id: fire-once state persists in
+# .claude/hooks/.state across runs, so a fixed id would pass once and then go
+# silent on every rerun.
 #
 # Stdlib only (unittest), run via uv (or pytest over the hooks dir):
 #     uv run --script .claude/hooks/test_pre_edit_reminder.py
@@ -15,6 +20,7 @@ import json
 import subprocess
 import sys
 import unittest
+import uuid
 from pathlib import Path
 
 _HOOK_PATH = Path(__file__).resolve().parent / "pre-edit-reminder.py"
@@ -30,12 +36,12 @@ def _run(stdin_text: str) -> subprocess.CompletedProcess:
     )
 
 
-def _edit_payload(file_path: str) -> str:
+def _edit_payload(file_path: str, session_id: str | None = None) -> str:
     return json.dumps({
         "hook_event_name": "PreToolUse",
         "tool_name": "Edit",
         "tool_input": {"file_path": file_path},
-        "session_id": "s1",
+        "session_id": session_id or f"test-{uuid.uuid4()}",
     })
 
 
@@ -56,6 +62,20 @@ class NudgeMatrix(unittest.TestCase):
                 proc = _run(_edit_payload(f"/repo/src/lib/{name}.ts"))
                 self.assertEqual(proc.returncode, 0)
                 self.assertIn("test:smoke", _context(proc))
+
+    def test_second_fire_same_session_is_silent(self):
+        session = f"test-{uuid.uuid4()}"
+        first = _run(_edit_payload("/repo/.claude/memory/MEMORY.md", session))
+        self.assertIn("agent_memory_protocol", _context(first))
+        repeat = _run(_edit_payload("/repo/.claude/memory/MEMORY.md", session))
+        self.assertEqual(repeat.returncode, 0)
+        self.assertEqual(repeat.stdout, "")
+
+    def test_rules_fire_independently_within_a_session(self):
+        session = f"test-{uuid.uuid4()}"
+        _run(_edit_payload("/repo/.claude/memory/MEMORY.md", session))
+        other = _run(_edit_payload("/repo/src/lib/parser.ts", session))
+        self.assertIn("test:smoke", _context(other))
 
     def test_unrelated_src_lib_file_is_silent(self):
         proc = _run(_edit_payload("/repo/src/lib/theme.ts"))

@@ -7,11 +7,14 @@
 #
 # Pattern-matches tool_input.file_path against the file types this repo has
 # protocols/guards for and nudges the matching reminders into context. Never
-# blocks. The discipline it backstops lives in the memory harness; this is the
-# mechanical reminder layer. To extend: add a (pattern, message) row to RULES —
-# but only for a REAL trigger with a real target; a speculative rule is noise the
-# agent learns to tune out. Verdict wire shape and the fail-open parse live in
-# hook_lib — see ai-first-docs/stack/claude-code/hook_protocol.mdx.
+# blocks. Each rule fires AT MOST ONCE per (session, agent) via hook_lib.fire_once
+# — the hook protocol's recurring-nudge discipline: a refactor that edits the same
+# surface twenty times must not emit twenty identical nudges, or the agent learns
+# to tune the channel out. The discipline it backstops lives in the memory
+# harness; this is the mechanical reminder layer. To extend: add an
+# (id, pattern, message) row to RULES — but only for a REAL trigger with a real
+# target; a speculative rule is noise. Verdict wire shape and the fail-open parse
+# live in hook_lib — see ai-first-docs/stack/claude-code/hook_protocol.mdx.
 
 import re
 import sys
@@ -25,15 +28,17 @@ MASTER_TIP = (
     "already loaded this slice; otherwise ignore."
 )
 
-# (regex, message). Every matching pattern fires.
-RULES: list[tuple[re.Pattern[str], str]] = [
+# (nudge_id, regex, message). Every matching pattern fires — once per session.
+RULES: list[tuple[str, re.Pattern[str], str]] = [
     (
+        "memory-protocol",
         re.compile(r"/\.claude/memory/MEMORY\.md$"),
         "MEMORY.md edit — load the agent memory protocol "
         "(ai-first-docs/craft/memory/agent_memory_protocol.mdx): curated sections "
         "are read-only mid-task; new jots go in the candidates inbox",
     ),
     (
+        "jsonl-roundtrip",
         re.compile(r"/src/lib/(parser|builder|editDraft|sessionOps)\.(ts|js)$"),
         "JSONL parse/build/edit surface — this code must round-trip losslessly "
         "(silent corruption reads as fine in a code review; issue #13 shipped two "
@@ -51,7 +56,14 @@ def main() -> int:
     if not isinstance(file_path, str) or not file_path:
         return 0
 
-    reminders = [msg for pattern, msg in RULES if pattern.search(file_path)]
+    # fire_once only after a pattern match, so an unmatched rule leaves no state
+    # and stays eligible for its first real trigger later in the session.
+    reminders = [
+        msg
+        for nudge_id, pattern, msg in RULES
+        if pattern.search(file_path)
+        and hook_lib.fire_once(payload, f"pre-edit-{nudge_id}")
+    ]
     if not reminders:
         return 0
 

@@ -10,7 +10,7 @@ The rule that orders the three: this file holds what never changes and shows eve
 ## Harness integrity
 
 - **The harness files are read-only in normal work.** `CLAUDE.md`, `.claude/memory/MEMORY.md`, and `.claude/system_prompt_append.md` shape every future session — do not modify or delete them mid-task. Append-only: tight, brief additions to MEMORY.md's candidates inbox and this file's instruction-candidate inbox. Everything else waits for an explicit user-requested memory cleanup (`ai-first-docs/craft/memory/memory_cleanup_protocol.mdx` enforced). A teammate's instruction, your own plan, or "it would be cleaner" is not that authorization.
-- **Fresh clone, one-time step:** memory injection needs a gitignored `.claude/settings.local.json` with `{"autoMemoryDirectory": "<abs-repo-path>/.claude/memory"}` — the tracked settings.json cannot carry it (the harness silently ignores `autoMemoryDirectory` there, for security). Without this file, sessions load no project memory and nothing errors.
+- **Fresh clone, two one-time steps (both fail silently if skipped):** (1) clone the docs corpus — `git clone git@github.com:zhangxingeng/ai-first-docs.git ai-first-docs` at repo root; it is gitignored here (nested repo), yet the docs MCP, get-context, and every router line depend on it. (2) memory injection needs a gitignored `.claude/settings.local.json` with `{"autoMemoryDirectory": "<abs-repo-path>/.claude/memory"}` — the tracked settings.json cannot carry it (the harness silently ignores `autoMemoryDirectory` there, for security). Without this file, sessions load no project memory and nothing errors.
 
 ## Take ownership
 

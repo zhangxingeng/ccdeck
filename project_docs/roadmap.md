@@ -618,7 +618,11 @@ Two coupled tracks, run lead-gated with sonnet teammates through checkpoint dial
   (ai-first-docs#17), upstream-merge of two generic memory rails (ai-first-docs#18),
   retire-nudge hook port (#23).
 
-## Verification performed
+## Verification performed (historical — Phase 7 snapshot, 2026-07-05)
+
+Counts and file names below reflect the tree as of the CC Deck rebrand (Phase 7); later phases
+changed both (e.g. `SettingsView.svelte` was removed in Phase 12). Each later phase records its
+own verification inline; this block is kept only as the rebrand's audit trail.
 
 - `cargo test --lib` (src-tauri): 30/30 passing.
 - `pnpm check` (svelte-check): 0 errors, 0 warnings across 230 files.
