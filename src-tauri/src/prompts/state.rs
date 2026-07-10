@@ -121,13 +121,18 @@ pub async fn delete_piece(id: String) -> Result<(), String> {
     store::delete_piece_at(&store::prompts_dir()?, &id)
 }
 
-/// Files in the piece store the loader had to skip (broken JSON, shadowed
-/// duplicate id) — shown as a warning next to the library so a hand-edit typo
-/// never reads as a silently vanished piece. Runs its own fresh scan, so it
-/// always reflects the current on-disk state.
+/// Files the loader had to skip or degrade (broken JSON, shadowed duplicate
+/// id, legacy scope) — plus the roster-repair notice (contract § Store
+/// robustness: a projects.json repair that SUCCEEDS may have dropped
+/// truncated records, so it surfaces here as the same amber warning). Shown
+/// next to the library so a hand-edit typo never reads as a silently
+/// vanished piece. Runs its own fresh scan, so it always reflects the
+/// current on-disk state.
 #[tauri::command]
 pub async fn piece_load_errors() -> Result<Vec<store::LoadError>, String> {
-    store::scan_pieces(&store::prompts_dir()?, roster_ids().as_ref()).map(|(_, errors)| errors)
+    let (_, mut errors) = store::scan_pieces(&store::prompts_dir()?, roster_ids().as_ref())?;
+    errors.extend(projects::roster_repair_notice(&crate::datadir::data_root()?));
+    Ok(errors)
 }
 
 // ---------------------------------------------------------------------------

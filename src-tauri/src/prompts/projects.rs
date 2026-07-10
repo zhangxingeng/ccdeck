@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use super::store::LoadError;
+
 /// The fixed palette keys (contract § Project model). An enum, not a String:
 /// serde rejects an unknown key at every boundary for free — a typo'd color
 /// can neither arrive from the frontend nor load from a hand-edited roster
@@ -80,28 +82,52 @@ fn roster_path(root: &Path) -> PathBuf {
     root.join("projects.json")
 }
 
-/// Load the roster. A missing file is an empty roster (fresh install); a
-/// corrupted file gets an in-memory jsonrepair attempt (same § Store
-/// robustness posture as pieces — the file is never rewritten; the repaired
-/// roster persists on the next explicit project save); a file that still
-/// cannot be parsed is an ERROR naming the file — never a silent empty
-/// roster, which would read as every project vanishing (and would cascade
-/// every project-scoped piece into global-with-error).
-fn load_roster(root: &Path) -> Result<Roster, String> {
+/// Load the roster, reporting whether repair was needed. A missing file is
+/// an empty roster (fresh install); a corrupted file gets an in-memory
+/// jsonrepair attempt (same § Store robustness posture as pieces — the file
+/// is never rewritten; the repaired roster persists on the next explicit
+/// project save); a file that still cannot be parsed is an ERROR naming the
+/// file — never a silent empty roster, which would read as every project
+/// vanishing (and would cascade every project-scoped piece into
+/// global-with-error).
+fn read_roster(root: &Path) -> Result<(Roster, bool), String> {
     let path = roster_path(root);
     if !path.is_file() {
-        return Ok(Roster::default());
+        return Ok((Roster::default(), false));
     }
     let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&content).or_else(|strict_err| {
-        super::repair::repair_to_value(&content)
+    match serde_json::from_str(&content) {
+        Ok(roster) => Ok((roster, false)),
+        Err(strict_err) => super::repair::repair_to_value(&content)
             .and_then(|v| serde_json::from_value::<Roster>(v).ok())
+            .map(|roster| (roster, true))
             .ok_or_else(|| {
                 format!(
                     "projects.json cannot be parsed even after repair ({strict_err}) — fix or remove the file; the roster is never silently reset"
                 )
-            })
-    })
+            }),
+    }
+}
+
+fn load_roster(root: &Path) -> Result<Roster, String> {
+    Ok(read_roster(root)?.0)
+}
+
+/// The amber notice for a roster repair that SUCCEEDED (contract § Store
+/// robustness): repair can silently drop truncated records, and the roster
+/// has no per-record recovered flag — so even a successful repair must
+/// surface, as a `piece_load_errors` entry naming the file, cueing the user
+/// to inspect before the next project save persists the repaired form.
+/// `None` when the roster is absent, clean, or unrepairable (the loud `Err`
+/// from `list_projects` owns that last case).
+pub fn roster_repair_notice(root: &Path) -> Option<LoadError> {
+    match read_roster(root) {
+        Ok((_, true)) => Some(LoadError {
+            file: "projects.json".to_string(),
+            error: "projects.json was repaired in memory (hand-edit corruption); repair can silently drop truncated records — inspect the file before the next project save persists the repaired form".to_string(),
+        }),
+        _ => None,
+    }
 }
 
 /// Atomic write (temp sibling + rename), pretty-printed + trailing newline —
@@ -271,6 +297,56 @@ mod tests {
         let reread: Value =
             serde_json::from_str(&fs::read_to_string(roster_path(&root)).unwrap()).unwrap();
         assert_eq!(reread["projects"].as_array().unwrap().len(), 2);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn record_dropping_roster_repair_is_surfaced_not_silent() {
+        // Audit MED 3: truncation mid-record repairs "successfully" — the
+        // structure closes, the tail record is silently gone, and serde
+        // happily loads the survivors. The loss mode is invisible in the
+        // Ok value, which is exactly why repair-success must surface a
+        // notice: it's the user's only cue to inspect before the next
+        // project save bakes the loss in.
+        let root = tmp_root("drop-notice");
+        // Cut at the record boundary: the whole second record is gone, and
+        // what remains repairs CLEANLY into a one-record roster. (A cut
+        // mid-record repairs into an invalid record and takes the loud-Err
+        // path instead — that case is covered below.)
+        let truncated = r#"{"projects":[{"id":"p1","name":"one","color":"blue","created_at":1},"#;
+        fs::write(roster_path(&root), truncated).unwrap();
+
+        let projects = load_projects(&root).unwrap();
+        assert!(
+            projects.len() < 2,
+            "premise: repair drops the truncated tail record (got {projects:?})"
+        );
+
+        let notice = roster_repair_notice(&root).expect("repair-success must produce the notice");
+        assert_eq!(notice.file, "projects.json");
+        assert!(notice.error.contains("repaired in memory"), "{}", notice.error);
+        assert_eq!(
+            fs::read_to_string(roster_path(&root)).unwrap(),
+            truncated,
+            "the notice cues inspection; the loader still never rewrites"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn clean_absent_and_unrepairable_rosters_produce_no_notice() {
+        let root = tmp_root("no-notice");
+        assert!(roster_repair_notice(&root).is_none(), "absent roster: no notice");
+
+        save_project_at(&root, input("n", PaletteColor::Blue), 1).unwrap();
+        assert!(roster_repair_notice(&root).is_none(), "clean roster: no notice");
+
+        fs::write(roster_path(&root), "\"just a string\"").unwrap();
+        assert!(
+            roster_repair_notice(&root).is_none(),
+            "unrepairable roster: the loud list_projects Err owns it, not the amber notice"
+        );
+        assert!(load_projects(&root).is_err());
         fs::remove_dir_all(&root).unwrap();
     }
 
