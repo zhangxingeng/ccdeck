@@ -1,7 +1,8 @@
 /**
  * Smoke test for the Prompt Library's pure logic (issue #24):
- * the compose-box provenance state machine (compose/doc.ts), copy
- * flattening, and placeholder handling (compose/placeholders.ts).
+ * the compose-box provenance state machine (compose/doc.ts), the variable
+ * grammar + copy output (compose/variables.ts — the Rust/TS seam, shared
+ * vectors encoded verbatim), and copy flattening.
  * Run with: npx tsx tests/prompts_smoke.mjs   (from repo root)
  */
 
@@ -24,8 +25,6 @@ const {
   caretQuery,
   diffTexts,
 } = await import(join(root, 'src/lib/compose/doc.ts'));
-const { parsePlaceholders, substitute, markPlaceholder, unmarkPlaceholder, isValidTokenName } =
-  await import(join(root, 'src/lib/compose/placeholders.ts'));
 const { parseVariables, copyText } = await import(join(root, 'src/lib/compose/variables.ts'));
 
 let failures = 0;
@@ -63,12 +62,10 @@ function checkInvariants(doc, msg) {
   }
 }
 
-const link = (id = 'p1', template = 'LINKED', fills = {}) => ({
+const link = (id = 'p1') => ({
   pieceId: id,
   title: id,
   scope: { kind: 'global' },
-  template,
-  fills,
 });
 
 const states = (doc) => doc.spans.map((s) => s.state);
@@ -169,7 +166,7 @@ console.log('replaceSpan / linkRange / linkedSpanAt');
 
   // F4: a typed selection becomes a linked span; text unchanged.
   d = docFromText('reusable stuff here');
-  d = linkRange(d, 0, 8, link('new-piece', 'reusable'));
+  d = linkRange(d, 0, 8, link('new-piece'));
   checkInvariants(d, 'linkRange');
   eq(flatten(d), 'reusable stuff here', 'linkRange keeps text');
   eq(states(d), ['linked', 'typed'], 'linkRange states');
@@ -183,35 +180,26 @@ console.log('replaceSpan / linkRange / linkedSpanAt');
   eq(linkedSpanAt(d, 0), null, 'caret in typed text -> null');
 }
 
-// ── copy flattening ──────────────────────────────────────────────────────────
+// ── copy flattening + raw-document integration ──────────────────────────────
 console.log('copy flattening');
 {
-  // Copy Prompt is exactly the visible text — build a mixed doc and check.
-  let d = docFromText('intro ');
-  d = insertPiece(d, 6, substitute('Review {{ticket}} now.', { ticket: 'JUROR-412' }), link());
+  // The doc holds RAW text — a piece body's {var} tokens land verbatim as a
+  // linked span, unify with typed variables, and resolve only at copy.
+  let d = docFromText('intro {ticket} ');
+  d = insertPiece(d, d.text.length, 'Review {ticket:ABC-123} now.', link());
   d = applyEdit(d, d.text.length, d.text.length, ' outro');
   checkInvariants(d, 'mixed doc');
-  eq(flatten(d), 'intro Review JUROR-412 now. outro', 'flatten == visible text, fills substituted');
-}
-
-// ── placeholders ─────────────────────────────────────────────────────────────
-console.log('placeholders');
-{
-  eq(parsePlaceholders('a {{x}} b {{y}} {{x}}'), ['x', 'y'], 'parse dedupes, keeps order');
-  eq(parsePlaceholders('{{ spaced }} ok'), ['spaced'], 'parse trims inner whitespace');
-  eq(parsePlaceholders('no tokens'), [], 'parse none');
-  eq(parsePlaceholders('{{bad token}}'), [], 'space inside a name is not a token');
-
-  eq(substitute('do {{x}} and {{y}}', { x: 'A', y: 'B' }), 'do A and B', 'substitute both');
-  eq(substitute('do {{x}} twice {{x}}', { x: 'A' }), 'do A twice A', 'substitute repeats');
-  eq(substitute('keep {{x}}', {}), 'keep {{x}}', 'unfilled stays literal (visible == copied)');
-  eq(substitute('blank {{x}}!', { x: '' }), 'blank !', 'empty string is a fill');
-
-  eq(markPlaceholder('review PR now', 7, 9, 'ticket'), 'review {{ticket}} now', 'mark selection');
-  eq(unmarkPlaceholder('review {{ticket}} now', 'ticket'), 'review ticket now', 'unmark by name');
-  eq(unmarkPlaceholder('a {{x}} {{y}}', 'x'), 'a x {{y}}', 'unmark leaves other tokens');
-  assert(isValidTokenName('ticket-1'), 'valid token name');
-  assert(!isValidTokenName('has space'), 'invalid token name');
+  eq(flatten(d), 'intro {ticket} Review {ticket:ABC-123} now. outro', 'flatten == raw visible text');
+  eq(
+    parseVariables(flatten(d)),
+    [{ name: 'ticket' }],
+    'one unified variable across typed + linked spans (first occurrence has no default)'
+  );
+  eq(
+    copyText(flatten(d), { ticket: 'JUROR-412' }, false),
+    'intro JUROR-412 Review JUROR-412 now. outro',
+    'copy substitutes one fill into every occurrence'
+  );
 }
 
 // ── variable grammar: the SHARED VECTORS (contract §Variable grammar) ────────

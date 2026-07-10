@@ -23,6 +23,8 @@ import type {
   MatchHit,
   EmbedStatus,
   EmbedProgress,
+  Project,
+  ProjectInput,
 } from './prompts/types';
 
 // Bundled mock fixtures for browser-dev mode (Vite ?raw import).
@@ -228,7 +230,12 @@ export function isSettingsConflict(e: unknown): boolean {
 // CC Deck app preferences (App Config: terminal + launch command + update toggle)
 // ---------------------------------------------------------------------------
 
-let devAppConfig: AppConfig = { terminal: '', launchCommand: '', updateCheckOnLaunch: true };
+let devAppConfig: AppConfig = {
+  terminal: '',
+  launchCommand: '',
+  updateCheckOnLaunch: true,
+  promptsAsVariable: true,
+};
 
 /** CC Deck's own App Config preferences (terminal choice, resume-launch command,
  *  update-check-on-launch toggle) — never Claude Code's own settings.json. */
@@ -436,15 +443,39 @@ export async function deletePiece(id: string): Promise<void> {
 }
 
 /** Rank pieces against `query`. Pool: global pieces + pieces scoped to
- *  `project` (null = global only). Which engine ran (lexical / semantic /
- *  hybrid) is the backend's business — callers only see the hit list. */
+ *  `projectId` (null = global only). Which engine ran (lexical / semantic /
+ *  hybrid) is the backend's business — callers only see the hit list.
+ *  Seam note: Rust param `project_id` ⇒ invoke key `projectId` (Tauri's
+ *  camelCase convention, pinned at the gate for both lanes). */
 export async function matchPieces(
   query: string,
-  project: string | null,
+  projectId: string | null,
   limit: number
 ): Promise<MatchHit[]> {
-  if (!isTauri()) return devMatchPieces(query, project, limit);
-  return call<MatchHit[]>('match_pieces', { query, project, limit });
+  if (!isTauri()) return devMatchPieces(query, projectId, limit);
+  return call<MatchHit[]>('match_pieces', { query, projectId, limit });
+}
+
+/** The project roster (~/.ccdeck/projects.json) — small, loaded whole. */
+export async function listProjects(): Promise<Project[]> {
+  if (!isTauri()) return devProjects.map((p) => structuredClone(p));
+  return call<Project[]>('list_projects');
+}
+
+/** Create (no id) or update (rename, recolor, pin) a project. */
+export async function saveProject(project: ProjectInput): Promise<Project> {
+  if (!isTauri()) return devSaveProject(project);
+  return call<Project>('save_project', { project });
+}
+
+/** Delete a project. The backend rescopes its pieces to GLOBAL — nothing a
+ *  user wrote ever vanishes as a side effect; re-list pieces afterwards. */
+export async function deleteProject(id: string): Promise<void> {
+  if (!isTauri()) {
+    devDeleteProject(id);
+    return;
+  }
+  await call<null>('delete_project', { id });
 }
 
 /** Piece JSON files that failed to parse on the last load pass — surfaced so
@@ -479,9 +510,10 @@ export async function setEmbedEnabled(enabled: boolean): Promise<void> {
   await call<null>('set_embed_enabled', { enabled });
 }
 
-// --- Browser-dev piece store: real save/versioning semantics over seeded ----
-// sample pieces, so `pnpm dev` exercises the whole Prompts view (including
-// version history and the placeholder flow) with no native shell.
+// --- Browser-dev piece + project store: real save/versioning/rescope --------
+// semantics over seeded samples, so `pnpm dev` exercises the whole Prompts
+// view (tabs, variables, recovery notice, embed flow) with no native shell —
+// this is how the founder feel-checks.
 
 // One seeded broken-file case so the load-errors notice is exercisable in
 // browser dev (dismiss it to see the common path).
@@ -491,6 +523,65 @@ const devPieceLoadErrors: PieceLoadError[] = [
     error: 'expected `,` or `}` at line 3 column 14',
   },
 ];
+
+const devProjects: Project[] = [
+  {
+    id: 'dev-project-ccdeck',
+    name: 'ccdeck',
+    color: 'blue',
+    pinned: true,
+    path: '/dev/mock/demo-project',
+    created_at: 1751000000,
+  },
+  {
+    id: 'dev-project-writing',
+    name: 'writing',
+    color: 'pink',
+    pinned: true,
+    path: null,
+    created_at: 1751100000,
+  },
+  {
+    id: 'dev-project-unpinned',
+    name: 'side-quests',
+    color: 'green',
+    pinned: false,
+    path: null,
+    created_at: 1751200000,
+  },
+];
+
+function devSaveProject(input: ProjectInput): Project {
+  const existing = input.id ? devProjects.find((p) => p.id === input.id) : undefined;
+  if (existing) {
+    existing.name = input.name;
+    existing.color = input.color;
+    existing.pinned = input.pinned;
+    existing.path = input.path;
+    return structuredClone(existing);
+  }
+  const project: Project = {
+    id: crypto.randomUUID(),
+    name: input.name,
+    color: input.color,
+    pinned: input.pinned,
+    path: input.path,
+    created_at: Math.floor(Date.now() / 1000),
+  };
+  devProjects.push(project);
+  return structuredClone(project);
+}
+
+/** Contract delete semantics: the project's pieces rescope to global. */
+function devDeleteProject(id: string): void {
+  const i = devProjects.findIndex((p) => p.id === id);
+  if (i >= 0) devProjects.splice(i, 1);
+  for (const piece of devPieces) {
+    if (piece.scope.kind === 'project' && piece.scope.project_id === id) {
+      piece.scope = { kind: 'global' };
+    }
+  }
+}
 
 const devPieces: Piece[] = [
   {
@@ -522,12 +613,12 @@ const devPieces: Piece[] = [
   {
     id: 'dev-piece-checklist',
     title: 'pr-review-checklist',
-    body: 'Review the PR for {{ticket}}. Focus especially on {{concern}}. Check error handling, tests, and naming.',
+    body: 'Review the PR for {ticket:ABC-123}. Focus especially on {concern}. Check error handling, tests, and naming.',
     keywords: ['review', 'checklist', 'pr'],
     tags: [],
     category: null,
     scope: { kind: 'global' },
-    placeholders: [{ name: 'ticket' }, { name: 'concern' }],
+    placeholders: [{ name: 'ticket', default: 'ABC-123' }, { name: 'concern' }],
     created_at: 1751000000,
     updated_at: 1751000000,
     versions: [],
@@ -539,18 +630,34 @@ const devPieces: Piece[] = [
     keywords: ['context'],
     tags: [],
     category: null,
-    scope: { kind: 'project', project: '/dev/mock/demo-project' },
+    scope: { kind: 'project', project_id: 'dev-project-ccdeck' },
     placeholders: [],
     created_at: 1751000000,
     updated_at: 1751000000,
     versions: [],
   },
+  {
+    // Exercises the store-robustness surface: an in-memory jsonrepair rescue,
+    // flagged transient — the UI shows it needs attention until re-saved.
+    id: 'dev-piece-recovered',
+    title: 'tone-notes',
+    body: 'Prefer plain words over jargon. Say {audience:teammates} when addressing the reader.',
+    keywords: ['tone'],
+    tags: [],
+    category: null,
+    scope: { kind: 'project', project_id: 'dev-project-writing' },
+    placeholders: [{ name: 'audience', default: 'teammates' }],
+    created_at: 1751000000,
+    updated_at: 1751000000,
+    versions: [],
+    recovered: true,
+  },
 ];
 
 async function devSavePiece(input: PieceInput): Promise<Piece> {
-  const { parsePlaceholders } = await import('./compose/placeholders');
+  const { parseVariables } = await import('./compose/variables');
   const now = Math.floor(Date.now() / 1000);
-  const placeholders = parsePlaceholders(input.body).map((name) => ({ name }));
+  const placeholders = parseVariables(input.body);
   const existing = input.id ? devPieces.find((p) => p.id === input.id) : undefined;
   if (existing) {
     if (existing.body !== input.body) {
@@ -564,6 +671,9 @@ async function devSavePiece(input: PieceInput): Promise<Piece> {
     existing.scope = { ...input.scope };
     existing.placeholders = placeholders;
     existing.updated_at = now;
+    // An explicit save persists the repaired form — the piece no longer
+    // needs attention (mirrors the backend's transient-flag semantics).
+    delete existing.recovered;
     return structuredClone(existing);
   }
   const piece: Piece = {
@@ -611,10 +721,10 @@ function devFuzzyScore(query: string, target: string): number {
   return Math.max(0, matched * 8 - gaps);
 }
 
-function devMatchPieces(query: string, project: string | null, limit: number): MatchHit[] {
+function devMatchPieces(query: string, projectId: string | null, limit: number): MatchHit[] {
   if (!query.trim()) return [];
   const pool = devPieces.filter(
-    (p) => p.scope.kind === 'global' || (project !== null && p.scope.project === project)
+    (p) => p.scope.kind === 'global' || (projectId !== null && p.scope.project_id === projectId)
   );
   const hits: MatchHit[] = [];
   for (const p of pool) {
@@ -640,19 +750,21 @@ let devEmbed: EmbedStatus = {
 
 async function devEmbedDownload(onProgress: (p: EmbedProgress) => void): Promise<void> {
   devEmbed.state = 'downloading';
-  // Two stages with per-stage totals — the pinned Channel contract: the ONNX
-  // runtime dylib first, then the model itself. Completion is signaled by
-  // this promise resolving (callers re-fetch embed_status), never by a
-  // channel event.
-  const stages: { stage: EmbedProgress['stage']; totalMb: number }[] = [
-    { stage: 'runtime', totalMb: devEmbed.runtime_size_mb },
-    { stage: 'model', totalMb: devEmbed.model_size_mb },
+  // Three stages — the contract's Channel shape: two byte-counted downloads
+  // (ONNX runtime dylib, then the model), then 'index' in piece counts
+  // (embedding the existing library; "Download & index" is literally what
+  // the one click does). Completion is signaled by this promise resolving
+  // (callers re-fetch embed_status), never by a channel event.
+  const stages: { stage: EmbedProgress['stage']; total: number }[] = [
+    { stage: 'runtime', total: devEmbed.runtime_size_mb * 1024 * 1024 },
+    { stage: 'model', total: devEmbed.model_size_mb * 1024 * 1024 },
+    { stage: 'index', total: devPieces.length },
   ];
-  for (const { stage, totalMb } of stages) {
-    const total = totalMb * 1024 * 1024;
-    for (let step = 1; step <= 6; step++) {
-      await new Promise((r) => setTimeout(r, 150));
-      onProgress({ stage, downloaded_bytes: Math.round((total * step) / 6), total_bytes: total });
+  for (const { stage, total } of stages) {
+    const steps = stage === 'index' ? total : 6;
+    for (let step = 1; step <= steps; step++) {
+      await new Promise((r) => setTimeout(r, stage === 'index' ? 220 : 150));
+      onProgress({ stage, done: Math.round((total * step) / steps), total });
     }
   }
   devEmbed.state = 'ready';

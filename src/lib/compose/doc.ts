@@ -14,16 +14,14 @@ import type { PieceScope } from '../prompts/types';
 
 export type SpanState = 'typed' | 'linked' | 'linked-modified';
 
-/** Provenance carried by a linked / linked-modified span. `template` is the
- *  piece body as inserted (may contain {{tokens}}) and `fills` the values
- *  substituted at insert time — kept so instance mode can re-fill without
- *  re-inserting (F5). */
+/** Provenance carried by a linked / linked-modified span: which piece the
+ *  text came from, nothing more. The document holds RAW literal text —
+ *  {var} tokens included — and variables resolve only at copy time, so
+ *  there is no per-span template/fills state to carry. */
 export interface SpanLink {
   pieceId: string;
   title: string;
   scope: PieceScope;
-  template: string;
-  fills: Record<string, string>;
 }
 
 export interface Span {
@@ -107,17 +105,17 @@ export function spanText(doc: Doc, index: number): string {
 }
 
 /**
- * Insert a piece's rendered text at `offset` as a fresh 'linked' span.
- * Splitting a linked span in two marks both halves linked-modified — the
- * original piece no longer appears intact, which is exactly what that state
- * signals.
+ * Insert a piece's raw body text at `offset` as a fresh 'linked' span
+ * ({var} tokens land verbatim — they resolve at copy time). Splitting a
+ * linked span in two marks both halves linked-modified — the original piece
+ * no longer appears intact, which is exactly what that state signals.
  */
-export function insertPiece(doc: Doc, offset: number, rendered: string, link: SpanLink): Doc {
-  if (!rendered) return doc;
+export function insertPiece(doc: Doc, offset: number, text: string, link: SpanLink): Doc {
+  if (!text) return doc;
   const starts = spanStarts(doc);
   const spans: Span[] = [];
   let placed = false;
-  const newSpan: Span = { state: 'linked', length: rendered.length, link };
+  const newSpan: Span = { state: 'linked', length: text.length, link };
 
   for (let i = 0; i < doc.spans.length; i++) {
     const s = doc.spans[i];
@@ -142,7 +140,7 @@ export function insertPiece(doc: Doc, offset: number, rendered: string, link: Sp
   if (!placed) spans.push(newSpan); // offset === text.length (or empty doc)
 
   return normalize({
-    text: doc.text.slice(0, offset) + rendered + doc.text.slice(offset),
+    text: doc.text.slice(0, offset) + text + doc.text.slice(offset),
     spans,
   });
 }
@@ -285,10 +283,11 @@ export function linkRange(
 }
 
 /**
- * Copy Prompt (F8): the deliverable is exactly the visible text — provenance
- * is a span-level annotation, never markup inside `text`, and placeholder
- * values were substituted into `text` at insert/fill time. Named (rather than
- * callers reading .text) because it IS the contract's promise.
+ * The document's raw literal text — provenance is a span-level annotation,
+ * never markup inside `text`. Copy Prompt feeds this through the variable
+ * copy pipeline (compose/variables.ts); everything else (the match query,
+ * the fill list) reads the same raw text. Named (rather than callers
+ * reading .text) because it IS the "spans tile the text" promise.
  */
 export function flatten(doc: Doc): string {
   return doc.text;

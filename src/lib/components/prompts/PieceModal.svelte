@@ -26,6 +26,7 @@
   import type { PieceInput, PieceScope } from '$lib/prompts/types';
   import {
     prompts,
+    activeProject,
     savePiece,
     deletePiece,
     composeReplaceSpan,
@@ -72,7 +73,9 @@
   let dest = $state<'global' | 'project'>(
     untrack(() => {
       if (basePiece) return basePiece.scope.kind;
-      return prompts.project ? 'project' : 'global';
+      // New pieces are born scoped to the active tab (contract: the tab IS
+      // the save scope).
+      return prompts.activeProjectId ? 'project' : 'global';
     })
   );
   let saveError = $state<string | null>(null);
@@ -82,12 +85,19 @@
   /** Read-only preview: what the body's variables parse to (names +
    *  defaults) — feedback that the grammar saw what the author meant. */
   const bodyVariables = $derived(parseVariables(body));
-  const projectAvailable = $derived(prompts.project !== null);
+  /** A project destination needs an anchor: the piece's own project (when
+   *  editing one) or the active tab. */
+  const destProjectId = $derived(
+    basePiece?.scope.kind === 'project' ? basePiece.scope.project_id : prompts.activeProjectId
+  );
+  const destProjectName = $derived(
+    prompts.projects.find((p) => p.id === destProjectId)?.name ?? activeProject()?.name ?? ''
+  );
 
   function buildInput(id: string | undefined): PieceInput {
     const scope: PieceScope =
-      dest === 'project' && prompts.project
-        ? { kind: 'project', project: prompts.project }
+      dest === 'project' && destProjectId
+        ? { kind: 'project', project_id: destProjectId }
         : { kind: 'global' };
     const csv = (s: string) => s.split(',').map((x) => x.trim()).filter(Boolean);
     return {
@@ -114,13 +124,7 @@
     try {
       // A dangling id (piece deleted / hand-removed) saves as new.
       const saved = await savePiece(buildInput(piece?.id));
-      const newLink: SpanLink = {
-        pieceId: saved.id,
-        title: saved.title,
-        scope: saved.scope,
-        template: saved.body,
-        fills: {},
-      };
+      const newLink: SpanLink = { pieceId: saved.id, title: saved.title, scope: saved.scope };
       if (fromSpan) {
         // linked = the span still shows the stored body verbatim; anything
         // else is linked-modified (origin preserved, divergence marked).
@@ -242,8 +246,8 @@
           <span>Save to</span>
           <select bind:value={dest}>
             <option value="global">Global (every project)</option>
-            <option value="project" disabled={!projectAvailable}>
-              This project{projectAvailable ? '' : ' (pick a project first)'}
+            <option value="project" disabled={!destProjectId}>
+              {destProjectId ? `Project: ${destProjectName}` : 'Project (open a project tab first)'}
             </option>
           </select>
         </label>

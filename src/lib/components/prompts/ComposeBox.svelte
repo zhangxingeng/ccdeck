@@ -17,6 +17,7 @@
   import { onMount, untrack } from 'svelte';
   import { prompts, composeEdit, setSelection } from '$lib/prompts.svelte';
   import { linkedSpanAt, spanStarts, diffTexts } from '$lib/compose/doc';
+  import VariableFillList from './VariableFillList.svelte';
 
   let {
     onOpenSpan,
@@ -134,6 +135,8 @@
       aria-label="Prompt compose box"
     ></textarea>
   </div>
+
+  <VariableFillList />
 </div>
 
 <style>

@@ -12,15 +12,13 @@
     prompts,
     initPrompts,
     disposePrompts,
-    setProject,
+    setActiveProject,
     composeInsertPiece,
+    copyOutput,
   } from '$lib/prompts.svelte';
-  import { flatten } from '$lib/compose/doc';
-  import { parsePlaceholders } from '$lib/compose/placeholders';
   import { copyToClipboard } from '$lib/copy';
   import ComposeBox from './prompts/ComposeBox.svelte';
   import MatchPanel from './prompts/MatchPanel.svelte';
-  import PlaceholderPopover from './prompts/PlaceholderPopover.svelte';
   import PieceModal, { type PieceModalContext } from './prompts/PieceModal.svelte';
   import EmbeddingsPanel from './prompts/EmbeddingsPanel.svelte';
 
@@ -29,13 +27,15 @@
   // the next visit, and a data-loss warning that never comes back would
   // itself be the silent loss it exists to prevent.
   let loadErrorsDismissed = $state(false);
-  let pendingInsert = $state<Piece | null>(null);
   let modalContext = $state<PieceModalContext | null>(null);
   let copyMsg = $state<string | null>(null);
   let copyMsgTimer: ReturnType<typeof setTimeout> | null = null;
 
   const hasSelection = $derived(prompts.selEnd > prompts.selStart);
   const hasText = $derived(prompts.doc.text.length > 0);
+  /** Loader-repaired pieces (transient flag): fine to use, but the repair
+   *  persists only on an explicit re-save — worth a quiet nudge. */
+  const recoveredPieces = $derived(prompts.pieces.filter((p) => p.recovered));
 
   onMount(() => {
     initPrompts();
@@ -45,18 +45,9 @@
     if (copyMsgTimer) clearTimeout(copyMsgTimer);
   });
 
-  // ── insert flow (F2 + F5) ──────────────────────────────────────────────────
+  // ── insert flow: the raw body lands as-is; variables go to the fill list ──
   function handleInsert(piece: Piece): void {
-    if (parsePlaceholders(piece.body).length) {
-      pendingInsert = piece; // fill-in popover first, then the span lands
-    } else {
-      composeInsertPiece(piece, {});
-    }
-  }
-
-  function confirmFills(fills: Record<string, string>): void {
-    if (pendingInsert) composeInsertPiece(pendingInsert, fills);
-    pendingInsert = null;
+    composeInsertPiece(piece);
   }
 
   // ── piece modal (F3 / F4) ──────────────────────────────────────────────────
@@ -82,9 +73,9 @@
     modalContext = { kind: 'new', selStart: 0, selEnd: 0, selectionText: '' };
   }
 
-  // ── Copy Prompt (F8) ───────────────────────────────────────────────────────
+  // ── Copy Prompt ────────────────────────────────────────────────────────────
   async function copyPrompt(): Promise<void> {
-    const ok = await copyToClipboard(flatten(prompts.doc));
+    const ok = await copyToClipboard(copyOutput());
     copyMsg = ok ? 'Prompt copied to clipboard' : 'Copy failed — select the text manually';
     if (copyMsgTimer) clearTimeout(copyMsgTimer);
     copyMsgTimer = setTimeout(() => (copyMsg = null), 2500);
@@ -102,15 +93,17 @@
       {panelCollapsed ? '⟩ Library' : '⟨ Hide library'}
     </button>
 
+    <!-- Interim scope picker — replaced by the project tab row in the next
+         slice of this round (tabs + manager popover). -->
     <label class="prompts-view__project">
       <span>Project</span>
       <select
-        value={prompts.project ?? ''}
-        onchange={(e) => setProject(e.currentTarget.value || null)}
+        value={prompts.activeProjectId ?? ''}
+        onchange={(e) => setActiveProject(e.currentTarget.value || null)}
       >
-        <option value="">Global only</option>
-        {#each prompts.availableProjects as p (p.cwd)}
-          <option value={p.cwd}>{p.label}</option>
+        <option value="">Global</option>
+        {#each prompts.projects as p (p.id)}
+          <option value={p.id}>{p.name}</option>
         {/each}
       </select>
     </label>
@@ -139,6 +132,22 @@
 
   {#if prompts.loadError}
     <div class="prompts-view__error">Couldn't load the piece library: {prompts.loadError}</div>
+  {/if}
+  {#if prompts.configError}
+    <div class="prompts-view__error">{prompts.configError}</div>
+  {/if}
+
+  {#if recoveredPieces.length}
+    <div class="prompts-view__load-warn" role="status">
+      <div class="prompts-view__load-warn-text">
+        <strong>
+          {recoveredPieces.length} piece file{recoveredPieces.length === 1 ? '' : 's'} auto-repaired
+        </strong>
+        — the JSON was invalid and was recovered in memory (the file on disk is untouched). Open
+        and save {recoveredPieces.length === 1 ? 'it' : 'each'} to keep the repair:
+        {#each recoveredPieces as p, i (p.id)}{i > 0 ? ', ' : ' '}<code>{p.title}</code>{/each}
+      </div>
+    </div>
   {/if}
 
   {#if prompts.pieceLoadErrors.length && !loadErrorsDismissed}
@@ -188,13 +197,6 @@
 
     <section class="prompts-view__compose">
       <ComposeBox onOpenSpan={openSpan} />
-      {#if pendingInsert}
-        <PlaceholderPopover
-          piece={pendingInsert}
-          onConfirm={confirmFills}
-          onCancel={() => (pendingInsert = null)}
-        />
-      {/if}
     </section>
   </div>
 </div>

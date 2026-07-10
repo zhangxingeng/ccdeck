@@ -48,8 +48,8 @@
           <span class="match-hit__title">{hit.piece.title}</span>
           <span class="match-hit__scope">{hit.piece.scope.kind === 'global' ? 'global' : 'project'}</span>
           {#if hit.piece.placeholders.length}
-            <span class="match-hit__ph" title="Has placeholders — you'll fill them on insert">
-              {'{{'}…{'}}'}
+            <span class="match-hit__ph" title="Has variables — fill them in the list under the compose box">
+              {'{'}…{'}'}
             </span>
           {/if}
         </span>

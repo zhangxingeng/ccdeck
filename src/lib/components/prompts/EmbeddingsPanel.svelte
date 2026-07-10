@@ -9,16 +9,24 @@
   import { prompts, startEmbedDownload, toggleEmbedEnabled } from '$lib/prompts.svelte';
 
   const embed = $derived(prompts.embed);
-  // Per-stage progress (the pinned Channel shape): the runtime dylib
-  // downloads first, then the model — each percentage is within its stage.
+  // Per-stage progress (the contract's three-stage Channel shape): two
+  // byte-counted downloads, then indexing the existing library in piece
+  // counts — each percentage is within its stage.
   const pct = $derived.by(() => {
     const p = prompts.embedProgress;
-    if (!p || !p.total_bytes) return 0;
-    return Math.round((p.downloaded_bytes / p.total_bytes) * 100);
+    if (!p || !p.total) return 0;
+    return Math.round((p.done / p.total) * 100);
   });
-  const stageLabel = $derived(
-    prompts.embedProgress?.stage === 'model' ? 'model (2/2)' : 'ONNX runtime (1/2)'
-  );
+  const stageLabel = $derived.by(() => {
+    switch (prompts.embedProgress?.stage) {
+      case 'model':
+        return 'model (2/3)';
+      case 'index':
+        return 'indexing pieces (3/3)';
+      default:
+        return 'ONNX runtime (1/3)';
+    }
+  });
   /** The decline-informed gate discloses the TOTAL download (model + ONNX
    *  runtime) — the model number alone understates it, badly on Windows. */
   const totalMb = $derived((embed?.model_size_mb ?? 0) + (embed?.runtime_size_mb ?? 0));

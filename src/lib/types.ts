@@ -192,6 +192,10 @@ export interface AppConfig {
   launchCommand: string;
   /** Whether CC Deck checks for app updates automatically on launch. */
   updateCheckOnLaunch: boolean;
+  /** Prompt Library Copy-output mode (contract §Copy output): true (default)
+   *  = "as variable" dedup mode, false = substitute in place. Persisted here
+   *  (Rust `prompts_as_variable`) so the toggle survives restarts. */
+  promptsAsVariable: boolean;
 }
 
 // ---------------------------------------------------------------------------

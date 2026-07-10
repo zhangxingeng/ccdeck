@@ -43,7 +43,14 @@
 
   let loading = $state(true);
   let loadError = $state<string | null>(null);
-  let config = $state<AppConfig>({ terminal: '', launchCommand: '', updateCheckOnLaunch: true });
+  let config = $state<AppConfig>({
+    terminal: '',
+    launchCommand: '',
+    updateCheckOnLaunch: true,
+    // Prompt Library copy-mode default; owned by the Prompts view's toggle,
+    // carried here only so a pre-load save can't blank it.
+    promptsAsVariable: true,
+  });
   let original = $state('');
   let saveMsg = $state<string | null>(null);
   let saveMsgTimer: ReturnType<typeof setTimeout> | null = null;
