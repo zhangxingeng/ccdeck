@@ -78,7 +78,10 @@
     if (!textareaEl || !highlightEl) return;
     highlightEl.scrollTop = textareaEl.scrollTop;
     highlightEl.scrollLeft = textareaEl.scrollLeft;
-    scrollNonce++;
+    // Untracked: ++ is a read-modify-write, and syncScroll runs inside the
+    // focus-restore $effect — a tracked read here would make that effect
+    // depend on state it writes (effect_update_depth_exceeded).
+    untrack(() => scrollNonce++);
   }
 
   // ── the floating Save-as-piece affordance ──────────────────────────────────
