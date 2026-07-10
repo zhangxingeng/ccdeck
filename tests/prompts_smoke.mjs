@@ -16,6 +16,7 @@ const {
   emptyDoc,
   docFromText,
   insertSnippet,
+  insertSnippetOverRange,
   applyEdit,
   replaceSpan,
   linkRange,
@@ -196,10 +197,39 @@ console.log('copy flattening');
     'one unified variable across typed + linked spans (first occurrence has no default)'
   );
   eq(
-    copyText(flatten(d), { ticket: 'JUROR-412' }, false),
+    copyText(flatten(d), { ticket: 'JUROR-412' }, { ticket: false }),
     'intro JUROR-412 Review JUROR-412 now. outro',
     'copy substitutes one fill into every occurrence'
   );
+}
+
+// ── span model: insertSnippetOverRange (the one insert path, both triggers) ──
+console.log('insertSnippetOverRange');
+{
+  // Replace the query line the user typed to find the snippet: from line start
+  // to the caret. Simulates ↓-into-panel + Enter (or a mouse click) at the end
+  // of a typed query line.
+  let d = docFromText('intro\nsenior review');
+  const caret = d.text.length; // caret at end
+  const lineStart = d.text.lastIndexOf('\n', caret - 1) + 1; // start of "senior review"
+  d = insertSnippetOverRange(d, lineStart, caret, 'You are a senior reviewer.', link('rev'));
+  checkInvariants(d, 'insert over query line');
+  eq(flatten(d), 'intro\nYou are a senior reviewer.', 'query line replaced, not appended');
+  eq(states(d), ['typed', 'linked'], 'inserted body is a linked span; prior lines stay typed');
+  eq(d.spans[1].link.snippetId, 'rev', 'linked span carries the snippet id');
+
+  // Empty query (caret at a bare line start) degenerates to a plain insert.
+  d = docFromText('lead ');
+  d = insertSnippetOverRange(d, d.text.length, d.text.length, 'BODY', link('b'));
+  checkInvariants(d, 'empty-range insert');
+  eq(flatten(d), 'lead BODY', 'empty range = insert at caret');
+  eq(states(d), ['typed', 'linked'], 'empty-range states');
+
+  // Pure transform — inputs are never mutated.
+  const before = docFromText('abc def');
+  const snap = JSON.stringify(before);
+  insertSnippetOverRange(before, 4, 7, 'X', link());
+  eq(JSON.stringify(before), snap, 'insertSnippetOverRange does not mutate its input');
 }
 
 // ── variable grammar: the SHARED VECTORS (contract §Variable grammar) ────────
@@ -244,7 +274,7 @@ console.log('variable grammar (shared vectors)');
     'vector: {a:{b}} — failed run consumes nothing; literal {a: + variable b + literal }'
   );
   eq(
-    copyText('{a:{b}}', { b: 'X' }, false),
+    copyText('{a:{b}}', { b: 'X' }, { b: false }),
     '{a:X}',
     'vector: {a:{b}} substitute mode — inner variable fills, outer braces stay literal'
   );
@@ -257,59 +287,101 @@ console.log('variable grammar (shared vectors)');
   );
 }
 
-// ── copy output (contract §Copy output) ──────────────────────────────────────
-console.log('copy output');
+// ── copy output (contract §Copy output) — per-variable as-var map ────────────
+// The signature is now `copyText(text, fills, asVars)` where a name ABSENT from
+// asVars is ON (the founder's safe default). So `{}` = all ON; `{ x: false }` =
+// x substituted in place, everything else ON.
+console.log('copy output (per-variable as-var)');
 {
   // The contract's own example, verbatim: ON mode dedups into a vars block.
   eq(
-    copyText('Review the PR for {ticket:ABC-123} and summarize.', {}, true),
+    copyText('Review the PR for {ticket:ABC-123} and summarize.', {}, {}),
     'Review the PR for <prompt_var name="ticket"/> and summarize.\n\n' +
       '<prompt_vars>\n<prompt_var name="ticket">ABC-123</prompt_var>\n</prompt_vars>',
-    'ON: contract example — occurrence element + appended block with default'
+    'ON (absent = ON): contract example — occurrence element + appended block with default'
   );
   eq(
-    copyText('do {x} and {x}', { x: 'A' }, true),
+    copyText('do {x} and {x}', { x: 'A' }, {}),
     'do <prompt_var name="x"/> and <prompt_var name="x"/>\n\n' +
       '<prompt_vars>\n<prompt_var name="x">A</prompt_var>\n</prompt_vars>',
     'ON: repeated occurrences, one block entry, user fill wins'
   );
   eq(
-    copyText('need {x}', {}, true),
+    copyText('need {x}', {}, { x: true }),
     'need <prompt_var name="x"/>\n\n<prompt_vars>\n<prompt_var name="x"></prompt_var>\n</prompt_vars>',
-    'ON: unfilled + no default = empty element (honest fill-me signal)'
+    'ON (explicit true): unfilled + no default = empty element (honest fill-me signal)'
   );
-  eq(copyText('plain {{json}} body', {}, true), 'plain {json} body', 'ON: no variables, no block, escapes resolved');
+  eq(copyText('plain {{json}} body', {}, {}), 'plain {json} body', 'ON: no variables, no block, escapes resolved');
 
   // Block values are XML-escaped (contract: the wrapper form exists for
   // parseability — an unescaped value could inject phantom variables).
   eq(
-    copyText('need {x}', { x: '</prompt_var><prompt_var name="evil">pwned' }, true),
+    copyText('need {x}', { x: '</prompt_var><prompt_var name="evil">pwned' }, {}),
     'need <prompt_var name="x"/>\n\n<prompt_vars>\n' +
       '<prompt_var name="x">&lt;/prompt_var&gt;&lt;prompt_var name="evil"&gt;pwned</prompt_var>\n' +
       '</prompt_vars>',
     'ON: injection-shaped value is escaped, no phantom variable'
   );
   eq(
-    copyText('check {cond:a < b && b > 0}', {}, true),
+    copyText('check {cond:a < b && b > 0}', {}, {}),
     'check <prompt_var name="cond"/>\n\n<prompt_vars>\n' +
       '<prompt_var name="cond">a &lt; b &amp;&amp; b &gt; 0</prompt_var>\n' +
       '</prompt_vars>',
     'ON: < > & in a default are escaped in the block'
   );
 
-  // OFF mode: substitute in place.
-  eq(copyText('do {task:write tests}!', {}, false), 'do write tests!', 'OFF: default substitutes');
-  eq(copyText('do {task:write tests}!', { task: 'ship' }, false), 'do ship!', 'OFF: fill beats default');
-  eq(copyText('keep {x}', {}, false), 'keep {x}', 'OFF: unfilled, no default — literal stays visible');
-  eq(copyText('blank {task:}!', {}, false), 'blank !', 'OFF: {task:} fills as empty when unfilled');
-  eq(copyText('{x:a} {x:b}', {}, false), 'a a', 'OFF (rule 5): first default serves every occurrence');
-  eq(copyText('{{literal}} and {v:x}', {}, false), '{literal} and x', 'OFF: escapes resolve on copy');
+  // OFF (explicit false per name): substitute in place.
+  eq(copyText('do {task:write tests}!', {}, { task: false }), 'do write tests!', 'OFF: default substitutes');
+  eq(copyText('do {task:write tests}!', { task: 'ship' }, { task: false }), 'do ship!', 'OFF: fill beats default');
+  eq(copyText('keep {x}', {}, { x: false }), 'keep {x}', 'OFF: unfilled, no default — canonical literal stays visible');
+  eq(copyText('blank {task:}!', {}, { task: false }), 'blank !', 'OFF: {task:} fills as empty when unfilled');
+  eq(copyText('{x:a} {x:b}', {}, { x: false }), 'a a', 'OFF (rule 5): first default serves every occurrence');
+  eq(copyText('{{literal}} and {v:x}', {}, { v: false }), '{literal} and x', 'OFF: escapes resolve on copy');
   eq(
-    copyText('check {cond:a < b && b > 0}', {}, false),
+    copyText('check {cond:a < b && b > 0}', {}, { cond: false }),
     'check a < b && b > 0',
     'OFF: substitute-in-place is plain text — never XML-escaped'
   );
-  eq(copyText('', {}, true), '', 'empty document copies empty');
+  eq(copyText('', {}, {}), '', 'empty document copies empty');
+}
+
+// ── per-variable MIXED modes in one document (the round-B capability) ─────────
+console.log('copy output (mixed ON/OFF in one document)');
+{
+  // One doc, three variables: ticket ON (hoisted), env OFF (substituted with a
+  // value), region OFF and unfilled (canonical literal stays). The block lists
+  // ONLY the ON variable, in first-appearance order.
+  eq(
+    copyText(
+      'Deploy {ticket:ABC-1} to {env:prod} in {region}.',
+      { env: 'staging' },
+      { env: false, region: false }
+    ),
+    'Deploy <prompt_var name="ticket"/> to staging in {region}.\n\n' +
+      '<prompt_vars>\n<prompt_var name="ticket">ABC-1</prompt_var>\n</prompt_vars>',
+    'MIXED: ON var hoisted to block; OFF var substituted; OFF unfilled var stays canonical {region}; block lists only ON'
+  );
+
+  // An ON variable's value is XML-escaped in the block while an OFF variable's
+  // value substitutes as plain text in the SAME document — escaping is a
+  // property of the block, not of the prompt.
+  eq(
+    copyText(
+      'safe {a} vs raw {b}',
+      { a: '1 < 2 & 3', b: '4 < 5 & 6' },
+      { b: false }
+    ),
+    'safe <prompt_var name="a"/> vs raw 4 < 5 & 6\n\n' +
+      '<prompt_vars>\n<prompt_var name="a">1 &lt; 2 &amp; 3</prompt_var>\n</prompt_vars>',
+    'MIXED: ON value escaped in block; OFF value plain in body; same document'
+  );
+
+  // All-OFF: no block at all even though variables exist.
+  eq(
+    copyText('a {x} b {y}', { x: '1', y: '2' }, { x: false, y: false }),
+    'a 1 b 2',
+    'MIXED (all OFF): no <prompt_vars> block emitted'
+  );
 }
 
 // ── editor plumbing: caretQuery + diffTexts ──────────────────────────────────

@@ -146,6 +146,28 @@ export function insertSnippet(doc: Doc, offset: number, text: string, link: Span
 }
 
 /**
+ * Insert a snippet's raw body over the range [start, end) as one 'linked' span:
+ * clear the range (as a user deletion would), then drop the snippet in at
+ * `start`. This is the one insert transform behind BOTH triggers (mouse click
+ * and ↓-into-panel + Enter) — the query line the user typed to find the
+ * snippet is scaffolding, so the inserted body replaces it rather than landing
+ * after it (contract §Compose surface: "leaving the query in front is litter").
+ * Composed from the tested primitives so the provenance state machine stays in
+ * one place: clearing a range that clips a linked span marks the remainder
+ * linked-modified, exactly as an equivalent hand-deletion would.
+ */
+export function insertSnippetOverRange(
+  doc: Doc,
+  start: number,
+  end: number,
+  text: string,
+  link: SpanLink
+): Doc {
+  const cleared = end > start ? applyEdit(doc, start, end, '') : doc;
+  return insertSnippet(cleared, start, text, link);
+}
+
+/**
  * The general inline edit: replace [start, end) with `inserted` (user-typed
  * text). This is the provenance state machine's core transition table:
  *

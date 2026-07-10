@@ -106,21 +106,30 @@ function escapeXml(value: string): string {
 }
 
 /**
- * Copy Prompt output (§Copy output). Escapes always resolve. `asVariable` ON
- * (dedup mode): occurrences become `<prompt_var name="x"/>` and a
- * `<prompt_vars>` block appends after the body, one entry per distinct
- * variable in first-appearance order — an empty element is the honest "fill
- * me" signal; block values are XML-escaped. OFF (substitute in place): each
- * occurrence becomes the value verbatim (plain text — never escaped), else
+ * Copy Prompt output (§Copy output). Escapes always resolve. As-variable is a
+ * **per-variable** choice (`asVars`, keyed by name) — a name absent from the
+ * map is ON, the founder's default: as-variable never breaks anything, while an
+ * in-place substitution of unexpected data can silently bloat the prompt, so
+ * the safe side is the default and the user opts out per variable. One document
+ * therefore mixes modes.
+ *
+ * A variable that is **ON** (dedup mode): each occurrence becomes
+ * `<prompt_var name="x"/>`, and the appended `<prompt_vars>` block carries its
+ * value once — an empty element is the honest "fill me" signal; block values
+ * are XML-escaped. The block lists **only the ON variables**, still in
+ * first-appearance order. A variable that is **OFF** (substitute in place):
+ * each occurrence becomes the value verbatim (plain text — never escaped), else
  * the canonical literal `{x}` stays visible — never silently blanked.
  */
 export function copyText(
   text: string,
   fills: Record<string, string>,
-  asVariable: boolean
+  asVars: Record<string, boolean>
 ): string {
   const vars = parseVariables(text);
   const byName = new Map(vars.map((v) => [v.name, v]));
+  // A name absent from `asVars` is ON — the safe default (see doc comment).
+  const isOn = (name: string): boolean => asVars[name] !== false;
   const out: string[] = [];
   for (const t of scan(text)) {
     if (t.kind === 'literal') {
@@ -129,15 +138,16 @@ export function copyText(
     }
     const variable = byName.get(t.name);
     if (!variable) continue; // unreachable: scan produced the name
-    if (asVariable) {
+    if (isOn(t.name)) {
       out.push(`<prompt_var name="${t.name}"/>`);
     } else {
       const value = resolve(variable, fills);
       out.push(value !== undefined ? value : `{${t.name}}`);
     }
   }
-  if (asVariable && vars.length) {
-    const entries = vars.map((v) => {
+  const onVars = vars.filter((v) => isOn(v.name));
+  if (onVars.length) {
+    const entries = onVars.map((v) => {
       const value = escapeXml(resolve(v, fills) ?? '');
       return `<prompt_var name="${v.name}">${value}</prompt_var>`;
     });
