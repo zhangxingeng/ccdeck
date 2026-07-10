@@ -19,6 +19,7 @@ import type {
 import type {
   Piece,
   PieceInput,
+  PieceLoadError,
   MatchHit,
   EmbedStatus,
   EmbedProgress,
@@ -446,6 +447,13 @@ export async function matchPieces(
   return call<MatchHit[]>('match_pieces', { query, project, limit });
 }
 
+/** Piece JSON files that failed to parse on the last load pass — surfaced so
+ *  a hand-edit typo never reads as a silently vanished piece. */
+export async function pieceLoadErrors(): Promise<PieceLoadError[]> {
+  if (!isTauri()) return devPieceLoadErrors.map((e) => ({ ...e }));
+  return call<PieceLoadError[]>('piece_load_errors');
+}
+
 export async function embedStatus(): Promise<EmbedStatus> {
   if (!isTauri()) return { ...devEmbed };
   return call<EmbedStatus>('embed_status');
@@ -474,6 +482,15 @@ export async function setEmbedEnabled(enabled: boolean): Promise<void> {
 // --- Browser-dev piece store: real save/versioning semantics over seeded ----
 // sample pieces, so `pnpm dev` exercises the whole Prompts view (including
 // version history and the placeholder flow) with no native shell.
+
+// One seeded broken-file case so the load-errors notice is exercisable in
+// browser dev (dismiss it to see the common path).
+const devPieceLoadErrors: PieceLoadError[] = [
+  {
+    file: '~/.ccdeck/prompts/broken-example.json',
+    error: 'expected `,` or `}` at line 3 column 14',
+  },
+];
 
 const devPieces: Piece[] = [
   {

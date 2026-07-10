@@ -8,9 +8,17 @@
  * survives switching views — leaving Prompts to check a session and coming
  * back must not eat your composition.
  */
-import type { Piece, MatchHit, PieceInput, EmbedStatus, EmbedProgress } from './prompts/types';
+import type {
+  Piece,
+  MatchHit,
+  PieceInput,
+  PieceLoadError,
+  EmbedStatus,
+  EmbedProgress,
+} from './prompts/types';
 import {
   listPieces,
+  pieceLoadErrors,
   savePiece as apiSavePiece,
   deletePiece as apiDeletePiece,
   matchPieces,
@@ -58,6 +66,9 @@ export const prompts = $state({
   // library
   pieces: [] as Piece[],
   loadError: null as string | null,
+  /** Hand-edited piece files that failed to parse on the last load pass —
+   *  shown as a dismissable notice so a typo never reads as a lost piece. */
+  pieceLoadErrors: [] as PieceLoadError[],
   // active scope: null = "Global only", else a project's absolute cwd
   project: null as string | null,
   availableProjects: [] as PromptProjectOption[],
@@ -93,6 +104,13 @@ export async function initPrompts(): Promise<void> {
     prompts.loadError = null;
   } catch (e) {
     prompts.loadError = e instanceof Error ? e.message : String(e);
+  }
+  try {
+    prompts.pieceLoadErrors = await pieceLoadErrors();
+  } catch {
+    // Diagnostic surface only — if the command itself fails, the primary
+    // listPieces error above already tells the user loading is broken;
+    // keep whatever list we last had rather than flapping the notice.
   }
   refreshEmbedStatus();
   if (initialized) return;

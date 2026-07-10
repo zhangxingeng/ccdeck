@@ -25,6 +25,10 @@
   import EmbeddingsPanel from './prompts/EmbeddingsPanel.svelte';
 
   let panelCollapsed = $state(false);
+  // Dismissal is per-mount on purpose: the broken files are still broken on
+  // the next visit, and a data-loss warning that never comes back would
+  // itself be the silent loss it exists to prevent.
+  let loadErrorsDismissed = $state(false);
   let pendingInsert = $state<Piece | null>(null);
   let modalContext = $state<PieceModalContext | null>(null);
   let copyMsg = $state<string | null>(null);
@@ -129,6 +133,32 @@
     <div class="prompts-view__error">Couldn't load the piece library: {prompts.loadError}</div>
   {/if}
 
+  {#if prompts.pieceLoadErrors.length && !loadErrorsDismissed}
+    <div class="prompts-view__load-warn" role="status">
+      <div class="prompts-view__load-warn-text">
+        <strong>
+          {prompts.pieceLoadErrors.length} piece file{prompts.pieceLoadErrors.length === 1 ? '' : 's'}
+          couldn't be read
+        </strong>
+        — fix or remove {prompts.pieceLoadErrors.length === 1 ? 'it' : 'them'} (the rest of the
+        library loaded fine):
+        <ul>
+          {#each prompts.pieceLoadErrors as e (e.file)}
+            <li><code>{e.file}</code>: {e.error}</li>
+          {/each}
+        </ul>
+      </div>
+      <button
+        type="button"
+        class="btn btn--ghost btn--sm"
+        onclick={() => (loadErrorsDismissed = true)}
+        aria-label="Dismiss piece-file warning"
+      >
+        ✕
+      </button>
+    </div>
+  {/if}
+
   <div class="prompts-view__cols">
     {#if !panelCollapsed}
       <aside class="prompts-view__panel">
@@ -191,6 +221,31 @@
     max-width: 16rem;
   }
   .prompts-view__spacer { flex: 1; }
+
+  /* Non-blocking, dismissable: pieces that DID load work normally; this only
+     flags the files that didn't. Amber (template accent), not error red —
+     the library isn't broken, some files are. */
+  .prompts-view__load-warn {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    border: 1px solid color-mix(in srgb, var(--accent-template) 30%, transparent);
+    background: color-mix(in srgb, var(--accent-template) 7%, transparent);
+    border-radius: 0.4rem;
+    padding: 0.5rem 0.75rem;
+  }
+  .prompts-view__load-warn-text { flex: 1; }
+  .prompts-view__load-warn strong { color: var(--text); }
+  .prompts-view__load-warn ul {
+    margin: 0.25rem 0 0;
+    padding-left: 1.1rem;
+  }
+  .prompts-view__load-warn code {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+  }
 
   .prompts-view__error {
     font-size: 0.75rem;

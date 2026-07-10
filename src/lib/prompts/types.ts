@@ -58,6 +58,15 @@ export interface MatchHit {
   source: 'lexical' | 'semantic' | 'hybrid';
 }
 
+/** A piece JSON file that failed to parse on the last load pass. Pieces are
+ *  hand-editable by design (F7), so broken files WILL happen — without this
+ *  surface a broken piece silently vanishes from the library, which reads as
+ *  data loss to exactly the hand-editing persona the feature bets on. */
+export interface PieceLoadError {
+  file: string;
+  error: string;
+}
+
 /** Embedding engine states: 'off' = downloaded but user-disabled;
  *  'ready' + enabled = hybrid matching on. */
 export interface EmbedStatus {
