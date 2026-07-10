@@ -167,7 +167,11 @@ always resolves escapes (`{{`→`{`).
   Value resolution: user-filled value, else default, else empty element (an empty
   `<prompt_var name="x"></prompt_var>` is an honest "fill me" signal to the reading LLM).
   The wrapper form `<prompt_var name="x">` is used (not `<x>`) because variable names may start
-  with digits or hyphens, which are invalid XML element names.
+  with digits or hyphens, which are invalid XML element names. Values interpolated into the
+  block are XML-escaped (`&`→`&amp;`, `<`→`&lt;`, `>`→`&gt;`): the wrapper form exists for
+  parseability, and an unescaped value containing `</prompt_var>` could inject phantom
+  variables into what the reading LLM sees. (Names need no escaping — the grammar's name class
+  is attribute-safe by construction.)
 - **OFF** (substitute in place): each occurrence is replaced by user value, else default, else
   the **canonical** literal `{x}` stays (not the occurrence's original spelling — relevant when
   a later occurrence carried a rule-5-ignored default) — visible, so an unfilled variable is
@@ -259,6 +263,19 @@ unchanged), **linked-modified** (edited inline; never touches the stored piece).
 - **The user's file on disk is never rewritten by the loader.** The repaired form persists only
   on the user's next explicit save of that piece — which appends a version like any body change.
 - Unrecoverable files stay in `piece_load_errors` exactly as in Core: visible, intact on disk.
+- **Every write path sees what the loader sees.** Save, delete, twin cleanup, and
+  delete-project rescope operate on the loader's repair-aware, canonical-filename-wins view —
+  never on a stricter parse. A write/delete decision made from a narrower view than the
+  loader's can destroy data the loader would surface (rescope overwriting the canonical body
+  with a stale twin) or fail to remove data the loader will resurrect (a deleted piece
+  reappearing from a repairable twin). When neither same-id twin is canonically named, the
+  surviving winner is deterministic (lexicographic filename order), never directory-iteration
+  order.
+- The same in-memory repair applies to `projects.json`. A roster repair that *succeeds*
+  surfaces as a `piece_load_errors` entry naming the file (repair can silently drop truncated
+  records, and the roster has no per-record recovered flag — the notice is the user's cue to
+  inspect before the next project save rewrites the file); an unrepairable roster is a loud
+  `Err`, never a silent-empty roster.
 
 ## Legacy-state migration — de-contaminate `~/.claude`
 
