@@ -15,6 +15,11 @@ vite.config.ts.timestamp-*
 .claude/scheduled_tasks.lock
 .claude/memory/*
 !.claude/memory/MEMORY.md
+# Hook fire-once dedup markers (per-session runtime state — hook_protocol.mdx)
+.claude/hooks/.state/
+# Colocated scratch: transient output lives beside its producer in a tmp/ dir
+# (claude-workspace skill); one bare line covers every depth
+tmp/
 
 # Real chat history must never be committed (mock fixtures under tests/ are fine)
 *.jsonl
