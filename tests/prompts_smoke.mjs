@@ -233,6 +233,21 @@ console.log('variable grammar (shared vectors)');
     [{ name: 'x', default: 'a' }],
     'vector (rule 5): {x:a} {x:b} — one variable, first default wins'
   );
+  eq(
+    parseVariables('{x} {x:b}'),
+    [{ name: 'x' }],
+    'vector (rule 5, plain read): {x} {x:b} — first occurrence wins even with NO default'
+  );
+  eq(
+    parseVariables('{a:{b}}'),
+    [{ name: 'b' }],
+    'vector: {a:{b}} — failed run consumes nothing; literal {a: + variable b + literal }'
+  );
+  eq(
+    copyText('{a:{b}}', { b: 'X' }, false),
+    '{a:X}',
+    'vector: {a:{b}} substitute mode — inner variable fills, outer braces stay literal'
+  );
 
   // Rule 4: one name = one variable across the whole document.
   eq(
