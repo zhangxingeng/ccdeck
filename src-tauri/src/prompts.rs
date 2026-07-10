@@ -6,6 +6,8 @@
 //!   `store`   — one-JSON-per-piece store under `<data root>/prompts/`,
 //!               hand-editable, unknown fields preserved, append-only body
 //!               versioning.
+//!   `projects` — the project roster (`<data root>/projects.json`): named,
+//!               colored, pinnable groupings pieces reference by id.
 //!   `grammar` — the shared single-brace variable grammar (seam contract:
 //!               the TS lane implements the identical spec, both assert the
 //!               contract's shared vectors).
@@ -17,6 +19,7 @@
 mod embed;
 mod grammar;
 mod lexical;
+mod projects;
 mod store;
 
 // Public so lib.rs can register the commands by their real paths.

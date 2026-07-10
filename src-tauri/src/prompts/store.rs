@@ -8,6 +8,7 @@
 //! over filename so a hand-copied file with a stale name still loads, and
 //! saves always land at `<id>.json` (cleaning up stale-named twins).
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,14 +18,17 @@ use serde_json::{Map, Value};
 
 use super::grammar::{self, Placeholder};
 
-/// Where a piece applies: everywhere, or one project (the decoded cwd the
-/// app's project picker shows — readable in hand-edited JSON).
+/// Where a piece applies: everywhere, or one roster project referenced by id
+/// (the roster owns name/color, so a rename or recolor never touches piece
+/// files). Legacy/unknown scope shapes — the pre-revision path-keyed form, or
+/// an id no roster entry matches — load as Global plus a `piece_load_errors`
+/// entry, file untouched (see [`scan_pieces`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Scope {
     #[default]
     Global,
-    Project { project: String },
+    Project { project_id: String },
 }
 
 /// One prior body, pushed when a save changes the body. `saved_at` is when
@@ -92,11 +96,65 @@ pub fn prompts_dir() -> Result<PathBuf, String> {
     Ok(crate::datadir::data_root()?.join("prompts"))
 }
 
-fn unix_now() -> u64 {
+pub(super) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Parse one piece file's content: strict JSON first, then scope
+/// normalization — a legacy/unknown scope (or, when the roster is readable,
+/// a `project_id` no roster entry matches) loads as Global and comes back as
+/// a load error alongside the piece: visible, non-fatal, file untouched.
+/// `known_project_ids: None` means the roster could not be consulted — id
+/// validation is suspended rather than falsely degrading every project piece.
+fn parse_piece(
+    content: &str,
+    fname: &str,
+    known_project_ids: Option<&HashSet<String>>,
+) -> Result<(Piece, Option<LoadError>), String> {
+    let mut value: Value = serde_json::from_str(content).map_err(|e| e.to_string())?;
+    let scope_error = normalize_scope(&mut value, fname, known_project_ids);
+    let piece: Piece = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    Ok((piece, scope_error))
+}
+
+/// Rewrite an unusable `scope` IN MEMORY to global, returning the honest
+/// notice. The no-dual-schema call (contract): the feature never shipped in
+/// a release, so this notice — not a migration — is the whole path.
+fn normalize_scope(
+    value: &mut Value,
+    fname: &str,
+    known_project_ids: Option<&HashSet<String>>,
+) -> Option<LoadError> {
+    let global = serde_json::json!({ "kind": "global" });
+    let scope = value.get("scope")?; // absent → serde default (Global), no notice
+    match serde_json::from_value::<Scope>(scope.clone()) {
+        Ok(Scope::Global) => None,
+        Ok(Scope::Project { project_id }) => match known_project_ids {
+            Some(ids) if !ids.contains(&project_id) => {
+                value["scope"] = global;
+                Some(LoadError {
+                    file: fname.to_string(),
+                    error: format!(
+                        "scope references unknown project {project_id}; loaded as global (file untouched)"
+                    ),
+                })
+            }
+            _ => None,
+        },
+        Err(_) => {
+            let legacy = scope.clone();
+            value["scope"] = global;
+            Some(LoadError {
+                file: fname.to_string(),
+                error: format!(
+                    "unrecognized scope {legacy} (pre-release shape?); loaded as global (file untouched)"
+                ),
+            })
+        }
+    }
 }
 
 /// A piece file the loader could not honor: broken JSON, or shadowed by a
@@ -117,7 +175,10 @@ pub struct LoadError {
 /// bad file would hide every other piece). Duplicate ids (hand-copied files):
 /// the file actually named `<id>.json` wins, the shadowed ones are reported.
 /// Pieces sorted newest-updated first as a sensible default.
-pub fn scan_pieces(dir: &Path) -> Result<(Vec<Piece>, Vec<LoadError>), String> {
+pub fn scan_pieces(
+    dir: &Path,
+    known_project_ids: Option<&HashSet<String>>,
+) -> Result<(Vec<Piece>, Vec<LoadError>), String> {
     if !dir.is_dir() {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -136,9 +197,12 @@ pub fn scan_pieces(dir: &Path) -> Result<(Vec<Piece>, Vec<LoadError>), String> {
         }
         let piece: Piece = match fs::read_to_string(&path)
             .map_err(|e| e.to_string())
-            .and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
+            .and_then(|s| parse_piece(&s, fname, known_project_ids))
         {
-            Ok(p) => p,
+            Ok((p, scope_notice)) => {
+                errors.extend(scope_notice);
+                p
+            }
             Err(e) => {
                 errors.push(LoadError { file: fname.to_string(), error: e });
                 continue;
@@ -170,8 +234,11 @@ pub fn scan_pieces(dir: &Path) -> Result<(Vec<Piece>, Vec<LoadError>), String> {
 /// on stderr so headless contexts keep a trace; the UI-visible surface is the
 /// `piece_load_errors` command, which runs its own fresh scan (stateless —
 /// it can never serve stale errors from an earlier pass).
-pub fn load_pieces(dir: &Path) -> Result<Vec<Piece>, String> {
-    let (pieces, errors) = scan_pieces(dir)?;
+pub fn load_pieces(
+    dir: &Path,
+    known_project_ids: Option<&HashSet<String>>,
+) -> Result<Vec<Piece>, String> {
+    let (pieces, errors) = scan_pieces(dir, known_project_ids)?;
     for e in &errors {
         eprintln!("[prompts] skipping piece file {}: {}", e.file, e.error);
     }
@@ -189,11 +256,16 @@ fn resolve_existing(dir: &Path, id: &str) -> Result<Option<Piece>, String> {
     let canonical = dir.join(format!("{id}.json"));
     if canonical.is_file() {
         let content = fs::read_to_string(&canonical).map_err(|e| e.to_string())?;
-        let piece: Piece = serde_json::from_str(&content).map_err(|e| {
-            format!(
-                "refusing to save piece {id}: {id}.json exists but cannot be parsed ({e}) — fix or remove the file first, so the save cannot destroy its contents"
-            )
-        })?;
+        // parse_piece (not bare serde): a legacy-scope file must stay
+        // saveable — the explicit save is exactly the moment its normalized
+        // scope is allowed to persist. Scope validation is skipped (None):
+        // the save overwrites `scope` from the input anyway.
+        let (piece, _scope_notice) = parse_piece(&content, &format!("{id}.json"), None)
+            .map_err(|e| {
+                format!(
+                    "refusing to save piece {id}: {id}.json exists but cannot be parsed ({e}) — fix or remove the file first, so the save cannot destroy its contents"
+                )
+            })?;
         if piece.id != id {
             return Err(format!(
                 "refusing to save piece {id}: {id}.json holds a different piece ({}) — rename or remove that file first",
@@ -203,7 +275,7 @@ fn resolve_existing(dir: &Path, id: &str) -> Result<Option<Piece>, String> {
         return Ok(Some(piece));
     }
     // No canonical file: the id may live in a hand-copied stale-named file.
-    Ok(load_pieces(dir)?.into_iter().find(|p| p.id == id))
+    Ok(load_pieces(dir, None)?.into_iter().find(|p| p.id == id))
 }
 
 /// Create (no id) or update (id present) a piece. Versioning per the
@@ -333,6 +405,50 @@ pub fn save_piece(input: PieceInput) -> Result<Piece, String> {
     save_piece_at(&prompts_dir()?, input, unix_now())
 }
 
+/// Rescope every piece of `project_id` to global — the delete-project
+/// semantics (contract: nothing a user wrote ever vanishes as a side effect;
+/// the pieces surface again under Global). Metadata-only by design: no
+/// version push, `updated_at` untouched — the user changed nothing about the
+/// piece itself. Only cleanly-parsed files are rewritten; a broken file is
+/// never repaired-and-rewritten as a side effect of deleting a project — it
+/// degrades safely later via the unknown-project fallback once the roster
+/// entry is gone.
+pub fn rescope_project_pieces(dir: &Path, project_id: &str) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let target = Scope::Project { project_id: project_id.to_string() };
+    // Collect first, write after: rewriting (and twin-cleaning) while
+    // read_dir is still iterating makes the listing platform-dependent.
+    let mut to_rescope: Vec<Piece> = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
+        let path = entry.path();
+        let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !fname.ends_with(".json") || fname.starts_with('.') {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue; // unreadable → handled by the load-error surface
+        };
+        let Ok(piece) = serde_json::from_str::<Piece>(&content) else {
+            continue; // broken/legacy → the dangling-id fallback covers it
+        };
+        if piece.scope == target && !to_rescope.iter().any(|p| p.id == piece.id) {
+            to_rescope.push(piece);
+        }
+    }
+    for mut piece in to_rescope {
+        piece.scope = Scope::Global;
+        write_piece(dir, &piece)?;
+        // A piece that lived only in a stale-named file now has a canonical
+        // twin — clean up exactly as a save does.
+        remove_stale_twins(dir, &piece.id);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,7 +523,7 @@ mod tests {
         )
         .unwrap();
 
-        let (pieces, errors) = scan_pieces(&dir).unwrap();
+        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
         assert_eq!(pieces.len(), 1, "good piece must still load");
         assert_eq!(pieces[0].id, "good");
         assert_eq!(errors.len(), 1, "the broken file must be reported, not silently skipped");
@@ -419,7 +535,7 @@ mod tests {
             "the bad file must stay byte-identical for the user to fix"
         );
         // The pieces-only wrapper sees the same world minus the errors.
-        assert_eq!(load_pieces(&dir).unwrap().len(), 1);
+        assert_eq!(load_pieces(&dir, None).unwrap().len(), 1);
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -440,7 +556,7 @@ mod tests {
         )
         .unwrap();
 
-        let (pieces, errors) = scan_pieces(&dir).unwrap();
+        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
         assert_eq!(pieces.len(), 1);
         assert_eq!(pieces[0].title, "canonical");
         assert_eq!(errors.len(), 1);
@@ -463,7 +579,7 @@ mod tests {
         )
         .unwrap();
 
-        let pieces = load_pieces(&dir).unwrap();
+        let pieces = load_pieces(&dir, None).unwrap();
         assert_eq!(pieces.len(), 1);
         assert_eq!(pieces[0].title, "canonical");
         fs::remove_dir_all(&dir).unwrap();
@@ -478,7 +594,7 @@ mod tests {
         )
         .unwrap();
 
-        let pieces = load_pieces(&dir).unwrap();
+        let pieces = load_pieces(&dir, None).unwrap();
         assert_eq!(pieces[0].id, "real-id", "content id wins over filename");
 
         let mut inp = input("t", "b");
@@ -486,7 +602,7 @@ mod tests {
         save_piece_at(&dir, inp, 2).unwrap();
         assert!(dir.join("real-id.json").is_file(), "save lands at <id>.json");
         assert!(!dir.join("hand-copied.json").exists(), "stale twin cleaned up");
-        assert_eq!(load_pieces(&dir).unwrap().len(), 1);
+        assert_eq!(load_pieces(&dir, None).unwrap().len(), 1);
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -613,6 +729,121 @@ mod tests {
     // Placeholder-grammar edge cases live in `grammar::tests` (the shared
     // contract vectors, asserted verbatim by both lanes).
 
+    // --- scope v2: legacy/unknown shapes load as global, visibly ---
+
+    #[test]
+    fn legacy_scope_loads_as_global_with_notice_and_untouched_file() {
+        let dir = tmp_dir("legacy-scope");
+        // The pre-revision path-keyed shape (founder feel-check data).
+        let raw = r#"{"id":"a","title":"t","body":"b","created_at":1,"updated_at":1,"scope":{"kind":"project","project":"/home/u/proj"}}"#;
+        fs::write(dir.join("a.json"), raw).unwrap();
+
+        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
+        assert_eq!(pieces.len(), 1, "the piece must LOAD, not be skipped");
+        assert_eq!(pieces[0].scope, Scope::Global);
+        assert_eq!(errors.len(), 1, "the degradation must be visible");
+        assert_eq!(errors[0].file, "a.json");
+        assert!(errors[0].error.contains("unrecognized scope"), "{}", errors[0].error);
+        assert_eq!(
+            fs::read_to_string(dir.join("a.json")).unwrap(),
+            raw,
+            "the loader must NEVER rewrite the user's file"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unknown_project_id_loads_as_global_when_roster_is_readable() {
+        let dir = tmp_dir("dangling-scope");
+        let raw = r#"{"id":"a","title":"t","body":"b","created_at":1,"updated_at":1,"scope":{"kind":"project","project_id":"ghost"}}"#;
+        fs::write(dir.join("a.json"), raw).unwrap();
+
+        let known: HashSet<String> = ["real".to_string()].into();
+        let (pieces, errors) = scan_pieces(&dir, Some(&known)).unwrap();
+        assert_eq!(pieces[0].scope, Scope::Global);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].error.contains("unknown project ghost"), "{}", errors[0].error);
+        assert_eq!(fs::read_to_string(dir.join("a.json")).unwrap(), raw);
+
+        // Roster unreadable (None): validation suspends, the scope holds.
+        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
+        assert_eq!(pieces[0].scope, Scope::Project { project_id: "ghost".into() });
+        assert!(errors.is_empty());
+
+        // Known id: no degradation, no notice.
+        let known: HashSet<String> = ["ghost".to_string()].into();
+        let (pieces, errors) = scan_pieces(&dir, Some(&known)).unwrap();
+        assert_eq!(pieces[0].scope, Scope::Project { project_id: "ghost".into() });
+        assert!(errors.is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn save_over_legacy_scope_file_proceeds_and_persists_clean_scope() {
+        // The explicit save is the one moment normalization may persist:
+        // loading never rewrites, but a user edit of a legacy-scope piece
+        // must not be refused (versions/extras still merge).
+        let dir = tmp_dir("legacy-save");
+        let raw = r#"{"id":"a","title":"t","body":"old","created_at":1,"updated_at":1,"scope":{"kind":"project","project":"/p"},"my_note":"kept"}"#;
+        fs::write(dir.join("a.json"), raw).unwrap();
+
+        let mut inp = input("t", "new");
+        inp.id = Some("a".to_string());
+        let saved = save_piece_at(&dir, inp, 2).unwrap();
+        assert_eq!(saved.scope, Scope::Global, "input scope wins on save");
+        assert_eq!(saved.versions.len(), 1, "body change still versions");
+        assert_eq!(saved.versions[0].body, "old");
+        assert_eq!(saved.extra["my_note"], "kept");
+
+        let reread: Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("a.json")).unwrap()).unwrap();
+        assert_eq!(reread["scope"]["kind"], "global");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // --- delete-project rescope ---
+
+    #[test]
+    fn rescope_moves_target_pieces_to_global_without_versioning() {
+        let dir = tmp_dir("rescope");
+        let mut mine = input("mine", "b");
+        mine.scope = Scope::Project { project_id: "target".into() };
+        let mine = save_piece_at(&dir, mine, 100).unwrap();
+        let mut other = input("other", "b");
+        other.scope = Scope::Project { project_id: "different".into() };
+        let other = save_piece_at(&dir, other, 100).unwrap();
+
+        rescope_project_pieces(&dir, "target").unwrap();
+
+        let pieces = load_pieces(&dir, None).unwrap();
+        let by_id = |id: &str| pieces.iter().find(|p| p.id == id).unwrap();
+        assert_eq!(by_id(&mine.id).scope, Scope::Global, "target pieces rescoped");
+        assert!(by_id(&mine.id).versions.is_empty(), "rescope is metadata-only: no version");
+        assert_eq!(by_id(&mine.id).updated_at, 100, "rescope is metadata-only: updated_at holds");
+        assert_eq!(
+            by_id(&other.id).scope,
+            Scope::Project { project_id: "different".into() },
+            "other projects' pieces untouched"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rescope_leaves_broken_files_alone() {
+        let dir = tmp_dir("rescope-broken");
+        let broken = r#"{"id":"x","scope":{"kind":"project","project_id":"target"},"title":"t""#;
+        fs::write(dir.join("x.json"), broken).unwrap();
+
+        rescope_project_pieces(&dir, "target").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.join("x.json")).unwrap(),
+            broken,
+            "a broken file is never repaired-and-rewritten as a delete side effect"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     // --- delete ---
 
     #[test]
@@ -630,7 +861,7 @@ mod tests {
         .unwrap();
 
         delete_piece_at(&dir, "x").unwrap();
-        assert!(load_pieces(&dir).unwrap().is_empty(), "no file may resurrect the piece");
+        assert!(load_pieces(&dir, None).unwrap().is_empty(), "no file may resurrect the piece");
         delete_piece_at(&dir, "x").unwrap(); // idempotent
         fs::remove_dir_all(&dir).unwrap();
     }
