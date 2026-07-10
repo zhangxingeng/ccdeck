@@ -56,6 +56,13 @@ pub struct AppConfig {
     /// embeddings are strictly opt-in — "ready + downloaded + enabled" is
     /// what turns hybrid matching on.
     pub embed_enabled: bool,
+    /// Prompt Library compose-box "as variable" copy toggle (contract § Copy
+    /// output; JSON key `promptsAsVariable`). Defaults to `true`: dedup mode
+    /// — a long value is stated once as a `<prompt_var>` block, never
+    /// repeated inline. The frontend persists the toggle through the
+    /// existing config get/set commands.
+    #[serde(default = "default_true")]
+    pub prompts_as_variable: bool,
 }
 
 impl Default for AppConfig {
@@ -65,6 +72,7 @@ impl Default for AppConfig {
             launch_command: String::new(),
             update_check_on_launch: true,
             embed_enabled: false,
+            prompts_as_variable: true,
         }
     }
 }
@@ -313,6 +321,19 @@ mod tests {
         let json = r#"{"updateCheckOnLaunch":false}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert!(!config.update_check_on_launch);
+    }
+
+    #[test]
+    fn prompts_as_variable_defaults_true_and_round_trips() {
+        // Contract § Copy output: the toggle defaults ON — a config written
+        // before the field existed must load as enabled; an explicit false
+        // must survive, under the camelCase key its siblings use.
+        let old: AppConfig = serde_json::from_str(r#"{"terminal":""}"#).unwrap();
+        assert!(old.prompts_as_variable, "missing key must default to true");
+        let off: AppConfig = serde_json::from_str(r#"{"promptsAsVariable":false}"#).unwrap();
+        assert!(!off.prompts_as_variable);
+        let json = serde_json::to_string(&AppConfig::default()).unwrap();
+        assert!(json.contains(r#""promptsAsVariable":true"#), "camelCase like its siblings: {json}");
     }
 
     #[test]

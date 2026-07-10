@@ -16,21 +16,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-/// Where a piece applies: everywhere, or one project (the decoded cwd the
-/// app's project picker shows — readable in hand-edited JSON).
+use super::grammar::{self, Placeholder};
+
+/// Where a piece applies: everywhere, or one roster project referenced by id
+/// (the roster owns name/color, so a rename or recolor never touches piece
+/// files). Legacy/unknown scope shapes — the pre-revision path-keyed form, or
+/// an id no roster entry matches — load as Global plus a `piece_load_errors`
+/// entry, file untouched (see [`scan_pieces`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Scope {
     #[default]
     Global,
-    Project { project: String },
-}
-
-/// A `{{token}}` occurrence in the body, derived at save time (the body is
-/// the single source of truth; this array exists so consumers don't re-parse).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Placeholder {
-    pub name: String,
+    Project { project_id: String },
 }
 
 /// One prior body, pushed when a save changes the body. `saved_at` is when
@@ -65,6 +63,13 @@ pub struct Piece {
     pub updated_at: u64,
     #[serde(default)]
     pub versions: Vec<Version>,
+    /// Transient (§ Store robustness): true when the loader had to repair
+    /// this file's JSON in memory. Never persisted — a clean parse forces it
+    /// false (so a hand-written `"recovered": true` can't fake the signal;
+    /// the key is schema-reserved, not a preserved extra), saves construct
+    /// pieces with false, and the skip keeps a false flag off disk and wire.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recovered: bool,
     /// Unknown fields from hand-edited files, preserved verbatim on
     /// round-trip. serde_json keeps u64/i64 integers exact (the "numbers past
     /// 2^53" hazard is a JavaScript float problem, covered by tests here so a
@@ -98,43 +103,76 @@ pub fn prompts_dir() -> Result<PathBuf, String> {
     Ok(crate::datadir::data_root()?.join("prompts"))
 }
 
-fn unix_now() -> u64 {
+pub(super) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
 }
 
-/// Is `c` allowed in a placeholder name? The grammar is `[\w.-]+` — exactly
-/// the frontend's `parsePlaceholders` regex (ASCII `\w`, so no spaces, no
-/// unicode letters). The two lanes MUST agree: a looser rule here would store
-/// a placeholder entry the fill-in popover never shows (audit M2).
-fn is_placeholder_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')
+/// Parse one piece file's content: strict JSON first; on failure an
+/// in-memory jsonrepair attempt (§ Store robustness) — a recovered piece
+/// loads flagged `recovered: true` and the file stays untouched. Then scope
+/// normalization: a legacy/unknown scope (or, when the roster is readable, a
+/// `project_id` no roster entry matches) loads as Global and comes back as a
+/// load error alongside the piece: visible, non-fatal, file untouched.
+/// `known_project_ids: None` means the roster could not be consulted — id
+/// validation is suspended rather than falsely degrading every project piece.
+fn parse_piece(
+    content: &str,
+    fname: &str,
+    known_project_ids: Option<&HashSet<String>>,
+) -> Result<(Piece, Option<LoadError>), String> {
+    let (mut value, repaired) = match serde_json::from_str::<Value>(content) {
+        Ok(v) => (v, false),
+        Err(strict_err) => match super::repair::repair_to_value(content) {
+            Some(v) => (v, true),
+            // Report the STRICT error — it points at the user's actual
+            // file, not at what the repairer made of it.
+            None => return Err(strict_err.to_string()),
+        },
+    };
+    let scope_error = normalize_scope(&mut value, fname, known_project_ids);
+    let mut piece: Piece = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    piece.recovered = repaired;
+    Ok((piece, scope_error))
 }
 
-/// Derive `placeholders` from `{{token}}` occurrences: token must fully match
-/// `[\w.-]+` (no trimming — `{{ a }}` is prose, not a placeholder), deduped
-/// in first-seen order.
-pub fn derive_placeholders(body: &str) -> Vec<Placeholder> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    let mut rest = body;
-    while let Some(start) = rest.find("{{") {
-        let after = &rest[start + 2..];
-        let Some(end) = after.find("}}") else {
-            break;
-        };
-        let name = &after[..end];
-        if !name.is_empty()
-            && name.chars().all(is_placeholder_char)
-            && seen.insert(name.to_string())
-        {
-            out.push(Placeholder { name: name.to_string() });
+/// Rewrite an unusable `scope` IN MEMORY to global, returning the honest
+/// notice. The no-dual-schema call (contract): the feature never shipped in
+/// a release, so this notice — not a migration — is the whole path.
+fn normalize_scope(
+    value: &mut Value,
+    fname: &str,
+    known_project_ids: Option<&HashSet<String>>,
+) -> Option<LoadError> {
+    let global = serde_json::json!({ "kind": "global" });
+    let scope = value.get("scope")?; // absent → serde default (Global), no notice
+    match serde_json::from_value::<Scope>(scope.clone()) {
+        Ok(Scope::Global) => None,
+        Ok(Scope::Project { project_id }) => match known_project_ids {
+            Some(ids) if !ids.contains(&project_id) => {
+                value["scope"] = global;
+                Some(LoadError {
+                    file: fname.to_string(),
+                    error: format!(
+                        "scope references unknown project {project_id}; loaded as global (file untouched)"
+                    ),
+                })
+            }
+            _ => None,
+        },
+        Err(_) => {
+            let legacy = scope.clone();
+            value["scope"] = global;
+            Some(LoadError {
+                file: fname.to_string(),
+                error: format!(
+                    "unrecognized scope {legacy} (pre-release shape?); loaded as global (file untouched)"
+                ),
+            })
         }
-        rest = &after[end + 2..];
     }
-    out
 }
 
 /// A piece file the loader could not honor: broken JSON, or shadowed by a
@@ -155,7 +193,10 @@ pub struct LoadError {
 /// bad file would hide every other piece). Duplicate ids (hand-copied files):
 /// the file actually named `<id>.json` wins, the shadowed ones are reported.
 /// Pieces sorted newest-updated first as a sensible default.
-pub fn scan_pieces(dir: &Path) -> Result<(Vec<Piece>, Vec<LoadError>), String> {
+pub fn scan_pieces(
+    dir: &Path,
+    known_project_ids: Option<&HashSet<String>>,
+) -> Result<(Vec<Piece>, Vec<LoadError>), String> {
     if !dir.is_dir() {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -174,9 +215,12 @@ pub fn scan_pieces(dir: &Path) -> Result<(Vec<Piece>, Vec<LoadError>), String> {
         }
         let piece: Piece = match fs::read_to_string(&path)
             .map_err(|e| e.to_string())
-            .and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
+            .and_then(|s| parse_piece(&s, fname, known_project_ids))
         {
-            Ok(p) => p,
+            Ok((p, scope_notice)) => {
+                errors.extend(scope_notice);
+                p
+            }
             Err(e) => {
                 errors.push(LoadError { file: fname.to_string(), error: e });
                 continue;
@@ -208,8 +252,11 @@ pub fn scan_pieces(dir: &Path) -> Result<(Vec<Piece>, Vec<LoadError>), String> {
 /// on stderr so headless contexts keep a trace; the UI-visible surface is the
 /// `piece_load_errors` command, which runs its own fresh scan (stateless —
 /// it can never serve stale errors from an earlier pass).
-pub fn load_pieces(dir: &Path) -> Result<Vec<Piece>, String> {
-    let (pieces, errors) = scan_pieces(dir)?;
+pub fn load_pieces(
+    dir: &Path,
+    known_project_ids: Option<&HashSet<String>>,
+) -> Result<Vec<Piece>, String> {
+    let (pieces, errors) = scan_pieces(dir, known_project_ids)?;
     for e in &errors {
         eprintln!("[prompts] skipping piece file {}: {}", e.file, e.error);
     }
@@ -227,11 +274,17 @@ fn resolve_existing(dir: &Path, id: &str) -> Result<Option<Piece>, String> {
     let canonical = dir.join(format!("{id}.json"));
     if canonical.is_file() {
         let content = fs::read_to_string(&canonical).map_err(|e| e.to_string())?;
-        let piece: Piece = serde_json::from_str(&content).map_err(|e| {
-            format!(
-                "refusing to save piece {id}: {id}.json exists but cannot be parsed ({e}) — fix or remove the file first, so the save cannot destroy its contents"
-            )
-        })?;
+        // parse_piece (not bare serde): a legacy-scope or repairable file
+        // must stay saveable — the explicit save is exactly the moment its
+        // normalized/repaired form is allowed to persist (versions append,
+        // extras merge, like any body change). Scope validation is skipped
+        // (None): the save overwrites `scope` from the input anyway.
+        let (piece, _scope_notice) = parse_piece(&content, &format!("{id}.json"), None)
+            .map_err(|e| {
+                format!(
+                    "refusing to save piece {id}: {id}.json exists but cannot be parsed even after repair ({e}) — fix or remove the file first, so the save cannot destroy its contents"
+                )
+            })?;
         if piece.id != id {
             return Err(format!(
                 "refusing to save piece {id}: {id}.json holds a different piece ({}) — rename or remove that file first",
@@ -241,7 +294,7 @@ fn resolve_existing(dir: &Path, id: &str) -> Result<Option<Piece>, String> {
         return Ok(Some(piece));
     }
     // No canonical file: the id may live in a hand-copied stale-named file.
-    Ok(load_pieces(dir)?.into_iter().find(|p| p.id == id))
+    Ok(load_pieces(dir, None)?.into_iter().find(|p| p.id == id))
 }
 
 /// Create (no id) or update (id present) a piece. Versioning per the
@@ -271,10 +324,11 @@ pub fn save_piece_at(dir: &Path, input: PieceInput, now: u64) -> Result<Piece, S
                 tags: input.tags,
                 category: input.category,
                 scope: input.scope,
-                placeholders: derive_placeholders(&input.body),
+                placeholders: grammar::derive_placeholders(&input.body),
                 created_at: prev.created_at,
                 updated_at: now,
                 versions: prev.versions,
+                recovered: false,
                 extra: prev.extra,
             }
         }
@@ -286,10 +340,11 @@ pub fn save_piece_at(dir: &Path, input: PieceInput, now: u64) -> Result<Piece, S
             tags: input.tags,
             category: input.category,
             scope: input.scope,
-            placeholders: derive_placeholders(&input.body),
+            placeholders: grammar::derive_placeholders(&input.body),
             created_at: now,
             updated_at: now,
             versions: Vec::new(),
+            recovered: false,
             extra: Map::new(),
         },
     };
@@ -371,6 +426,50 @@ pub fn save_piece(input: PieceInput) -> Result<Piece, String> {
     save_piece_at(&prompts_dir()?, input, unix_now())
 }
 
+/// Rescope every piece of `project_id` to global — the delete-project
+/// semantics (contract: nothing a user wrote ever vanishes as a side effect;
+/// the pieces surface again under Global). Metadata-only by design: no
+/// version push, `updated_at` untouched — the user changed nothing about the
+/// piece itself. Only cleanly-parsed files are rewritten; a broken file is
+/// never repaired-and-rewritten as a side effect of deleting a project — it
+/// degrades safely later via the unknown-project fallback once the roster
+/// entry is gone.
+pub fn rescope_project_pieces(dir: &Path, project_id: &str) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let target = Scope::Project { project_id: project_id.to_string() };
+    // Collect first, write after: rewriting (and twin-cleaning) while
+    // read_dir is still iterating makes the listing platform-dependent.
+    let mut to_rescope: Vec<Piece> = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
+        let path = entry.path();
+        let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !fname.ends_with(".json") || fname.starts_with('.') {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue; // unreadable → handled by the load-error surface
+        };
+        let Ok(piece) = serde_json::from_str::<Piece>(&content) else {
+            continue; // broken/legacy → the dangling-id fallback covers it
+        };
+        if piece.scope == target && !to_rescope.iter().any(|p| p.id == piece.id) {
+            to_rescope.push(piece);
+        }
+    }
+    for mut piece in to_rescope {
+        piece.scope = Scope::Global;
+        write_piece(dir, &piece)?;
+        // A piece that lived only in a stale-named file now has a canonical
+        // twin — clean up exactly as a save does.
+        remove_stale_twins(dir, &piece.id);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,7 +544,7 @@ mod tests {
         )
         .unwrap();
 
-        let (pieces, errors) = scan_pieces(&dir).unwrap();
+        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
         assert_eq!(pieces.len(), 1, "good piece must still load");
         assert_eq!(pieces[0].id, "good");
         assert_eq!(errors.len(), 1, "the broken file must be reported, not silently skipped");
@@ -457,7 +556,7 @@ mod tests {
             "the bad file must stay byte-identical for the user to fix"
         );
         // The pieces-only wrapper sees the same world minus the errors.
-        assert_eq!(load_pieces(&dir).unwrap().len(), 1);
+        assert_eq!(load_pieces(&dir, None).unwrap().len(), 1);
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -478,7 +577,7 @@ mod tests {
         )
         .unwrap();
 
-        let (pieces, errors) = scan_pieces(&dir).unwrap();
+        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
         assert_eq!(pieces.len(), 1);
         assert_eq!(pieces[0].title, "canonical");
         assert_eq!(errors.len(), 1);
@@ -501,7 +600,7 @@ mod tests {
         )
         .unwrap();
 
-        let pieces = load_pieces(&dir).unwrap();
+        let pieces = load_pieces(&dir, None).unwrap();
         assert_eq!(pieces.len(), 1);
         assert_eq!(pieces[0].title, "canonical");
         fs::remove_dir_all(&dir).unwrap();
@@ -516,7 +615,7 @@ mod tests {
         )
         .unwrap();
 
-        let pieces = load_pieces(&dir).unwrap();
+        let pieces = load_pieces(&dir, None).unwrap();
         assert_eq!(pieces[0].id, "real-id", "content id wins over filename");
 
         let mut inp = input("t", "b");
@@ -524,7 +623,7 @@ mod tests {
         save_piece_at(&dir, inp, 2).unwrap();
         assert!(dir.join("real-id.json").is_file(), "save lands at <id>.json");
         assert!(!dir.join("hand-copied.json").exists(), "stale twin cleaned up");
-        assert_eq!(load_pieces(&dir).unwrap().len(), 1);
+        assert_eq!(load_pieces(&dir, None).unwrap().len(), 1);
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -571,38 +670,144 @@ mod tests {
     #[test]
     fn create_assigns_uuid_and_writes_canonical_file() {
         let dir = tmp_dir("create");
-        let p = save_piece_at(&dir, input("t", "b {{ticket}} {{ticket}} {{env}}"), 100).unwrap();
+        let p = save_piece_at(&dir, input("t", "b {ticket:ABC-123} {ticket} {env}"), 100).unwrap();
         assert!(uuid::Uuid::parse_str(&p.id).is_ok());
         assert_eq!(p.created_at, p.updated_at);
         assert!(dir.join(format!("{}.json", p.id)).is_file());
         assert_eq!(
             p.placeholders,
-            vec![Placeholder { name: "ticket".into() }, Placeholder { name: "env".into() }],
-            "derived and deduped"
+            vec![
+                Placeholder { name: "ticket".into(), default: Some("ABC-123".into()) },
+                Placeholder { name: "env".into(), default: None },
+            ],
+            "derived via the v2 grammar, deduped, first occurrence's default kept"
         );
         fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn save_refuses_to_overwrite_unparseable_canonical_file() {
-        // Audit L2: the loader skips a broken <id>.json, so resolving through
-        // it would silently turn this save into a CREATE that overwrites the
-        // broken file — destroying whatever versions/extra it held. The save
-        // must refuse instead, and the file must stay byte-identical.
+    fn placeholder_default_round_trips_through_the_file() {
+        // The schema example's exact shape: {"name": "ticket", "default": "ABC-123"}
+        // — and a default-less entry omits the key entirely (Option skip).
+        let dir = tmp_dir("ph-default");
+        let p = save_piece_at(&dir, input("t", "{ticket:ABC-123} {env}"), 100).unwrap();
+        let raw: Value =
+            serde_json::from_str(&fs::read_to_string(dir.join(format!("{}.json", p.id))).unwrap())
+                .unwrap();
+        assert_eq!(raw["placeholders"][0]["name"], "ticket");
+        assert_eq!(raw["placeholders"][0]["default"], "ABC-123");
+        assert_eq!(raw["placeholders"][1]["name"], "env");
+        assert!(
+            !raw["placeholders"][1].as_object().unwrap().contains_key("default"),
+            "no default → no key, per the contract's optional-default schema"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn save_refuses_when_repair_cannot_yield_this_piece() {
+        // Audit L2, repair-era form: when even repair can't turn <id>.json
+        // into a piece, resolving through it would silently turn this save
+        // into a CREATE that overwrites the broken file — destroying
+        // whatever it held. The save must refuse, file byte-identical.
         let dir = tmp_dir("refuse-broken");
-        let broken = r#"{"id":"x","title":"t","body":"b","versions":[{"body":"precious"#; // truncated JSON
+        let broken = "[1, 2,"; // repairs to a JSON array — never a Piece
         fs::write(dir.join("x.json"), broken).unwrap();
 
         let mut inp = input("t2", "new body");
         inp.id = Some("x".to_string());
         let err = save_piece_at(&dir, inp, 2).unwrap_err();
         assert!(err.contains("x.json"), "error must name the file: {err}");
-        assert!(err.contains("cannot be parsed"), "error must say why: {err}");
+        assert!(err.contains("even after repair"), "error must say why: {err}");
         assert_eq!(
             fs::read_to_string(dir.join("x.json")).unwrap(),
             broken,
             "the refused save must leave the broken file byte-identical"
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // --- store robustness: in-memory jsonrepair recovery ---
+
+    #[test]
+    fn hand_edit_corruption_recovers_in_memory_flagged_and_untouched() {
+        let dir = tmp_dir("recover");
+        // The contract's bounded corruption classes in one file: comments,
+        // unquoted key, single quotes, trailing comma — plus a u64 past 2^53
+        // to prove the repair path keeps numbers exact (silent-corruption
+        // guard: repair must never "fix" data by rounding it).
+        let corrupt = r#"{
+            // hand-added comment
+            "id": "r1",
+            title: 'needs repair',
+            "body": "b",
+            "created_at": 1,
+            "updated_at": 1,
+            "big": 18446744073709551615,
+        }"#;
+        fs::write(dir.join("r1.json"), corrupt).unwrap();
+
+        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
+        assert_eq!(pieces.len(), 1, "the piece must recover, not be skipped");
+        assert!(pieces[0].recovered, "recovery must be flagged for the UI");
+        assert_eq!(pieces[0].title, "needs repair");
+        assert_eq!(
+            pieces[0].extra["big"],
+            Value::from(18446744073709551615u64),
+            "repair must keep u64 past 2^53 exact"
+        );
+        assert!(errors.is_empty(), "recovered is a flag, not a load error");
+        assert_eq!(
+            fs::read_to_string(dir.join("r1.json")).unwrap(),
+            corrupt,
+            "the loader must NEVER rewrite the user's file"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn truncated_file_recovers_and_only_explicit_save_persists_repair() {
+        let dir = tmp_dir("truncated");
+        // Truncation mid-versions — the crash/partial-paste shape.
+        let truncated = r#"{"id":"x","title":"t","body":"current","created_at":1,"updated_at":5,"versions":[{"body":"precious","saved_at":1"#;
+        fs::write(dir.join("x.json"), truncated).unwrap();
+
+        // Loading recovers in memory; disk stays byte-identical.
+        let (pieces, _) = scan_pieces(&dir, None).unwrap();
+        assert!(pieces[0].recovered);
+        assert_eq!(fs::read_to_string(dir.join("x.json")).unwrap(), truncated);
+
+        // The explicit save is the one moment the repaired form persists —
+        // treated as the EXISTING piece: versions append, nothing resets.
+        let mut inp = input("t", "new body");
+        inp.id = Some("x".to_string());
+        let saved = save_piece_at(&dir, inp, 9).unwrap();
+        assert_eq!(saved.created_at, 1, "repaired parse is the existing piece, not a create");
+        assert_eq!(saved.versions.first().map(|v| v.body.as_str()), Some("current"));
+        assert!(
+            saved.versions.iter().any(|v| v.body == "precious"),
+            "the recovered prior version must survive the save"
+        );
+
+        let raw = fs::read_to_string(dir.join("x.json")).unwrap();
+        let reread: Value = serde_json::from_str(&raw).unwrap();
+        assert!(reread.get("recovered").is_none(), "the transient flag never reaches disk");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn hand_written_recovered_key_cannot_fake_the_transient_signal() {
+        let dir = tmp_dir("fake-flag");
+        // `recovered` is schema-reserved: on a clean parse it is forced
+        // false (and, being a known field, it is not preserved as an extra).
+        fs::write(
+            dir.join("a.json"),
+            r#"{"id":"a","title":"t","body":"b","created_at":1,"updated_at":1,"recovered":true}"#,
+        )
+        .unwrap();
+        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
+        assert!(!pieces[0].recovered);
+        assert!(errors.is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -626,28 +831,122 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    // --- placeholder derivation ---
+    // Placeholder-grammar edge cases live in `grammar::tests` (the shared
+    // contract vectors, asserted verbatim by both lanes).
+
+    // --- scope v2: legacy/unknown shapes load as global, visibly ---
 
     #[test]
-    fn placeholder_edge_cases() {
-        assert!(derive_placeholders("no tokens").is_empty());
-        assert!(derive_placeholders("empty {{}} token").is_empty());
-        assert!(derive_placeholders("unclosed {{token").is_empty());
-        assert_eq!(derive_placeholders("{{a}}{{b}}").len(), 2);
-        assert!(
-            derive_placeholders("{{multi\nline}}").is_empty(),
-            "newline inside braces is prose, not a placeholder"
-        );
-        // Grammar is the frontend's [\w.-]+ EXACTLY (audit M2) — a looser
-        // rule here would store placeholders the fill popover never shows.
-        assert!(derive_placeholders("{{bad token}}").is_empty(), "spaces are prose (frontend pins this)");
-        assert!(derive_placeholders("{{ padded }}").is_empty(), "no trimming — space is a mismatch");
-        assert!(derive_placeholders("{{tickét}}").is_empty(), "ASCII \\w only, like the JS regex");
+    fn legacy_scope_loads_as_global_with_notice_and_untouched_file() {
+        let dir = tmp_dir("legacy-scope");
+        // The pre-revision path-keyed shape (founder feel-check data).
+        let raw = r#"{"id":"a","title":"t","body":"b","created_at":1,"updated_at":1,"scope":{"kind":"project","project":"/home/u/proj"}}"#;
+        fs::write(dir.join("a.json"), raw).unwrap();
+
+        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
+        assert_eq!(pieces.len(), 1, "the piece must LOAD, not be skipped");
+        assert_eq!(pieces[0].scope, Scope::Global);
+        assert_eq!(errors.len(), 1, "the degradation must be visible");
+        assert_eq!(errors[0].file, "a.json");
+        assert!(errors[0].error.contains("unrecognized scope"), "{}", errors[0].error);
         assert_eq!(
-            derive_placeholders("{{a-b.c_d9}}"),
-            vec![Placeholder { name: "a-b.c_d9".into() }],
-            "the full [\\w.-]+ class is accepted"
+            fs::read_to_string(dir.join("a.json")).unwrap(),
+            raw,
+            "the loader must NEVER rewrite the user's file"
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unknown_project_id_loads_as_global_when_roster_is_readable() {
+        let dir = tmp_dir("dangling-scope");
+        let raw = r#"{"id":"a","title":"t","body":"b","created_at":1,"updated_at":1,"scope":{"kind":"project","project_id":"ghost"}}"#;
+        fs::write(dir.join("a.json"), raw).unwrap();
+
+        let known: HashSet<String> = ["real".to_string()].into();
+        let (pieces, errors) = scan_pieces(&dir, Some(&known)).unwrap();
+        assert_eq!(pieces[0].scope, Scope::Global);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].error.contains("unknown project ghost"), "{}", errors[0].error);
+        assert_eq!(fs::read_to_string(dir.join("a.json")).unwrap(), raw);
+
+        // Roster unreadable (None): validation suspends, the scope holds.
+        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
+        assert_eq!(pieces[0].scope, Scope::Project { project_id: "ghost".into() });
+        assert!(errors.is_empty());
+
+        // Known id: no degradation, no notice.
+        let known: HashSet<String> = ["ghost".to_string()].into();
+        let (pieces, errors) = scan_pieces(&dir, Some(&known)).unwrap();
+        assert_eq!(pieces[0].scope, Scope::Project { project_id: "ghost".into() });
+        assert!(errors.is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn save_over_legacy_scope_file_proceeds_and_persists_clean_scope() {
+        // The explicit save is the one moment normalization may persist:
+        // loading never rewrites, but a user edit of a legacy-scope piece
+        // must not be refused (versions/extras still merge).
+        let dir = tmp_dir("legacy-save");
+        let raw = r#"{"id":"a","title":"t","body":"old","created_at":1,"updated_at":1,"scope":{"kind":"project","project":"/p"},"my_note":"kept"}"#;
+        fs::write(dir.join("a.json"), raw).unwrap();
+
+        let mut inp = input("t", "new");
+        inp.id = Some("a".to_string());
+        let saved = save_piece_at(&dir, inp, 2).unwrap();
+        assert_eq!(saved.scope, Scope::Global, "input scope wins on save");
+        assert_eq!(saved.versions.len(), 1, "body change still versions");
+        assert_eq!(saved.versions[0].body, "old");
+        assert_eq!(saved.extra["my_note"], "kept");
+
+        let reread: Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("a.json")).unwrap()).unwrap();
+        assert_eq!(reread["scope"]["kind"], "global");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // --- delete-project rescope ---
+
+    #[test]
+    fn rescope_moves_target_pieces_to_global_without_versioning() {
+        let dir = tmp_dir("rescope");
+        let mut mine = input("mine", "b");
+        mine.scope = Scope::Project { project_id: "target".into() };
+        let mine = save_piece_at(&dir, mine, 100).unwrap();
+        let mut other = input("other", "b");
+        other.scope = Scope::Project { project_id: "different".into() };
+        let other = save_piece_at(&dir, other, 100).unwrap();
+
+        rescope_project_pieces(&dir, "target").unwrap();
+
+        let pieces = load_pieces(&dir, None).unwrap();
+        let by_id = |id: &str| pieces.iter().find(|p| p.id == id).unwrap();
+        assert_eq!(by_id(&mine.id).scope, Scope::Global, "target pieces rescoped");
+        assert!(by_id(&mine.id).versions.is_empty(), "rescope is metadata-only: no version");
+        assert_eq!(by_id(&mine.id).updated_at, 100, "rescope is metadata-only: updated_at holds");
+        assert_eq!(
+            by_id(&other.id).scope,
+            Scope::Project { project_id: "different".into() },
+            "other projects' pieces untouched"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rescope_leaves_broken_files_alone() {
+        let dir = tmp_dir("rescope-broken");
+        let broken = r#"{"id":"x","scope":{"kind":"project","project_id":"target"},"title":"t""#;
+        fs::write(dir.join("x.json"), broken).unwrap();
+
+        rescope_project_pieces(&dir, "target").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.join("x.json")).unwrap(),
+            broken,
+            "a broken file is never repaired-and-rewritten as a delete side effect"
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     // --- delete ---
@@ -667,7 +966,7 @@ mod tests {
         .unwrap();
 
         delete_piece_at(&dir, "x").unwrap();
-        assert!(load_pieces(&dir).unwrap().is_empty(), "no file may resurrect the piece");
+        assert!(load_pieces(&dir, None).unwrap().is_empty(), "no file may resurrect the piece");
         delete_piece_at(&dir, "x").unwrap(); // idempotent
         fs::remove_dir_all(&dir).unwrap();
     }

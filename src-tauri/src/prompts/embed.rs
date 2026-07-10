@@ -107,16 +107,18 @@ const ORT_ARTIFACT: Option<OrtArtifact> = Some(OrtArtifact {
 )))]
 const ORT_ARTIFACT: Option<OrtArtifact> = None;
 
-/// Progress event streamed over the `embed_download` Channel (contract
-/// addendum): one stage per artifact — `runtime` (the ONNX Runtime archive),
-/// then `model` (all five model files under one fixed total). Completion and
-/// error are NOT channel events: the command's Result is the terminal signal
-/// and the frontend re-fetches `embed_status` afterward.
+/// Progress event streamed over the `embed_download` Channel (contract):
+/// stage `runtime` (the ONNX Runtime archive, bytes), `model` (all five
+/// model files under one fixed byte total), then `index` (embedding the
+/// existing library, PIECE counts — emitted by the command's warm-up loop,
+/// so the popover's "Download & index" is literally what one click does).
+/// Completion and error are NOT channel events: the command's Result is the
+/// terminal signal and the frontend re-fetches `embed_status` afterward.
 #[derive(Debug, Clone, Serialize)]
 pub struct DownloadProgress {
-    pub stage: String, // "runtime" | "model"
-    pub downloaded_bytes: u64,
-    pub total_bytes: u64,
+    pub stage: String, // "runtime" | "model" | "index"
+    pub done: u64,
+    pub total: u64,
 }
 
 /// Is semantic matching even possible on this build's platform?
@@ -188,8 +190,8 @@ fn download_verified(
             last_emit = bytes.len() as u64;
             on_progress(DownloadProgress {
                 stage: stage.to_string(),
-                downloaded_bytes: stage_base + last_emit,
-                total_bytes: stage_total,
+                done: stage_base + last_emit,
+                total: stage_total,
             });
         }
     }
@@ -201,8 +203,8 @@ fn download_verified(
     }
     on_progress(DownloadProgress {
         stage: stage.to_string(),
-        downloaded_bytes: stage_base + bytes.len() as u64,
-        total_bytes: stage_total,
+        done: stage_base + bytes.len() as u64,
+        total: stage_total,
     });
     Ok(bytes)
 }
@@ -496,8 +498,8 @@ mod tests {
     fn full_opt_in_flow_downloads_loads_and_embeds() {
         let root = std::env::temp_dir().join(format!("ccdeck-embed-e2e-{}", uuid::Uuid::new_v4()));
         download_artifacts(&root, &|p| {
-            assert!(matches!(p.stage.as_str(), "runtime" | "model"), "contract stages only");
-            assert!(p.downloaded_bytes <= p.total_bytes);
+            assert!(matches!(p.stage.as_str(), "runtime" | "model"), "download stages only here");
+            assert!(p.done <= p.total);
         })
         .expect("download + verify + extract");
         assert!(artifacts_present(&root));
