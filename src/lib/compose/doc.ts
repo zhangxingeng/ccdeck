@@ -250,7 +250,13 @@ export function replaceSpan(doc: Doc, index: number, newText: string, span: Omit
  *  the selection becomes a linked span pointing at the new piece). Text is
  *  unchanged; overlapped spans are clipped (a clipped linked span keeps its
  *  own link but no longer appears intact → linked-modified). */
-export function linkRange(doc: Doc, start: number, end: number, link: SpanLink): Doc {
+export function linkRange(
+  doc: Doc,
+  start: number,
+  end: number,
+  link: SpanLink,
+  state: Exclude<SpanState, 'typed'> = 'linked'
+): Doc {
   if (end <= start) return doc;
   const starts = spanStarts(doc);
   const spans: Span[] = [];
@@ -267,7 +273,7 @@ export function linkRange(doc: Doc, start: number, end: number, link: SpanLink):
       spans.push({ ...s, state, length: keptLeft });
     }
     if (!placed && s1 > start) {
-      spans.push({ state: 'linked', length: end - start, link });
+      spans.push({ state, length: end - start, link });
       placed = true;
     }
     if (keptRight > 0) {

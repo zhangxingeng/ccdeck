@@ -31,6 +31,15 @@
   --accent-interrupt: #f43f5e;
   --accent-subagent: #0d9488;
 
+  /* Prompt Library provenance (issue #24): categorical state, not severity —
+     'linked' spans tint with --accent-piece (linked-modified adds a dotted
+     marker, same hue family per the F1 design); --accent-template signals
+     "you are editing the reusable template" (the piece modal's background
+     flip). Tints are color-mix'd over theme surfaces, so one accent value
+     serves both light and dark — the existing --accent-* convention. */
+  --accent-piece: #0ea5e9;
+  --accent-template: #d97706;
+
   /* Tool-input JSON syntax highlighting (jt = "json token") */
   --jt-str: #16a34a;
   --jt-num: #2563eb;

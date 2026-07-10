@@ -31,6 +31,7 @@ import {
   replaceSpan,
   linkRange,
   caretQuery,
+  spanStarts,
 } from './compose/doc';
 import { substitute } from './compose/placeholders';
 
@@ -65,6 +66,9 @@ export const prompts = $state({
   caret: 0,
   selStart: 0,
   selEnd: 0,
+  /** Bumped when the doc changes from OUTSIDE the textarea (panel insert,
+   *  modal apply) — the compose box watches it to restore focus + caret. */
+  focusNonce: 0,
   // live matching
   matchQuery: '',
   hits: [] as ResolvedHit[],
@@ -200,19 +204,30 @@ export function composeInsertPiece(piece: Piece, fills: Record<string, string>):
   const at = prompts.caret;
   prompts.doc = docInsertPiece(prompts.doc, at, rendered, link);
   setSelection(at + rendered.length, at + rendered.length);
+  prompts.focusNonce++;
   return prompts.doc;
 }
 
 /** Replace one span's text + metadata (instance-mode Apply, re-fill,
  *  save-back relink). */
 export function composeReplaceSpan(index: number, newText: string, span: Omit<Span, 'length'>): void {
+  const start = spanStarts(prompts.doc)[index];
   prompts.doc = replaceSpan(prompts.doc, index, newText, span);
+  setSelection(start + newText.length, start + newText.length);
+  prompts.focusNonce++;
 }
 
 /** After save-selection-as-piece (F4): the saved selection becomes a linked
- *  span pointing at the new piece. */
-export function composeLinkRange(start: number, end: number, link: SpanLink): void {
-  prompts.doc = linkRange(prompts.doc, start, end, link);
+ *  span pointing at the new piece (linked-modified when the saved body was
+ *  edited away from the selection before saving). */
+export function composeLinkRange(
+  start: number,
+  end: number,
+  link: SpanLink,
+  state: 'linked' | 'linked-modified' = 'linked'
+): void {
+  prompts.doc = linkRange(prompts.doc, start, end, link, state);
+  prompts.focusNonce++;
 }
 
 // ── piece store ──────────────────────────────────────────────────────────────
