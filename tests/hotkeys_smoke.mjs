@@ -21,6 +21,8 @@ const {
   chordFromEvent,
   eventMatchesChord,
   resolveHotkeys,
+  resolveHotkeysReport,
+  validateCommandChord,
   findConflict,
   overridesSystem,
 } = await import(join(root, 'src/lib/prompts/hotkeys.ts'));
@@ -108,6 +110,56 @@ console.log('findConflict / overridesSystem');
   assert(overridesSystem('ctrl+s'), 'ctrl+s (canonical Mod+S) overrides a system default');
   assert(!overridesSystem('Mod+Shift+C'), 'Mod+Shift+C is not a claimed system chord');
   eq(HOTKEY_COMMANDS.length, 2, 'exactly two rebindable commands ship (JC-4: one copy binding)');
+}
+
+console.log('validateCommandChord — capture-time bindability (MED-2)');
+{
+  // Accepted: a command chord carrying Ctrl/Cmd.
+  eq(validateCommandChord('Mod+C'), null, 'Mod+C is a valid command chord');
+  eq(validateCommandChord('Mod+Shift+C'), null, 'Mod+Shift+C is valid');
+  eq(validateCommandChord('ctrl+s'), null, 'ctrl+s (alias) is valid');
+  // Rejected: a bare key would brick that key view-wide (the MED-2 report case).
+  assert(validateCommandChord('c') !== null, 'bare c rejected (no modifier)');
+  assert(validateCommandChord('C') !== null, 'bare C rejected (no modifier)');
+  assert(/ctrl|cmd/i.test(validateCommandChord('c')), 'bare-key reason names Ctrl/Cmd');
+  // Rejected: Shift-only / Alt-only don't lift the key out of text-entry space.
+  assert(validateCommandChord('Shift+C') !== null, 'Shift+C rejected (no Ctrl/Cmd)');
+  assert(validateCommandChord('Alt+C') !== null, 'Alt+C rejected (no Ctrl/Cmd)');
+  // Rejected: the spatial/context keys are reserved, modifiers or not.
+  for (const key of ['Enter', 'Escape', 'Tab', 'ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight']) {
+    assert(validateCommandChord(key) !== null, `${key} rejected (reserved, bare)`);
+    assert(validateCommandChord(`Mod+${key}`) !== null, `Mod+${key} rejected (reserved key, unconditional)`);
+    assert(/reserved/i.test(validateCommandChord(key)), `${key} reason says reserved`);
+  }
+  // An incomplete chord (bare modifier / empty) is not bindable either.
+  assert(validateCommandChord('Mod') !== null, 'a bare modifier is not a bindable chord');
+  assert(validateCommandChord('') !== null, 'empty string is not a bindable chord');
+}
+
+console.log('resolveHotkeysReport — hand-edited config fallback (MED-2 dispatch)');
+{
+  // A valid override binds and is not reported.
+  const ok = resolveHotkeysReport({ copyPrompt: 'Mod+Shift+C' });
+  eq(ok.hotkeys.copyPrompt, 'Mod+Shift+C', 'valid override binds');
+  eq(ok.invalid, [], 'valid override is not reported invalid');
+
+  // A bare-key override in the config falls back to the default AND is reported
+  // (never silently dropped — the store turns this into a durable Notice).
+  const bare = resolveHotkeysReport({ copyPrompt: 'c' });
+  eq(bare.hotkeys.copyPrompt, DEFAULT_HOTKEYS.copyPrompt, 'invalid bare-key override falls back to default');
+  eq(bare.invalid.length, 1, 'the invalid override is reported, not dropped');
+  eq(bare.invalid[0].command, 'copyPrompt', 'the report names the command');
+  eq(bare.invalid[0].chord, 'c', 'the report carries the offending chord verbatim');
+  assert(typeof bare.invalid[0].reason === 'string' && bare.invalid[0].reason.length > 0, 'the report carries a human reason');
+
+  // A reserved-key override also falls back + reports.
+  const reserved = resolveHotkeysReport({ saveAs: 'Enter' });
+  eq(reserved.hotkeys.saveAs, DEFAULT_HOTKEYS.saveAs, 'reserved-key override falls back to default');
+  eq(reserved.invalid.map((e) => e.command), ['saveAs'], 'reserved-key override reported');
+
+  // resolveHotkeys stays the map-only view and matches the report's hotkeys.
+  eq(resolveHotkeys({ copyPrompt: 'c' }), bare.hotkeys, 'resolveHotkeys == resolveHotkeysReport().hotkeys');
+  eq(resolveHotkeysReport(undefined).invalid, [], 'no overrides → nothing invalid');
 }
 
 if (failures > 0) {

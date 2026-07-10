@@ -39,6 +39,22 @@ const SYSTEM_CHORDS = new Set(['Mod+C', 'Mod+S', 'Mod+V', 'Mod+X', 'Mod+Z', 'Mod
 /** A modifier key pressed alone is not a chord — ignore it as a keystroke. */
 const MODIFIER_KEYS = new Set(['Control', 'Meta', 'Shift', 'Alt', 'AltGraph']);
 
+/** Spatial/context keys that are never bindable as a *command* chord: the whole
+ *  interaction's inferable conventions rest on them (↓ steps into the panel,
+ *  Enter inserts, Esc unwinds one layer, Tab moves focus), so letting a rebind
+ *  capture one would break the rules a user infers unfamiliar keys from
+ *  (contract §Hotkey map). Reserved regardless of modifiers — "never bindable"
+ *  is unconditional, so `Mod+Enter` is out too. */
+const RESERVED_KEYS = new Set([
+  'Enter',
+  'Escape',
+  'Tab',
+  'ArrowUp',
+  'ArrowDown',
+  'ArrowLeft',
+  'ArrowRight',
+]);
+
 /** The minimum an event needs to form a chord — a structural subset of
  *  KeyboardEvent, so callers pass the event directly and tests pass a literal. */
 export interface ChordEvent {
@@ -127,20 +143,74 @@ export function eventMatchesChord(e: ChordEvent, chord: string): boolean {
   return evChord !== null && target !== null && evChord === target;
 }
 
+/** Validate a candidate *command* chord — the single gate both the rebinding UI
+ *  (capture time) and the config loader (`resolveHotkeys`) run every chord
+ *  through, so a chord can never enter the system from one path that the other
+ *  would reject. Returns null when bindable, else a human reason for the inline
+ *  rejection.
+ *
+ *  Two rules, both load-bearing:
+ *  - **Must carry Ctrl/Cmd (`Mod`).** A chord without it is a plain keystroke a
+ *    focused text field would insert — binding a command to bare `c` bricks `c`
+ *    in the compose box view-wide. (Ctrl/Cmd is the only modifier that reliably
+ *    lifts a key out of text-entry space cross-platform: Shift yields capitals,
+ *    Alt composes characters on macOS. The dispatch backstop keys off the same
+ *    predicate, so a non-Mod binding would be dead in the box anyway.)
+ *  - **Not a reserved spatial/context key** (↓/Enter/Esc/Tab/arrows). */
+export function validateCommandChord(chord: string): string | null {
+  const parsed = parseChord(chord);
+  if (!parsed) return 'Press a key combination, e.g. Ctrl-Shift-C.';
+  if (RESERVED_KEYS.has(parsed.key)) {
+    return `${parsed.key} is reserved for navigation and can't be a shortcut.`;
+  }
+  if (!parsed.mod) {
+    return 'A shortcut needs Ctrl or Cmd, so it never captures a plain keystroke.';
+  }
+  return null;
+}
+
+/** One override rejected by `resolveHotkeys` — surfaced (not silently dropped)
+ *  so a hand-edited config that bricked a key becomes a durable Notice. */
+export interface InvalidHotkey {
+  command: HotkeyCommand;
+  /** The rejected chord, verbatim from the config (for the message). */
+  chord: string;
+  /** Why it was rejected — the same reason `validateCommandChord` gives. */
+  reason: string;
+}
+
+export interface HotkeyResolution {
+  hotkeys: Record<HotkeyCommand, string>;
+  invalid: InvalidHotkey[];
+}
+
 /** Merge stored overrides onto the defaults, keeping only known command ids and
- *  only well-formed chords (a hand-edited garbage chord falls back to default
- *  rather than binding to nothing). */
-export function resolveHotkeys(overrides: Record<string, string> | undefined): Record<HotkeyCommand, string> {
-  const resolved: Record<HotkeyCommand, string> = { ...DEFAULT_HOTKEYS };
-  if (!overrides) return resolved;
+ *  only *bindable* chords (`validateCommandChord`). A hand-edited chord that is
+ *  garbage, modifier-less, or a reserved key falls back to its default AND is
+ *  reported in `invalid` — never silently dropped, so the store can leave a
+ *  Notice (contract: the config store never swallows what a user typed). */
+export function resolveHotkeysReport(overrides: Record<string, string> | undefined): HotkeyResolution {
+  const hotkeys: Record<HotkeyCommand, string> = { ...DEFAULT_HOTKEYS };
+  const invalid: InvalidHotkey[] = [];
+  if (!overrides) return { hotkeys, invalid };
   for (const command of HOTKEY_COMMANDS) {
     const chord = overrides[command];
-    if (typeof chord === 'string') {
-      const normal = normalizeChord(chord);
-      if (normal) resolved[command] = normal;
+    if (typeof chord !== 'string') continue;
+    const reason = validateCommandChord(chord);
+    if (reason) {
+      invalid.push({ command, chord, reason });
+      continue; // default stands
     }
+    // Valid ⇒ normalizeChord never returns null (validate already parsed it).
+    hotkeys[command] = normalizeChord(chord) as string;
   }
-  return resolved;
+  return { hotkeys, invalid };
+}
+
+/** The effective map alone — the common read path (the live keydown handler and
+ *  the rebinding UI don't need the rejection list). */
+export function resolveHotkeys(overrides: Record<string, string> | undefined): Record<HotkeyCommand, string> {
+  return resolveHotkeysReport(overrides).hotkeys;
 }
 
 /** Which command (if any) already holds `chord`, ignoring `self`. Drives the

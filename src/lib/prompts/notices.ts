@@ -12,10 +12,12 @@
  * badge counts. No DOM, no Svelte — unit-tested in tests/notices_smoke.mjs.
  */
 
-/** One durable notice. `kind` distinguishes an in-memory repair (fixable by a
- *  re-save) from an unreadable file (the user must fix the JSON by hand). */
+/** One durable notice. `kind` distinguishes an in-memory snippet repair
+ *  (fixable by a re-save), an unreadable file (the user must fix the JSON by
+ *  hand), and a config event — a hand-edited hotkey that fell back to its
+ *  default (re-set it in Shortcuts to keep a custom key). */
 export interface Notice {
-  kind: 'repaired' | 'unreadable';
+  kind: 'repaired' | 'unreadable' | 'config';
   /** Stable key for keyed rendering — the snippet id or the file path. */
   id: string;
   /** What the user sees as the headline: the snippet title or the file name. */
@@ -36,15 +38,27 @@ export interface LoadErrorEntry {
   error: string;
 }
 
+/** A hotkey override that failed validation on load and fell back to its
+ *  default — the config equivalent of a JSON auto-repair (the store keeps
+ *  running, but the user's typed value did not take, so it must not vanish
+ *  without a trace). `label` is the human command name; `reason` is why. */
+export interface InvalidHotkeyEntry {
+  command: string;
+  label: string;
+  chord: string;
+  reason: string;
+}
+
 /**
- * Derive the durable notices from the two data-event sources. Repairs come
- * first (they are the recoverable, self-inflicted-by-hand-edit case with a
- * one-click fix); unreadable files follow (they need manual repair). The order
- * is stable so the badge count and the list never reshuffle under the user.
+ * Derive the durable notices from the data-event sources. Snippet repairs come
+ * first (recoverable by a one-click re-save), then unreadable files (manual JSON
+ * fix), then config events (a hotkey reset — re-bind in Shortcuts). The order is
+ * stable so the badge count and the list never reshuffle under the user.
  */
 export function deriveNotices(
   recovered: readonly RecoveredSnippet[],
-  loadErrors: readonly LoadErrorEntry[]
+  loadErrors: readonly LoadErrorEntry[],
+  invalidHotkeys: readonly InvalidHotkeyEntry[] = []
 ): Notice[] {
   const notices: Notice[] = [];
   for (const snippet of recovered) {
@@ -61,6 +75,14 @@ export function deriveNotices(
       id: entry.file,
       title: entry.file,
       detail: entry.error,
+    });
+  }
+  for (const hk of invalidHotkeys) {
+    notices.push({
+      kind: 'config',
+      id: `hotkey:${hk.command}`,
+      title: `Shortcut “${hk.label}” reset to default`,
+      detail: `The saved binding ${hk.chord} isn't usable (${hk.reason}) — the default is in effect. Set a new one in Shortcuts to keep a custom key.`,
     });
   }
   return notices;

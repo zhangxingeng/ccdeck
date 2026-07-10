@@ -16,6 +16,7 @@
     HOTKEY_COMMANDS,
     HOTKEY_LABELS,
     chordFromEvent,
+    validateCommandChord,
     findConflict,
     overridesSystem,
     type HotkeyCommand,
@@ -47,6 +48,16 @@
     }
     const chord = chordFromEvent(e);
     if (!chord) return; // a bare modifier — keep waiting for the full chord
+    // Bindability first: a chord without Ctrl/Cmd would steal a plain keystroke
+    // view-wide, and the spatial/context keys (Enter/Esc/Tab/arrows) are
+    // reserved — rejected inline with a reason, the same way a conflict is, and
+    // nothing stored. This is the UI half; resolveHotkeys enforces the same rule
+    // on a hand-edited config (defense in depth).
+    const invalid = validateCommandChord(chord);
+    if (invalid) {
+      rejection = invalid;
+      return;
+    }
     const conflict = findConflict(hotkeys, capturing, chord);
     if (conflict) {
       // Rejected inline; nothing stored; stay in capture so the user can retry.

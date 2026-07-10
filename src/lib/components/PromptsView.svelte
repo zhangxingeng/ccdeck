@@ -22,7 +22,7 @@
   import { projectColorVar } from '$lib/prompts/palette';
   import { copyToClipboard } from '$lib/copy';
   import { toasts } from '$lib/prompts/toasts.svelte';
-  import { eventMatchesChord } from '$lib/prompts/hotkeys';
+  import { HOTKEY_COMMANDS, eventMatchesChord } from '$lib/prompts/hotkeys';
   import ComposeBox from './prompts/ComposeBox.svelte';
   import MatchPanel from './prompts/MatchPanel.svelte';
   import SnippetModal, { type SnippetModalContext } from './prompts/SnippetModal.svelte';
@@ -100,21 +100,58 @@
   }
 
   // ── view-scoped hotkeys (contract §Hotkey map) ───────────────────────────────
+  /** Is a text-entry element focused right now? These hotkeys fire from a window
+   *  listener, so the guard must reason about where focus actually is — not the
+   *  compose box's stored selection, which goes stale the moment focus leaves it
+   *  (e.g. into a variable fill input). */
+  function textEntryFocused(): boolean {
+    const el = document.activeElement;
+    if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) return true;
+    return el instanceof HTMLElement && el.isContentEditable;
+  }
+
+  /** Does native copy have something to act on, wherever focus is? A text-entry
+   *  element's own non-collapsed selection, or a non-collapsed document
+   *  selection (contenteditable / plain DOM). This is the real "is anything
+   *  selected anywhere" — the compose box's selStart/selEnd only track the box
+   *  while IT is focused, which is exactly what let Ctrl+C hijack a fill-input
+   *  copy (contract §S9). */
+  function nativeSelectionActive(): boolean {
+    const el = document.activeElement;
+    if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
+      return (
+        el.selectionStart !== null &&
+        el.selectionEnd !== null &&
+        el.selectionStart !== el.selectionEnd
+      );
+    }
+    const sel = window.getSelection();
+    return sel !== null && !sel.isCollapsed && sel.toString().length > 0;
+  }
+
   function onWindowKeydown(e: KeyboardEvent): void {
     if (keyboardCaptured) return; // a modal/popover owns the keyboard
     const keys = resolvedHotkeys();
-    if (eventMatchesChord(e, keys.copyPrompt)) {
-      // Selection-aware (JC-4): native copy wins when text is selected in the
-      // box; we only claim the dead key-space when nothing is selected.
-      if (hasSelection) return;
+    const command = HOTKEY_COMMANDS.find((c) => eventMatchesChord(e, keys[c]));
+    if (!command) return;
+    // Dispatch-time backstop (defense in depth): a chord without Ctrl/Cmd is a
+    // plain keystroke a focused text field would insert — never steal it, even
+    // if a hand-edited config bound a command to a bare key. The capture UI and
+    // resolveHotkeys forbid such a binding, but the dispatcher must not depend
+    // on that being the only line of defense (a bricked compose box is the cost).
+    if (!(e.ctrlKey || e.metaKey) && textEntryFocused()) return;
+    if (command === 'copyPrompt') {
+      // Selection-aware (JC-4 / §S9): native copy owns Ctrl/Cmd+C whenever
+      // anything is selected where focus actually is; we claim only the empty
+      // key-space the OS leaves us when nothing is selected anywhere.
+      if (nativeSelectionActive()) return;
       e.preventDefault();
       void copyPrompt();
       return;
     }
-    if (eventMatchesChord(e, keys.saveAs)) {
-      e.preventDefault(); // the browser owns Ctrl/Cmd+S
-      saveAs(activeScope());
-    }
+    // saveAs — the browser owns Ctrl/Cmd+S.
+    e.preventDefault();
+    saveAs(activeScope());
   }
 </script>
 
