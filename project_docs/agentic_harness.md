@@ -10,7 +10,7 @@ repo); this doc carries only what is ccdeck-specific, so it stays true when the 
 |-|-|-|
 | Stable disposition | [CLAUDE.md](../CLAUDE.md) | Evergreen principles; the harness-integrity rule; the fresh-clone memory setup step |
 | Router + volatile state | [.claude/memory/MEMORY.md](../.claude/memory/MEMORY.md) | Orientation, always-on project rails, doc routers, in-flight plans, candidates inbox |
-| Integrity backstop | [.claude/system_prompt_append.md](../.claude/system_prompt_append.md) | **Not yet wired** — needs a launcher or `--append-system-prompt`; see its header |
+| Integrity backstop | [.claude/system_prompt_append.md](../.claude/system_prompt_append.md) | Autoloaded by Claude Code from this path (verified live 2026-07-09); duplicates the integrity rule so it survives a session that misreads CLAUDE.md — sanctioned, don't de-duplicate |
 
 Contract: `ai-first-docs/craft/memory/agent_memory_protocol.mdx`. Memory injection depends on a
 gitignored `.claude/settings.local.json` (`autoMemoryDirectory`) — the tracked settings.json
