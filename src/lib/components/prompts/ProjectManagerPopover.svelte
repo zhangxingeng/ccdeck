@@ -33,10 +33,23 @@
     }
   }
 
-  function rename(p: Project, name: string): void {
-    const trimmed = name.trim();
-    if (!trimmed || trimmed === p.name) return;
-    void run(() => saveProject({ ...p, name: trimmed }));
+  /** The input is uncontrolled (value= + onchange), so a rejected save
+   *  would otherwise leave typed-but-unpersisted text on screen lying about
+   *  the roster — on failure (or a no-op edit) the input is reset to the
+   *  stored name, the truth. */
+  async function rename(p: Project, input: HTMLInputElement): Promise<void> {
+    const trimmed = input.value.trim();
+    if (!trimmed || trimmed === p.name) {
+      input.value = p.name;
+      return;
+    }
+    error = null;
+    try {
+      await saveProject({ ...p, name: trimmed });
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+      input.value = p.name;
+    }
   }
 
   function recolor(p: Project, color: PaletteKey): void {
@@ -99,7 +112,7 @@
         value={p.name}
         aria-label="Project name"
         onkeydown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
-        onchange={(e) => rename(p, e.currentTarget.value)}
+        onchange={(e) => rename(p, e.currentTarget)}
       />
       <button
         type="button"

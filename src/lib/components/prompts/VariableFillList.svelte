@@ -21,7 +21,7 @@
           type="text"
           value={prompts.fills[v.name] ?? ''}
           oninput={(e) => setFill(v.name, e.currentTarget.value)}
-          placeholder={v.default || 'fill on copy'}
+          placeholder={v.default ?? 'fill on copy'}
           autocomplete="off"
           spellcheck="false"
         />

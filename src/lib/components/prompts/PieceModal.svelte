@@ -222,8 +222,11 @@
         <div class="piece-modal__vars" aria-label="Variables found in the body">
           <span class="piece-modal__vars-label">Variables</span>
           {#each bodyVariables as v (v.name)}
-            <span class="piece-modal__var" title={v.default !== undefined ? `Default: ${v.default}` : 'No default'}>
-              {v.name}{#if v.default}<span class="piece-modal__var-default">: {v.default}</span>{/if}
+            <!-- `{x:}` (explicit empty default — fills as "") is distinct
+                 from `{x}` (no default — stays literal); the parser keeps
+                 the difference on purpose, so the preview must too. -->
+            <span class="piece-modal__var" title={v.default !== undefined ? `Default: ${JSON.stringify(v.default)}` : 'No default'}>
+              {v.name}{#if v.default !== undefined}<span class="piece-modal__var-default">: {v.default === '' ? '""' : v.default}</span>{/if}
             </span>
           {/each}
         </div>

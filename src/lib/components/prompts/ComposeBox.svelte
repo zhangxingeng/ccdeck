@@ -65,6 +65,15 @@
 
   /** The linked span the caret sits in — drives the edit-affordance chip. */
   const caretSpan = $derived(linkedSpanAt(prompts.doc, prompts.caret));
+  /** Live scope label for the chip — the same roster-backed derivation as
+   *  the span tint, NOT the scope snapshotted into the link at insert: when
+   *  the owning project is deleted the tint falls back to grey, and the
+   *  label must fall back with it. */
+  const caretScopeLabel = $derived.by(() => {
+    const scope = caretSpan?.span.link?.scope;
+    if (scope?.kind !== 'project') return 'global';
+    return prompts.projects.some((p) => p.id === scope.project_id) ? 'project' : 'global';
+  });
 
   function handleInput(): void {
     if (!textareaEl) return;
@@ -173,11 +182,11 @@
         type="button"
         class="compose__chip compose__chip--{caretSpan.span.state}"
         onclick={() => onOpenSpan(caretSpan.index)}
-        title="Open this piece (Instance / Template modes)"
+        title="Open this piece (Content / Metadata)"
       >
         <span class="compose__chip-dot" aria-hidden="true"></span>
         {link.title}
-        <span class="compose__chip-scope">{link.scope.kind === 'global' ? 'global' : 'project'}</span>
+        <span class="compose__chip-scope">{caretScopeLabel}</span>
         {#if caretSpan.span.state === 'linked-modified'}<span class="compose__chip-mod">edited</span>{/if}
         <span class="compose__chip-cta">Edit piece…</span>
       </button>
