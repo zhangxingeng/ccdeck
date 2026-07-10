@@ -26,6 +26,7 @@ const {
 } = await import(join(root, 'src/lib/compose/doc.ts'));
 const { parsePlaceholders, substitute, markPlaceholder, unmarkPlaceholder, isValidTokenName } =
   await import(join(root, 'src/lib/compose/placeholders.ts'));
+const { parseVariables, copyText } = await import(join(root, 'src/lib/compose/variables.ts'));
 
 let failures = 0;
 function assert(cond, msg) {
@@ -211,6 +212,79 @@ console.log('placeholders');
   eq(unmarkPlaceholder('a {{x}} {{y}}', 'x'), 'a x {{y}}', 'unmark leaves other tokens');
   assert(isValidTokenName('ticket-1'), 'valid token name');
   assert(!isValidTokenName('has space'), 'invalid token name');
+}
+
+// ── variable grammar: the SHARED VECTORS (contract §Variable grammar) ────────
+// Both sides (Rust + TS) assert all of these verbatim — the seam contract.
+console.log('variable grammar (shared vectors)');
+{
+  eq(parseVariables('{task}'), [{ name: 'task' }], 'vector: {task} — variable, no default');
+  eq(
+    parseVariables('{task:write tests}'),
+    [{ name: 'task', default: 'write tests' }],
+    'vector: {task:write tests} — variable with default'
+  );
+  eq(parseVariables('{task:}'), [{ name: 'task', default: '' }], 'vector: {task:} — empty default');
+  eq(
+    parseVariables('{x:a:b}'),
+    [{ name: 'x', default: 'a:b' }],
+    'vector: {x:a:b} — first colon splits'
+  );
+  eq(parseVariables('{{task}}'), [], 'vector: {{task}} — escaped, no variable');
+  eq(parseVariables('{"a": 1}'), [], 'vector: {"a": 1} — invalid name is literal');
+  eq(parseVariables('{my var}'), [], 'vector: {my var} — space is literal');
+  eq(parseVariables('{x-1_Y}'), [{ name: 'x-1_Y' }], 'vector: {x-1_Y} — hyphen/underscore/digit name');
+  eq(parseVariables('{:x}'), [], 'vector: {:x} — empty name is literal');
+  eq(
+    parseVariables('{{{task}}}'),
+    [{ name: 'task' }],
+    'vector: {{{task}}} — literal { + variable + literal }'
+  );
+  eq(
+    parseVariables('{x:a} {x:b}'),
+    [{ name: 'x', default: 'a' }],
+    'vector (rule 5): {x:a} {x:b} — one variable, first default wins'
+  );
+
+  // Rule 4: one name = one variable across the whole document.
+  eq(
+    parseVariables('do {task} then {other} then {task:late}'),
+    [{ name: 'task' }, { name: 'other' }],
+    'dedupe keeps first-appearance order; later default never upgrades the first'
+  );
+}
+
+// ── copy output (contract §Copy output) ──────────────────────────────────────
+console.log('copy output');
+{
+  // The contract's own example, verbatim: ON mode dedups into a vars block.
+  eq(
+    copyText('Review the PR for {ticket:ABC-123} and summarize.', {}, true),
+    'Review the PR for <prompt_var name="ticket"/> and summarize.\n\n' +
+      '<prompt_vars>\n<prompt_var name="ticket">ABC-123</prompt_var>\n</prompt_vars>',
+    'ON: contract example — occurrence element + appended block with default'
+  );
+  eq(
+    copyText('do {x} and {x}', { x: 'A' }, true),
+    'do <prompt_var name="x"/> and <prompt_var name="x"/>\n\n' +
+      '<prompt_vars>\n<prompt_var name="x">A</prompt_var>\n</prompt_vars>',
+    'ON: repeated occurrences, one block entry, user fill wins'
+  );
+  eq(
+    copyText('need {x}', {}, true),
+    'need <prompt_var name="x"/>\n\n<prompt_vars>\n<prompt_var name="x"></prompt_var>\n</prompt_vars>',
+    'ON: unfilled + no default = empty element (honest fill-me signal)'
+  );
+  eq(copyText('plain {{json}} body', {}, true), 'plain {json} body', 'ON: no variables, no block, escapes resolved');
+
+  // OFF mode: substitute in place.
+  eq(copyText('do {task:write tests}!', {}, false), 'do write tests!', 'OFF: default substitutes');
+  eq(copyText('do {task:write tests}!', { task: 'ship' }, false), 'do ship!', 'OFF: fill beats default');
+  eq(copyText('keep {x}', {}, false), 'keep {x}', 'OFF: unfilled, no default — literal stays visible');
+  eq(copyText('blank {task:}!', {}, false), 'blank !', 'OFF: {task:} fills as empty when unfilled');
+  eq(copyText('{x:a} {x:b}', {}, false), 'a a', 'OFF (rule 5): first default serves every occurrence');
+  eq(copyText('{{literal}} and {v:x}', {}, false), '{literal} and x', 'OFF: escapes resolve on copy');
+  eq(copyText('', {}, true), '', 'empty document copies empty');
 }
 
 // ── editor plumbing: caretQuery + diffTexts ──────────────────────────────────
