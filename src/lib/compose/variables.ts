@@ -95,13 +95,24 @@ function resolve(
   return variable.default;
 }
 
+/** XML-escape a value interpolated into the <prompt_vars> block (contract
+ *  §Copy output): the wrapper form exists for parseability, and an unescaped
+ *  value containing `</prompt_var>` would inject phantom variables into what
+ *  the reading LLM sees. `&` first — escaping it later would re-escape the
+ *  entities just produced. Names need none: the grammar's name class is
+ *  attribute-safe by construction. */
+function escapeXml(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
 /**
  * Copy Prompt output (§Copy output). Escapes always resolve. `asVariable` ON
  * (dedup mode): occurrences become `<prompt_var name="x"/>` and a
  * `<prompt_vars>` block appends after the body, one entry per distinct
  * variable in first-appearance order — an empty element is the honest "fill
- * me" signal. OFF (substitute in place): each occurrence becomes the value,
- * else the literal `{x}` stays visible — never silently blanked.
+ * me" signal; block values are XML-escaped. OFF (substitute in place): each
+ * occurrence becomes the value verbatim (plain text — never escaped), else
+ * the canonical literal `{x}` stays visible — never silently blanked.
  */
 export function copyText(
   text: string,
@@ -127,7 +138,7 @@ export function copyText(
   }
   if (asVariable && vars.length) {
     const entries = vars.map((v) => {
-      const value = resolve(v, fills) ?? '';
+      const value = escapeXml(resolve(v, fills) ?? '');
       return `<prompt_var name="${v.name}">${value}</prompt_var>`;
     });
     out.push(`\n\n<prompt_vars>\n${entries.join('\n')}\n</prompt_vars>`);
