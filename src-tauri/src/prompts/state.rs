@@ -349,18 +349,29 @@ pub async fn embed_download(
         embed::download_artifacts(&root, &|p| {
             let _ = on_progress.send(p);
         })?;
-        // Warm everything while the user is already waiting on the
-        // download UI: load the model and embed the whole corpus now, so
-        // the first real query is instant instead of paying the bulk
-        // cost. No channel events for this (contract addendum: the
-        // command's Result is the terminal signal) — it runs between the
-        // last "model" event and the Result resolving.
+        // The "index" stage (contract): embed the existing library while the
+        // user is already watching the popover, streaming piece-count
+        // progress — so "Download & index" is literally what one click does
+        // and the first real query is instant. Resumable convention matches
+        // the byte stages: already-cached pieces count as done.
         let mut embedder = embed::load_embedder(&root)?;
         // Scope validation is irrelevant for embedding (bodies only) — no
         // roster read needed.
         let pieces = store::load_pieces(&store::prompts_dir()?, None)?;
         let conn = embed::open_cache(&root)?;
-        while embed::ensure_embeddings(&conn, &mut embedder, &pieces, EMBED_TOPUP_PER_QUERY)? > 0 {}
+        let total = pieces.len() as u64;
+        loop {
+            let stale =
+                embed::ensure_embeddings(&conn, &mut embedder, &pieces, EMBED_TOPUP_PER_QUERY)?;
+            let _ = on_progress.send(DownloadProgress {
+                stage: "index".to_string(),
+                done: total - stale as u64,
+                total,
+            });
+            if stale == 0 {
+                break;
+            }
+        }
         if let Ok(mut guard) = inner.embedder.lock() {
             *guard = Some(embedder);
         }
