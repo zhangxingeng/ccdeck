@@ -20,6 +20,7 @@ mod embed;
 mod grammar;
 mod lexical;
 mod projects;
+mod repair;
 mod store;
 
 // Public so lib.rs can register the commands by their real paths.

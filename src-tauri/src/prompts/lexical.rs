@@ -132,6 +132,7 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             versions: vec![],
+            recovered: false,
             extra: serde_json::Map::new(),
         }
     }

@@ -63,6 +63,13 @@ pub struct Piece {
     pub updated_at: u64,
     #[serde(default)]
     pub versions: Vec<Version>,
+    /// Transient (§ Store robustness): true when the loader had to repair
+    /// this file's JSON in memory. Never persisted — a clean parse forces it
+    /// false (so a hand-written `"recovered": true` can't fake the signal;
+    /// the key is schema-reserved, not a preserved extra), saves construct
+    /// pieces with false, and the skip keeps a false flag off disk and wire.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recovered: bool,
     /// Unknown fields from hand-edited files, preserved verbatim on
     /// round-trip. serde_json keeps u64/i64 integers exact (the "numbers past
     /// 2^53" hazard is a JavaScript float problem, covered by tests here so a
@@ -103,10 +110,12 @@ pub(super) fn unix_now() -> u64 {
         .as_secs()
 }
 
-/// Parse one piece file's content: strict JSON first, then scope
-/// normalization — a legacy/unknown scope (or, when the roster is readable,
-/// a `project_id` no roster entry matches) loads as Global and comes back as
-/// a load error alongside the piece: visible, non-fatal, file untouched.
+/// Parse one piece file's content: strict JSON first; on failure an
+/// in-memory jsonrepair attempt (§ Store robustness) — a recovered piece
+/// loads flagged `recovered: true` and the file stays untouched. Then scope
+/// normalization: a legacy/unknown scope (or, when the roster is readable, a
+/// `project_id` no roster entry matches) loads as Global and comes back as a
+/// load error alongside the piece: visible, non-fatal, file untouched.
 /// `known_project_ids: None` means the roster could not be consulted — id
 /// validation is suspended rather than falsely degrading every project piece.
 fn parse_piece(
@@ -114,9 +123,18 @@ fn parse_piece(
     fname: &str,
     known_project_ids: Option<&HashSet<String>>,
 ) -> Result<(Piece, Option<LoadError>), String> {
-    let mut value: Value = serde_json::from_str(content).map_err(|e| e.to_string())?;
+    let (mut value, repaired) = match serde_json::from_str::<Value>(content) {
+        Ok(v) => (v, false),
+        Err(strict_err) => match super::repair::repair_to_value(content) {
+            Some(v) => (v, true),
+            // Report the STRICT error — it points at the user's actual
+            // file, not at what the repairer made of it.
+            None => return Err(strict_err.to_string()),
+        },
+    };
     let scope_error = normalize_scope(&mut value, fname, known_project_ids);
-    let piece: Piece = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    let mut piece: Piece = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    piece.recovered = repaired;
     Ok((piece, scope_error))
 }
 
@@ -256,14 +274,15 @@ fn resolve_existing(dir: &Path, id: &str) -> Result<Option<Piece>, String> {
     let canonical = dir.join(format!("{id}.json"));
     if canonical.is_file() {
         let content = fs::read_to_string(&canonical).map_err(|e| e.to_string())?;
-        // parse_piece (not bare serde): a legacy-scope file must stay
-        // saveable — the explicit save is exactly the moment its normalized
-        // scope is allowed to persist. Scope validation is skipped (None):
-        // the save overwrites `scope` from the input anyway.
+        // parse_piece (not bare serde): a legacy-scope or repairable file
+        // must stay saveable — the explicit save is exactly the moment its
+        // normalized/repaired form is allowed to persist (versions append,
+        // extras merge, like any body change). Scope validation is skipped
+        // (None): the save overwrites `scope` from the input anyway.
         let (piece, _scope_notice) = parse_piece(&content, &format!("{id}.json"), None)
             .map_err(|e| {
                 format!(
-                    "refusing to save piece {id}: {id}.json exists but cannot be parsed ({e}) — fix or remove the file first, so the save cannot destroy its contents"
+                    "refusing to save piece {id}: {id}.json exists but cannot be parsed even after repair ({e}) — fix or remove the file first, so the save cannot destroy its contents"
                 )
             })?;
         if piece.id != id {
@@ -309,6 +328,7 @@ pub fn save_piece_at(dir: &Path, input: PieceInput, now: u64) -> Result<Piece, S
                 created_at: prev.created_at,
                 updated_at: now,
                 versions: prev.versions,
+                recovered: false,
                 extra: prev.extra,
             }
         }
@@ -324,6 +344,7 @@ pub fn save_piece_at(dir: &Path, input: PieceInput, now: u64) -> Result<Piece, S
             created_at: now,
             updated_at: now,
             versions: Vec::new(),
+            recovered: false,
             extra: Map::new(),
         },
     };
@@ -684,25 +705,109 @@ mod tests {
     }
 
     #[test]
-    fn save_refuses_to_overwrite_unparseable_canonical_file() {
-        // Audit L2: the loader skips a broken <id>.json, so resolving through
-        // it would silently turn this save into a CREATE that overwrites the
-        // broken file — destroying whatever versions/extra it held. The save
-        // must refuse instead, and the file must stay byte-identical.
+    fn save_refuses_when_repair_cannot_yield_this_piece() {
+        // Audit L2, repair-era form: when even repair can't turn <id>.json
+        // into a piece, resolving through it would silently turn this save
+        // into a CREATE that overwrites the broken file — destroying
+        // whatever it held. The save must refuse, file byte-identical.
         let dir = tmp_dir("refuse-broken");
-        let broken = r#"{"id":"x","title":"t","body":"b","versions":[{"body":"precious"#; // truncated JSON
+        let broken = "[1, 2,"; // repairs to a JSON array — never a Piece
         fs::write(dir.join("x.json"), broken).unwrap();
 
         let mut inp = input("t2", "new body");
         inp.id = Some("x".to_string());
         let err = save_piece_at(&dir, inp, 2).unwrap_err();
         assert!(err.contains("x.json"), "error must name the file: {err}");
-        assert!(err.contains("cannot be parsed"), "error must say why: {err}");
+        assert!(err.contains("even after repair"), "error must say why: {err}");
         assert_eq!(
             fs::read_to_string(dir.join("x.json")).unwrap(),
             broken,
             "the refused save must leave the broken file byte-identical"
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // --- store robustness: in-memory jsonrepair recovery ---
+
+    #[test]
+    fn hand_edit_corruption_recovers_in_memory_flagged_and_untouched() {
+        let dir = tmp_dir("recover");
+        // The contract's bounded corruption classes in one file: comments,
+        // unquoted key, single quotes, trailing comma — plus a u64 past 2^53
+        // to prove the repair path keeps numbers exact (silent-corruption
+        // guard: repair must never "fix" data by rounding it).
+        let corrupt = r#"{
+            // hand-added comment
+            "id": "r1",
+            title: 'needs repair',
+            "body": "b",
+            "created_at": 1,
+            "updated_at": 1,
+            "big": 18446744073709551615,
+        }"#;
+        fs::write(dir.join("r1.json"), corrupt).unwrap();
+
+        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
+        assert_eq!(pieces.len(), 1, "the piece must recover, not be skipped");
+        assert!(pieces[0].recovered, "recovery must be flagged for the UI");
+        assert_eq!(pieces[0].title, "needs repair");
+        assert_eq!(
+            pieces[0].extra["big"],
+            Value::from(18446744073709551615u64),
+            "repair must keep u64 past 2^53 exact"
+        );
+        assert!(errors.is_empty(), "recovered is a flag, not a load error");
+        assert_eq!(
+            fs::read_to_string(dir.join("r1.json")).unwrap(),
+            corrupt,
+            "the loader must NEVER rewrite the user's file"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn truncated_file_recovers_and_only_explicit_save_persists_repair() {
+        let dir = tmp_dir("truncated");
+        // Truncation mid-versions — the crash/partial-paste shape.
+        let truncated = r#"{"id":"x","title":"t","body":"current","created_at":1,"updated_at":5,"versions":[{"body":"precious","saved_at":1"#;
+        fs::write(dir.join("x.json"), truncated).unwrap();
+
+        // Loading recovers in memory; disk stays byte-identical.
+        let (pieces, _) = scan_pieces(&dir, None).unwrap();
+        assert!(pieces[0].recovered);
+        assert_eq!(fs::read_to_string(dir.join("x.json")).unwrap(), truncated);
+
+        // The explicit save is the one moment the repaired form persists —
+        // treated as the EXISTING piece: versions append, nothing resets.
+        let mut inp = input("t", "new body");
+        inp.id = Some("x".to_string());
+        let saved = save_piece_at(&dir, inp, 9).unwrap();
+        assert_eq!(saved.created_at, 1, "repaired parse is the existing piece, not a create");
+        assert_eq!(saved.versions.first().map(|v| v.body.as_str()), Some("current"));
+        assert!(
+            saved.versions.iter().any(|v| v.body == "precious"),
+            "the recovered prior version must survive the save"
+        );
+
+        let raw = fs::read_to_string(dir.join("x.json")).unwrap();
+        let reread: Value = serde_json::from_str(&raw).unwrap();
+        assert!(reread.get("recovered").is_none(), "the transient flag never reaches disk");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn hand_written_recovered_key_cannot_fake_the_transient_signal() {
+        let dir = tmp_dir("fake-flag");
+        // `recovered` is schema-reserved: on a clean parse it is forced
+        // false (and, being a known field, it is not preserved as an extra).
+        fs::write(
+            dir.join("a.json"),
+            r#"{"id":"a","title":"t","body":"b","created_at":1,"updated_at":1,"recovered":true}"#,
+        )
+        .unwrap();
+        let (pieces, errors) = scan_pieces(&dir, None).unwrap();
+        assert!(!pieces[0].recovered);
+        assert!(errors.is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
 

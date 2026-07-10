@@ -81,17 +81,27 @@ fn roster_path(root: &Path) -> PathBuf {
 }
 
 /// Load the roster. A missing file is an empty roster (fresh install); a
-/// file that exists but cannot be parsed is an ERROR naming the file — never
-/// a silent empty roster, which would read as every project vanishing (and
-/// would cascade every project-scoped piece into global-with-error).
+/// corrupted file gets an in-memory jsonrepair attempt (same § Store
+/// robustness posture as pieces — the file is never rewritten; the repaired
+/// roster persists on the next explicit project save); a file that still
+/// cannot be parsed is an ERROR naming the file — never a silent empty
+/// roster, which would read as every project vanishing (and would cascade
+/// every project-scoped piece into global-with-error).
 fn load_roster(root: &Path) -> Result<Roster, String> {
     let path = roster_path(root);
     if !path.is_file() {
         return Ok(Roster::default());
     }
     let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&content)
-        .map_err(|e| format!("projects.json cannot be parsed ({e}) — fix or remove the file; the roster is never silently reset"))
+    serde_json::from_str(&content).or_else(|strict_err| {
+        super::repair::repair_to_value(&content)
+            .and_then(|v| serde_json::from_value::<Roster>(v).ok())
+            .ok_or_else(|| {
+                format!(
+                    "projects.json cannot be parsed even after repair ({strict_err}) — fix or remove the file; the roster is never silently reset"
+                )
+            })
+    })
 }
 
 /// Atomic write (temp sibling + rename), pretty-printed + trailing newline —
@@ -234,6 +244,33 @@ mod tests {
         assert_eq!(reread["roster_note"], "also hand-added");
         assert_eq!(reread["projects"][0]["name"], "n2", "the edit itself must land");
         assert_eq!(reread["projects"][0]["created_at"], 1);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn corrupt_roster_recovers_in_memory_and_file_stays_untouched() {
+        let root = tmp_root("repair");
+        // Trailing comma + comment — the hand-edit shapes § Store robustness
+        // names. Must load (never silently reset the roster) with the file
+        // byte-identical; the repaired form persists only on the next save.
+        let corrupt = r#"{
+            // my projects
+            "projects": [
+                {"id": "p1", "name": "n", "color": "blue", "created_at": 1},
+            ]
+        }"#;
+        fs::write(roster_path(&root), corrupt).unwrap();
+
+        let projects = load_projects(&root).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].id, "p1");
+        assert_eq!(fs::read_to_string(roster_path(&root)).unwrap(), corrupt);
+
+        // The next explicit save persists the repaired roster, well-formed.
+        save_project_at(&root, input("second", PaletteColor::Red), 2).unwrap();
+        let reread: Value =
+            serde_json::from_str(&fs::read_to_string(roster_path(&root)).unwrap()).unwrap();
+        assert_eq!(reread["projects"].as_array().unwrap().len(), 2);
         fs::remove_dir_all(&root).unwrap();
     }
 
