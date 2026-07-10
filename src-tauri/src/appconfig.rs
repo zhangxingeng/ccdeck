@@ -3,12 +3,14 @@
 //! that the schema-driven settings editor — issue #18 — has been removed;
 //! users hand-edit `settings.json` themselves).
 //!
-//! Lives at `~/.claude/.ccstudio-config.json`, keeping the established
-//! `.ccstudio-*` on-disk naming (the same reason we don't rename those dirs: not
-//! worth orphaning existing state). Persisted as a file rather than localStorage
-//! because the Rust side needs these values at terminal-launch time, before any
-//! webview is involved.
+//! Lives at `~/.ccdeck/config.json` (issue #24 de-contamination: nothing
+//! ccdeck-owned lives under `~/.claude` anymore; the legacy
+//! `~/.claude/.ccstudio-config.json` is moved here on startup by the datadir
+//! migration). Persisted as a file rather than localStorage because the Rust
+//! side needs these values at terminal-launch time, before any webview is
+//! involved.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -51,6 +53,22 @@ pub struct AppConfig {
     /// runs regardless of this toggle.
     #[serde(default = "default_true")]
     pub update_check_on_launch: bool,
+    /// Prompt Library semantic match toggle (issue #24). Defaults to `false`:
+    /// embeddings are strictly opt-in — "ready + downloaded + enabled" is
+    /// what turns hybrid matching on.
+    pub embed_enabled: bool,
+    /// Prompt Library hotkeys (contract § Hotkeys): command id → normalized
+    /// chord string, e.g. `"copyPrompt" -> "Mod+C"`, where `Mod` stands for
+    /// `Ctrl` on Windows/Linux and `Cmd` on macOS so one stored binding is
+    /// correct cross-platform and a config file is portable. An absent command
+    /// id falls back to its default — a fresh install and a pre-hotkeys config
+    /// are the same case, and neither needs a migration (the empty map is the
+    /// all-defaults state). `BTreeMap` for deterministic key ordering, so a
+    /// user who git-tracks `~/.ccdeck/config.json` gets diff-stable output.
+    /// Persisted through the existing `get_app_config`/`set_app_config` — no
+    /// new command surface. Only *command* hotkeys live here; spatial/context
+    /// keys (`↓`/`Enter`/`Esc`) are not rebindable and are not stored.
+    pub hotkeys: BTreeMap<String, String>,
 }
 
 impl Default for AppConfig {
@@ -59,14 +77,16 @@ impl Default for AppConfig {
             terminal: String::new(),
             launch_command: String::new(),
             update_check_on_launch: true,
+            embed_enabled: false,
+            hotkeys: BTreeMap::new(),
         }
     }
 }
 
-/// `~/.claude/.ccstudio-config.json`.
+/// `~/.ccdeck/config.json` (under the datadir root, so `CCDECK_DATA_DIR`
+/// redirects it in tests).
 fn config_path() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
-    Ok(home.join(".claude").join(".ccstudio-config.json"))
+    Ok(crate::datadir::data_root()?.join("config.json"))
 }
 
 /// Load the config, falling back to defaults on any error (missing file, bad
@@ -198,22 +218,40 @@ pub fn build_resume_script_windows(
     )
 }
 
+/// Persist the config (pretty-printed), creating the data root if needed.
+pub fn save(config: &AppConfig) -> Result<(), String> {
+    let path = config_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut pretty = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    pretty.push('\n');
+    std::fs::write(&path, pretty).map_err(|e| e.to_string())
+}
+
+/// The Prompt Library's read of the semantic-match toggle.
+pub fn load_embed_enabled() -> bool {
+    load().embed_enabled
+}
+
+/// Persist just the semantic-match toggle (read-modify-write so the user's
+/// other preferences are never clobbered by the prompts view).
+pub fn save_embed_enabled(enabled: bool) -> Result<(), String> {
+    let mut config = load();
+    config.embed_enabled = enabled;
+    save(&config)
+}
+
 /// Return the current app config for the UI.
 #[tauri::command]
 pub fn get_app_config() -> AppConfig {
     load()
 }
 
-/// Persist the app config (pretty-printed), creating `~/.claude/` if needed.
+/// Persist the app config from the UI.
 #[tauri::command]
 pub fn set_app_config(config: AppConfig) -> Result<(), String> {
-    let path = config_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let mut pretty = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    pretty.push('\n');
-    std::fs::write(&path, pretty).map_err(|e| e.to_string())
+    save(&config)
 }
 
 #[cfg(test)]
@@ -275,10 +313,64 @@ mod tests {
     }
 
     #[test]
+    fn embed_enabled_defaults_false_and_round_trips() {
+        // Opt-in contract (issue #24): a config written before the field
+        // existed must load as disabled; an explicit true must survive.
+        let old: AppConfig = serde_json::from_str(r#"{"terminal":""}"#).unwrap();
+        assert!(!old.embed_enabled, "pre-existing configs must not opt in");
+        let on: AppConfig = serde_json::from_str(r#"{"embedEnabled":true}"#).unwrap();
+        assert!(on.embed_enabled);
+    }
+
+    #[test]
     fn deserialize_explicit_false_is_respected() {
         let json = r#"{"updateCheckOnLaunch":false}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert!(!config.update_check_on_launch);
+    }
+
+    #[test]
+    fn deserialize_ignores_removed_prompts_as_variable_key() {
+        // Contract § Copy output removed `prompts_as_variable` this round (the
+        // as-variable choice is now per-variable, per-session, never persisted).
+        // A released config file on a founder's/user's disk still carries the
+        // stale `promptsAsVariable` key — because AppConfig sets no
+        // `deny_unknown_fields`, that key is simply ignored and the config loads
+        // cleanly, exactly like the retired `terminalArgs` key. This proves the
+        // removal is not a breaking migration, by parsing a fixture with the key
+        // rather than reasoning about serde's usual behavior.
+        let with_stale = r#"{"terminal":"konsole -e","launchCommand":"echo hi","promptsAsVariable":false}"#;
+        let config: AppConfig = serde_json::from_str(with_stale).unwrap();
+        assert_eq!(config.terminal, "konsole -e");
+        assert_eq!(config.launch_command, "echo hi");
+        // The serialized form no longer emits the field at all.
+        let json = serde_json::to_string(&AppConfig::default()).unwrap();
+        assert!(!json.contains("promptsAsVariable"), "field is gone: {json}");
+    }
+
+    #[test]
+    fn hotkeys_default_empty_and_round_trip() {
+        // Contract § Hotkeys: an absent `hotkeys` key deserializes to the empty
+        // map (the all-defaults state — a fresh install and a pre-hotkeys config
+        // are the same case, no migration). A populated map round-trips under
+        // the camelCase key its siblings use, and BTreeMap keeps the serialized
+        // key order deterministic so a git-tracked config file diffs cleanly.
+        let old: AppConfig = serde_json::from_str(r#"{"terminal":""}"#).unwrap();
+        assert!(old.hotkeys.is_empty(), "missing key must default to empty map");
+
+        let json =
+            r#"{"hotkeys":{"copyPrompt":"Mod+C","saveAs":"Mod+S"}}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.hotkeys.get("copyPrompt").map(String::as_str), Some("Mod+C"));
+        assert_eq!(config.hotkeys.get("saveAs").map(String::as_str), Some("Mod+S"));
+
+        let out = serde_json::to_string(&config).unwrap();
+        assert!(out.contains(r#""hotkeys":{"#), "camelCase key: {out}");
+        // BTreeMap orders keys lexicographically: "copyPrompt" before "saveAs".
+        assert!(
+            out.contains(r#""hotkeys":{"copyPrompt":"Mod+C","saveAs":"Mod+S"}"#),
+            "deterministic key order: {out}"
+        );
     }
 
     #[test]

@@ -49,14 +49,13 @@ CREATE TABLE IF NOT EXISTS search_meta (
 );
 ";
 
-/// Where the search cache lives: `~/.claude/.ccstudio-index/search.db`
-/// (same convention as `.ccstudio-backups`).
+/// Where the search cache lives: `~/.ccdeck/index/search.db`.
 /// Creates the parent directory if it doesn't exist yet.
 fn db_path() -> Result<PathBuf, String> {
     Ok(index_root()?.join("search.db"))
 }
 
-/// Where the tantivy full-text index lives: `~/.claude/.ccstudio-index/tantivy/`.
+/// Where the tantivy full-text index lives: `~/.ccdeck/index/tantivy/`.
 /// Creates the directory if it doesn't exist yet.
 pub fn tantivy_index_dir() -> Result<PathBuf, String> {
     let dir = index_root()?.join("tantivy");
@@ -64,9 +63,11 @@ pub fn tantivy_index_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// `<data root>/index` — moved out of `~/.claude/.ccstudio-index` (issue #24
+/// de-contamination invariant; the datadir startup migration relocates an
+/// existing cache, and a missed migration just re-indexes here from scratch).
 fn index_root() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or("could not resolve home directory")?;
-    let dir = home.join(".claude").join(".ccstudio-index");
+    let dir = crate::datadir::data_root()?.join("index");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }

@@ -16,6 +16,16 @@ import type {
   ProviderProfile,
   KeyBackend,
 } from './types';
+import type {
+  Snippet,
+  SnippetInput,
+  SnippetLoadError,
+  MatchHit,
+  EmbedStatus,
+  EmbedProgress,
+  Project,
+  ProjectInput,
+} from './prompts/types';
 
 // Bundled mock fixtures for browser-dev mode (Vite ?raw import).
 import mockSession from '../../tests/mock_data/session.jsonl?raw';
@@ -220,7 +230,12 @@ export function isSettingsConflict(e: unknown): boolean {
 // CC Deck app preferences (App Config: terminal + launch command + update toggle)
 // ---------------------------------------------------------------------------
 
-let devAppConfig: AppConfig = { terminal: '', launchCommand: '', updateCheckOnLaunch: true };
+let devAppConfig: AppConfig = {
+  terminal: '',
+  launchCommand: '',
+  updateCheckOnLaunch: true,
+  hotkeys: {},
+};
 
 /** CC Deck's own App Config preferences (terminal choice, resume-launch command,
  *  update-check-on-launch toggle) — never Claude Code's own settings.json. */
@@ -394,6 +409,523 @@ export async function refreshIndex(): Promise<IndexStatus | null> {
 export async function indexStatus(): Promise<IndexStatus | null> {
   if (!isTauri()) return null;
   return call<IndexStatus>('index_status');
+}
+
+// ---------------------------------------------------------------------------
+// Prompt Library (issue #24) — snippets, matching, opt-in embeddings.
+// Contract: project_docs/prompts-design.md. All payloads are serde-default
+// snake_case, like SessionMeta.
+// ---------------------------------------------------------------------------
+
+/** List every snippet in the store (the corpus is small by design — the
+ *  frontend filters by scope/project). */
+export async function listSnippets(): Promise<Snippet[]> {
+  if (!isTauri()) return devSnippets.map((p) => structuredClone(p));
+  return call<Snippet[]>('list_snippets');
+}
+
+/** Create (no id) or update (id present) a snippet. The backend owns derived
+ *  fields: placeholders re-derived from the body, `versions` gets the prior
+ *  body pushed on when the body changed (append-only — a save never destroys
+ *  the previous body), timestamps. Returns the stored snippet. */
+export async function saveSnippet(snippet: SnippetInput): Promise<Snippet> {
+  if (!isTauri()) return devSaveSnippet(snippet);
+  return call<Snippet>('save_snippet', { snippet });
+}
+
+export async function deleteSnippet(id: string): Promise<void> {
+  if (!isTauri()) {
+    const i = devSnippets.findIndex((p) => p.id === id);
+    if (i >= 0) devSnippets.splice(i, 1);
+    return;
+  }
+  await call<null>('delete_snippet', { id });
+}
+
+/** Rank snippets against `query`. Pool: global snippets + snippets scoped to
+ *  `projectId` (null = global only). Which engine ran (lexical / semantic /
+ *  hybrid) is the backend's business — callers only see the hit list.
+ *  Seam note: Rust param `project_id` ⇒ invoke key `projectId` (Tauri's
+ *  camelCase convention, pinned at the gate for both lanes). */
+export async function matchSnippets(
+  query: string,
+  projectId: string | null,
+  limit: number
+): Promise<MatchHit[]> {
+  if (!isTauri()) return devMatchSnippets(query, projectId, limit);
+  return call<MatchHit[]>('match_snippets', { query, projectId, limit });
+}
+
+/** The project roster (~/.ccdeck/projects.json) — small, loaded whole. */
+export async function listProjects(): Promise<Project[]> {
+  if (!isTauri()) return devProjects.map((p) => structuredClone(p));
+  return call<Project[]>('list_projects');
+}
+
+/** Create (no id) or update (rename, recolor, pin) a project. */
+export async function saveProject(project: ProjectInput): Promise<Project> {
+  if (!isTauri()) return devSaveProject(project);
+  return call<Project>('save_project', { project });
+}
+
+/** Delete a project. The backend rescopes its snippets to GLOBAL — nothing a
+ *  user wrote ever vanishes as a side effect; re-list snippets afterwards. */
+export async function deleteProject(id: string): Promise<void> {
+  if (!isTauri()) {
+    devDeleteProject(id);
+    return;
+  }
+  await call<null>('delete_project', { id });
+}
+
+/** Snippet JSON files that failed to parse on the last load pass — surfaced so
+ *  a hand-edit typo never reads as a silently vanished snippet. */
+export async function snippetLoadErrors(): Promise<SnippetLoadError[]> {
+  if (!isTauri()) return devSnippetLoadErrors.map((e) => ({ ...e }));
+  return call<SnippetLoadError[]>('snippet_load_errors');
+}
+
+export async function embedStatus(): Promise<EmbedStatus> {
+  if (!isTauri()) return { ...devEmbed };
+  return call<EmbedStatus>('embed_status');
+}
+
+/** Download the embedding model, streaming progress over a Channel (same
+ *  pattern as `search`). Resolves when the download completes. */
+export async function embedDownload(onProgress: (p: EmbedProgress) => void): Promise<void> {
+  if (!isTauri()) return devEmbedDownload(onProgress);
+  const { invoke, Channel } = await import('@tauri-apps/api/core');
+  const channel = new Channel<EmbedProgress>();
+  channel.onmessage = onProgress;
+  await invoke<null>('embed_download', { onProgress: channel });
+}
+
+/** Persisted app-config toggle; "ready" + enabled = hybrid matching on. */
+export async function setEmbedEnabled(enabled: boolean): Promise<void> {
+  if (!isTauri()) {
+    if (devEmbed.state === 'ready' && !enabled) devEmbed.state = 'off';
+    else if (devEmbed.state === 'off' && enabled) devEmbed.state = 'ready';
+    return;
+  }
+  await call<null>('set_embed_enabled', { enabled });
+}
+
+// --- Browser-dev snippet + project store: real save/versioning/rescope --------
+// semantics over seeded samples, so `pnpm dev` exercises the whole Prompts
+// view (tabs, variables, recovery notice, embed flow) with no native shell —
+// this is how the founder feel-checks.
+
+// One seeded broken-file case so the load-errors notice is exercisable in
+// browser dev (dismiss it to see the common path).
+const devSnippetLoadErrors: SnippetLoadError[] = [
+  {
+    file: '~/.ccdeck/prompts/broken-example.json',
+    error: 'expected `,` or `}` at line 3 column 14',
+  },
+];
+
+const devProjects: Project[] = [
+  {
+    id: 'dev-project-ccdeck',
+    name: 'ccdeck',
+    color: 'blue',
+    pinned: true,
+    path: '/dev/mock/demo-project',
+    created_at: 1751000000,
+  },
+  {
+    id: 'dev-project-writing',
+    name: 'writing',
+    color: 'pink',
+    pinned: true,
+    path: null,
+    created_at: 1751100000,
+  },
+  {
+    id: 'dev-project-research',
+    name: 'research',
+    color: 'purple',
+    pinned: true,
+    path: null,
+    created_at: 1751150000,
+  },
+  {
+    id: 'dev-project-unpinned',
+    name: 'side-quests',
+    color: 'green',
+    pinned: false,
+    path: null,
+    created_at: 1751200000,
+  },
+];
+
+function devSaveProject(input: ProjectInput): Project {
+  const existing = input.id ? devProjects.find((p) => p.id === input.id) : undefined;
+  if (existing) {
+    existing.name = input.name;
+    existing.color = input.color;
+    existing.pinned = input.pinned;
+    existing.path = input.path;
+    return structuredClone(existing);
+  }
+  const project: Project = {
+    id: crypto.randomUUID(),
+    name: input.name,
+    color: input.color,
+    pinned: input.pinned,
+    path: input.path,
+    created_at: Math.floor(Date.now() / 1000),
+  };
+  devProjects.push(project);
+  return structuredClone(project);
+}
+
+/** Contract delete semantics: the project's snippets rescope to global. */
+function devDeleteProject(id: string): void {
+  const i = devProjects.findIndex((p) => p.id === id);
+  if (i >= 0) devProjects.splice(i, 1);
+  for (const snippet of devSnippets) {
+    if (snippet.scope.kind === 'project' && snippet.scope.project_id === id) {
+      snippet.scope = { kind: 'global' };
+    }
+  }
+}
+
+// Seeded library. These double as the README's screenshot set, so the bodies
+// are real prompt content rather than placeholder prose: a reader should learn
+// what the feature is *for* from a screenshot alone. Coverage is deliberate —
+// every scope, several palette colors, snippets with and without variables,
+// a repeated variable (dedup), an explicit default, a versioned snippet, and
+// one recovered file — so no surface of the Prompts view is unexercisable in
+// `pnpm dev`. Queries that rank well here: review, test, bug, explain, refactor.
+const devSnippets: Snippet[] = [
+  {
+    id: 'dev-snippet-reviewer',
+    title: 'senior-reviewer',
+    body: 'You are a senior reviewer. Be rigorous about correctness, but do not nitpick style that a formatter owns. Say plainly when something is fine.',
+    keywords: ['review', 'role', 'code'],
+    tags: [],
+    category: null,
+    scope: { kind: 'global' },
+    placeholders: [],
+    created_at: 1751000000,
+    updated_at: 1751000000,
+    versions: [],
+  },
+  {
+    id: 'dev-snippet-terse',
+    title: 'be-terse',
+    body: 'Be terse and concrete. Lead with the answer; skip preamble and hedging.',
+    keywords: ['style', 'tone'],
+    tags: [],
+    category: null,
+    scope: { kind: 'global' },
+    placeholders: [],
+    created_at: 1751000000,
+    updated_at: 1751100000,
+    versions: [{ body: 'Be terse.', saved_at: 1751000000 }],
+  },
+  {
+    id: 'dev-snippet-checklist',
+    title: 'pr-review-checklist',
+    body: 'Review the PR for {ticket:ABC-123}. Focus especially on {concern}. Check error handling, tests, and naming. Flag anything that reads as a silent failure.',
+    keywords: ['review', 'checklist', 'pr'],
+    tags: [],
+    category: null,
+    scope: { kind: 'global' },
+    placeholders: [{ name: 'ticket', default: 'ABC-123' }, { name: 'concern' }],
+    created_at: 1751000000,
+    updated_at: 1751000000,
+    versions: [],
+  },
+  {
+    id: 'dev-snippet-bug-repro',
+    title: 'bug-repro-first',
+    body: 'Before proposing a fix for {symptom}, write the smallest failing test that reproduces it. If you cannot reproduce it, say so instead of guessing.',
+    keywords: ['bug', 'debug', 'test'],
+    tags: [],
+    category: null,
+    scope: { kind: 'global' },
+    placeholders: [{ name: 'symptom' }],
+    created_at: 1751010000,
+    updated_at: 1751010000,
+    versions: [],
+  },
+  {
+    id: 'dev-snippet-test-plan',
+    title: 'test-plan',
+    body: 'Write a test plan for {surface}. Cover the happy path once, then spend the rest of your effort on {risk} — the cases where a bug would be silent rather than loud.',
+    keywords: ['test', 'plan', 'quality'],
+    tags: [],
+    category: null,
+    scope: { kind: 'global' },
+    placeholders: [{ name: 'surface' }, { name: 'risk' }],
+    created_at: 1751020000,
+    updated_at: 1751020000,
+    versions: [],
+  },
+  {
+    id: 'dev-snippet-explain',
+    title: 'explain-like-staff-eng',
+    body: 'Explain {topic} to a strong engineer who has never touched it. Lead with what it is for, then how it works. No analogies to food.',
+    keywords: ['explain', 'teaching', 'docs'],
+    tags: [],
+    category: null,
+    scope: { kind: 'global' },
+    placeholders: [{ name: 'topic' }],
+    created_at: 1751030000,
+    updated_at: 1751030000,
+    versions: [],
+  },
+  {
+    id: 'dev-snippet-refactor',
+    title: 'refactor-safely',
+    body: 'Refactor {target} without changing behavior. Land the characterization tests first, then move code. If a test is hard to write, that is the design telling you something.',
+    keywords: ['refactor', 'design', 'code'],
+    tags: [],
+    category: null,
+    scope: { kind: 'global' },
+    placeholders: [{ name: 'target' }],
+    created_at: 1751040000,
+    updated_at: 1751040000,
+    versions: [],
+  },
+  {
+    id: 'dev-snippet-project',
+    title: 'ccdeck-architecture',
+    body: 'ccdeck is a Tauri + Svelte 5 desktop app: Rust owns the filesystem and search index, the frontend owns rendering. Prefer the existing store idioms over new abstractions.',
+    keywords: ['context', 'architecture'],
+    tags: [],
+    category: null,
+    scope: { kind: 'project', project_id: 'dev-project-ccdeck' },
+    placeholders: [],
+    created_at: 1751000000,
+    updated_at: 1751000000,
+    versions: [],
+  },
+  {
+    id: 'dev-snippet-tauri-command',
+    title: 'new-tauri-command',
+    body: 'Add a Rust command `{command_name}` and its TypeScript mirror. Both sides of the seam change together, or the type checker will not catch the drift.',
+    keywords: ['rust', 'tauri', 'command'],
+    tags: [],
+    category: null,
+    scope: { kind: 'project', project_id: 'dev-project-ccdeck' },
+    placeholders: [{ name: 'command_name' }],
+    created_at: 1751050000,
+    updated_at: 1751050000,
+    versions: [],
+  },
+  {
+    id: 'dev-snippet-release-notes',
+    title: 'release-notes-draft',
+    body: 'Draft release notes for {version}. Lead with what a user can now do that they could not before. Migrations and breaking changes go first, not last.',
+    keywords: ['release', 'notes', 'changelog'],
+    tags: [],
+    category: null,
+    scope: { kind: 'project', project_id: 'dev-project-ccdeck' },
+    placeholders: [{ name: 'version' }],
+    created_at: 1751060000,
+    updated_at: 1751060000,
+    versions: [],
+  },
+  {
+    // Exercises the store-robustness surface: an in-memory jsonrepair rescue,
+    // flagged transient — the UI shows it needs attention until re-saved.
+    id: 'dev-snippet-recovered',
+    title: 'tone-notes',
+    body: 'Prefer plain words over jargon. Say {audience:teammates} when addressing the reader.',
+    keywords: ['tone'],
+    tags: [],
+    category: null,
+    scope: { kind: 'project', project_id: 'dev-project-writing' },
+    placeholders: [{ name: 'audience', default: 'teammates' }],
+    created_at: 1751000000,
+    updated_at: 1751000000,
+    versions: [],
+    recovered: true,
+  },
+  {
+    id: 'dev-snippet-headline',
+    title: 'headline-rewrite',
+    body: 'Rewrite {draft} three ways: one that states the outcome, one that names the reader, one that asks the question they already have. No clickbait.',
+    keywords: ['writing', 'headline', 'edit'],
+    tags: [],
+    category: null,
+    scope: { kind: 'project', project_id: 'dev-project-writing' },
+    placeholders: [{ name: 'draft' }],
+    created_at: 1751070000,
+    updated_at: 1751070000,
+    versions: [],
+  },
+  {
+    id: 'dev-snippet-cut-half',
+    title: 'cut-it-in-half',
+    body: 'Cut this by half without losing an idea. Delete throat-clearing, restatement, and any sentence that only announces the next one.',
+    keywords: ['writing', 'edit', 'concise'],
+    tags: [],
+    category: null,
+    scope: { kind: 'project', project_id: 'dev-project-writing' },
+    placeholders: [],
+    created_at: 1751080000,
+    updated_at: 1751080000,
+    versions: [],
+  },
+  {
+    id: 'dev-snippet-lit-scan',
+    title: 'literature-scan',
+    body: 'Survey the {n:5} strongest sources on {question}. For each: the claim, the evidence, and the strongest objection to it. Mark what you could not verify.',
+    keywords: ['research', 'survey', 'sources'],
+    tags: [],
+    category: null,
+    scope: { kind: 'project', project_id: 'dev-project-research' },
+    placeholders: [{ name: 'n', default: '5' }, { name: 'question' }],
+    created_at: 1751090000,
+    updated_at: 1751090000,
+    versions: [],
+  },
+  {
+    id: 'dev-snippet-steelman',
+    title: 'steelman-then-rebut',
+    body: 'State the strongest version of {claim} — the one its smartest advocate would recognize. Only then argue against it. A rebuttal of a weak version proves nothing.',
+    keywords: ['research', 'argument', 'critique'],
+    tags: [],
+    category: null,
+    scope: { kind: 'project', project_id: 'dev-project-research' },
+    placeholders: [{ name: 'claim' }],
+    created_at: 1751095000,
+    updated_at: 1751095000,
+    versions: [],
+  },
+  {
+    id: 'dev-snippet-scope-guard',
+    title: 'weekend-scope-guard',
+    body: 'This is a weekend project. Name the one thing it must do by Sunday, and the things you are deliberately not building.',
+    keywords: ['scope', 'planning'],
+    tags: [],
+    category: null,
+    scope: { kind: 'project', project_id: 'dev-project-unpinned' },
+    placeholders: [],
+    created_at: 1751200000,
+    updated_at: 1751200000,
+    versions: [],
+  },
+];
+
+async function devSaveSnippet(input: SnippetInput): Promise<Snippet> {
+  const { parseVariables } = await import('./compose/variables');
+  const now = Math.floor(Date.now() / 1000);
+  const placeholders = parseVariables(input.body);
+  const existing = input.id ? devSnippets.find((p) => p.id === input.id) : undefined;
+  if (existing) {
+    if (existing.body !== input.body) {
+      existing.versions.unshift({ body: existing.body, saved_at: existing.updated_at });
+    }
+    existing.title = input.title;
+    existing.body = input.body;
+    existing.keywords = [...input.keywords];
+    existing.tags = [...input.tags];
+    existing.category = input.category;
+    existing.scope = { ...input.scope };
+    existing.placeholders = placeholders;
+    existing.updated_at = now;
+    // An explicit save persists the repaired form — the snippet no longer
+    // needs attention (mirrors the backend's transient-flag semantics).
+    delete existing.recovered;
+    return structuredClone(existing);
+  }
+  const snippet: Snippet = {
+    id: crypto.randomUUID(),
+    title: input.title,
+    body: input.body,
+    keywords: [...input.keywords],
+    tags: [...input.tags],
+    category: input.category,
+    scope: { ...input.scope },
+    placeholders,
+    created_at: now,
+    updated_at: now,
+    versions: [],
+  };
+  devSnippets.push(snippet);
+  return structuredClone(snippet);
+}
+
+// A stand-in weighted fuzzy scorer for browser-dev — deliberately a fixture,
+// not shared production logic: the real engine (fzf-style subsequence with
+// field weights, optional hybrid fusion) lives in Rust. This one only needs
+// to make the match panel behave believably in `pnpm dev`.
+function devFuzzyScore(query: string, target: string): number {
+  const q = query.toLowerCase();
+  const t = target.toLowerCase();
+  if (!q) return 0;
+  if (t.includes(q)) return 100 + q.length * 2 - Math.min(20, t.length / 10);
+  // Subsequence match: every query char in order, closer together = better.
+  let ti = 0;
+  let matched = 0;
+  let gaps = 0;
+  let last = -1;
+  for (const ch of q) {
+    if (ch === ' ') continue;
+    const found = t.indexOf(ch, ti);
+    if (found < 0) continue;
+    matched++;
+    if (last >= 0) gaps += found - last - 1;
+    last = found;
+    ti = found + 1;
+  }
+  const qLen = q.replace(/ /g, '').length;
+  if (qLen === 0 || matched < qLen * 0.8) return 0;
+  return Math.max(0, matched * 8 - gaps);
+}
+
+function devMatchSnippets(query: string, projectId: string | null, limit: number): MatchHit[] {
+  if (!query.trim()) return [];
+  const pool = devSnippets.filter(
+    (p) => p.scope.kind === 'global' || (projectId !== null && p.scope.project_id === projectId)
+  );
+  const hits: MatchHit[] = [];
+  for (const p of pool) {
+    const score = Math.max(
+      devFuzzyScore(query, p.title) * 3,
+      Math.max(0, ...p.keywords.concat(p.tags).map((k) => devFuzzyScore(query, k))) * 2,
+      devFuzzyScore(query, p.body)
+    );
+    if (score > 0) hits.push({ id: p.id, score, source: 'lexical' });
+  }
+  hits.sort((a, b) => b.score - a.score);
+  return hits.slice(0, limit);
+}
+
+// Fake embed engine: not_downloaded → (Download) → downloading with staged
+// progress → ready. Lets the whole embeddings UI be exercised offline.
+let devEmbed: EmbedStatus = {
+  state: 'not_downloaded',
+  model_id: 'bge-small-en-v1.5',
+  model_size_mb: 85,
+  runtime_size_mb: 30,
+};
+
+async function devEmbedDownload(onProgress: (p: EmbedProgress) => void): Promise<void> {
+  devEmbed.state = 'downloading';
+  // Three stages — the contract's Channel shape: two byte-counted downloads
+  // (ONNX runtime dylib, then the model), then 'index' in snippet counts
+  // (embedding the existing library; "Download & index" is literally what
+  // the one click does). Completion is signaled by this promise resolving
+  // (callers re-fetch embed_status), never by a channel event.
+  const stages: { stage: EmbedProgress['stage']; total: number }[] = [
+    { stage: 'runtime', total: devEmbed.runtime_size_mb * 1024 * 1024 },
+    { stage: 'model', total: devEmbed.model_size_mb * 1024 * 1024 },
+    { stage: 'index', total: devSnippets.length },
+  ];
+  for (const { stage, total } of stages) {
+    const steps = stage === 'index' ? total : 6;
+    for (let step = 1; step <= steps; step++) {
+      await new Promise((r) => setTimeout(r, stage === 'index' ? 220 : 150));
+      onProgress({ stage, done: Math.round((total * step) / steps), total });
+    }
+  }
+  devEmbed.state = 'ready';
 }
 
 // --- Browser-dev fallback: a minimal in-JS scan over the mock session. -------

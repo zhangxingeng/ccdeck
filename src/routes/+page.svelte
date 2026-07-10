@@ -25,6 +25,7 @@
   import SessionEditor from '$lib/components/SessionEditor.svelte';
   import AppConfigView from '$lib/components/AppConfigView.svelte';
   import SettingsSearchView from '$lib/components/SettingsSearchView.svelte';
+  import PromptsView from '$lib/components/PromptsView.svelte';
 
   // Inline app.css for the standalone HTML export.
   import appCss from '../app.css?inline';
@@ -32,7 +33,7 @@
   // ── app state ─────────────────────────────────────────────────────────────
   // 'browse' is the home view — it merges what used to be separate Browse and
   // Search pages/views into one (see BrowseView.svelte).
-  let view = $state<'browse' | 'viewer' | 'appconfig' | 'settings'>('browse');
+  let view = $state<'browse' | 'viewer' | 'appconfig' | 'settings' | 'prompts'>('browse');
   // Settings view scope: null = user/global; otherwise a specific project's real cwd.
   let settingsProjectCwd = $state<string | null>(null);
   let settingsProjectLabel = $state('');
@@ -155,6 +156,13 @@
   // cwd/label to thread through.
   function goAppConfig(): void {
     view = 'appconfig';
+    loadError = null;
+  }
+
+  // Open the Prompt Library (issue #24) — its store keeps the compose draft
+  // alive across view switches, so this is a plain view swap.
+  function goPrompts(): void {
+    view = 'prompts';
     loadError = null;
   }
 
@@ -313,13 +321,16 @@ ${contentHtml}
 
   <div class="app-header__actions">
     {#if view === 'browse'}
+      <button class="btn btn--ghost btn--sm" onclick={goPrompts} type="button">
+        ✎ Prompts
+      </button>
       <button class="btn btn--ghost btn--sm" onclick={() => goSettings(null)} type="button">
         ⚙ Settings
       </button>
       <button class="btn btn--ghost btn--sm" onclick={goAppConfig} type="button">
         ⚙ App Config
       </button>
-    {:else if view === 'appconfig' || view === 'settings'}
+    {:else if view === 'appconfig' || view === 'settings' || view === 'prompts'}
       <button class="btn btn--ghost btn--sm" onclick={backToBrowse} type="button">
         ← Back
       </button>
@@ -375,6 +386,8 @@ ${contentHtml}
     <div class="empty-state">Loading session...</div>
   {:else if view === 'browse'}
     <BrowseView onOpen={openSession} onJump={openHit} onOpenSettings={goSettings} />
+  {:else if view === 'prompts'}
+    <PromptsView />
   {:else if view === 'appconfig'}
     <AppConfigView onClose={backToBrowse} />
   {:else if view === 'settings'}

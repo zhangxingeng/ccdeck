@@ -1,76 +1,98 @@
 # CC Deck
 
 **A friendly control center for [Claude Code](https://claude.com/claude-code)** — browse your
-history, fix your settings, and launch sessions, all without living in a terminal or hand-editing
-JSON.
+history, save your best prompts, fix your settings, and launch sessions, all without living in a
+terminal or hand-editing JSON.
 
 **Offline** · **Your data never leaves your machine** · **Open source, MIT licensed**
 
 ![CC Deck — a session rendered as a clean conversation with version diffs and the save bar](project_docs/hero.png)
 
-<!-- TODO: capture a short demo GIF walking session → settings edit → launch, and drop it here. -->
-
 ## Why CC Deck exists
 
-Claude Code is remarkably capable, but two things keep it from being for absolutely everyone: **the
-command line**, and **a settings system spread across nested JSON files that even experienced
-developers lose track of.**
+Claude Code is remarkably capable, but a few things keep it from being for absolutely everyone: **the
+command line**, **a settings system spread across nested JSON files that even experienced developers
+lose track of**, and **every good prompt you've ever written, scrolled away into a terminal
+buffer.**
 
 CC Deck's whole job is to take that wall down. Everything it does follows one rule: **simple by
-default, advanced on demand.** The things you do most — read a past conversation, change a setting,
-start a new session — are one click away and explained in plain English. The power-user controls
-are all still there; they just stay out of your way until you go looking for them.
+default, advanced on demand.** The things you do most are one click away and explained in plain
+English. The power-user controls are all still there; they just stay out of your way until you go
+looking for them.
 
-## Is this for you?
+## Your history, finally readable
 
-- **You'd rather click than type.** You want to browse and search your Claude Code history, tweak
-  settings, and launch sessions without memorizing flags or hand-editing config files.
-- **You're new to coding with Claude Code.** You don't need to know what a `.jsonl` file is or where
-  `settings.json` lives. CC Deck shows you what's there and explains it as you go.
-- **You're a power user who's tired of losing track of settings.** You know exactly what you want to
-  change — you just want to stop guessing which of three files it lives in and which one wins.
+CC Deck finds every Claude Code session on your machine automatically and renders each one as a
+conversation — not a wall of raw JSON. Markdown renders properly. Thinking steps collapse so they
+don't clutter the page. Tool calls, their results, and nested sub-agent threads are laid out so you
+can actually follow what happened.
 
-Whoever you are, CC Deck reads and writes the exact same files Claude Code already uses — nothing
-proprietary, nothing locked in, nothing you can't open in a text editor if you ever want to.
+![A chat transcript with message metadata, a collapsible tool-call group, and a Bash tool result](project_docs/screenshots/chat-detail.png)
 
-## What it does
+Spot something you want to fix? Edit any message in place. Every change is backed up automatically
+with a word-level diff, full undo/redo, and one-click restore to any earlier version — so editing
+history is never a one-way door.
 
-### See everything
+![Editing an assistant message's raw markdown source in place inside a transcript](project_docs/screenshots/edit-message.png)
 
-CC Deck finds every Claude Code session on your machine automatically and renders each one as a clean,
-readable conversation — not a wall of raw JSON. Markdown renders properly, "thinking" steps collapse
-so they don't clutter the page, and tool calls and their results (plus nested sub-agent threads) are
-laid out so you can actually follow what happened.
+Search covers your entire history at once, with filters for message type, date, project, and tool
+name, and keyboard navigation throughout. When you find the conversation you want, resume it right
+where you left off — or fork a brand-new session from any single message in its history.
 
-Full-text search covers your entire history at once, with filters for source, date, project, and
-tool name, plus keyboard navigation (↑/↓/Enter) so you can move through results without touching the
-mouse. Need to send a session to someone else? Export any conversation to a single, standalone HTML
-file.
+## Write a prompt once. Use it forever.
 
-And if you spot something you want to fix, edit any message in place. Every change is backed up
-automatically with a word-level diff, full undo/redo, and one-click restore to any earlier version —
-so editing history is never a one-way door.
+The best prompt you wrote last week is gone. You typed it, it worked, and it scrolled away.
 
-### Config without the JSON
+CC Deck gives it a home. Save any prompt — or any fragment of one — as a **snippet**, and it's
+waiting for you next time. Group snippets into colored **projects**, pin the ones you use, and keep
+a *writing* voice separate from a *code review* voice.
+
+![A composed prompt built from color-coded snippets with fillable variables and per-variable defaults](project_docs/screenshots/prompt-compose.png)
+
+Composing is where it comes together. Start typing, and matching snippets appear as you go; press
+`↓` and `Enter` and one drops into place. Each snippet keeps its own color, so you can see at a
+glance what came from where. Anything you write in `{curly braces}` becomes a **variable** you fill
+in at the end — `{ticket}`, `{task}`, or `{n:5}` with a default already set. Fill them once, and
+every mention updates. Then copy the whole thing and paste it wherever you're working.
+
+You never have to touch the mouse. Type to search, arrow to choose, Enter to insert, `Ctrl+S` to
+save, `Ctrl+C` to copy — and if those aren't the keys you want, change them.
+
+<p align="center">
+  <img src="project_docs/screenshots/prompt-projects.png" alt="The project manager listing colored projects with pin, open, and delete actions" width="47%">
+  <img src="project_docs/screenshots/prompt-settings.png" alt="The settings panel showing file-repair notices, the optional local search model, and editable keyboard shortcuts" width="47%">
+</p>
+
+Search finds your snippets by spelling out of the box. If you want it to find them by *meaning* —
+so "fix a bug" turns up the snippet you titled `repro-first` — you can switch on a small local model
+with one click. It's about 115 MB, runs on your CPU, and works entirely offline. Nothing ever leaves
+your machine, and ordinary search keeps working whether you download it or not.
+
+Your snippets are plain JSON files on your disk, one per snippet. Edit them in any text editor you
+like. If you make a typo in one, CC Deck repairs it in memory, tells you it did, and leaves your file
+exactly as you wrote it until you decide to save.
+
+## Settings without the JSON
 
 Claude Code settings can live in up to three separate files — user, project, and local — and it's
-genuinely hard to know what's set where, or which one wins. CC Deck reads all three, shows every field
-in plain language (pulled straight from Claude Code's own published schema, not guesswork), and
+genuinely hard to know what's set where, or which one wins. CC Deck reads all three, shows every
+field in plain language (pulled straight from Claude Code's own published schema, not guesswork), and
 flags conflicts loudly: *"`model` is set in both User and Project — Project wins."*
 
-About 20 of the most common settings are shown by default; the rest — well over a hundred — are one
-click away behind a "show advanced settings" toggle. Edit any tier directly and CC Deck writes exactly
-the file you meant to change, nothing merged behind your back.
+![Settings search showing Claude Code config keys matching "model", each with an inline description](project_docs/screenshots/settings-search.png)
 
-### Run it your way
+About 20 of the most common settings are shown by default; the rest — well over a hundred — are one
+click away behind a "show advanced settings" toggle. Edit any tier directly and CC Deck writes
+exactly the file you meant to change, nothing merged behind your back.
+
+## Run it your way
 
 CC Deck doesn't force you into its own built-in console. Launch Claude Code in whatever terminal you
-already use — it auto-detects a sensible default so it just works out of the box. Want more control?
-An advanced panel lets you pick a specific terminal and pass extra arguments (like
-`--dangerously-skip-permissions`), clearly labeled and never in your way unless you ask for it.
+already use — it auto-detects a sensible default, so it just works out of the box. Want more control?
+Pick a specific terminal, write your own launch command, or point a session at a different provider
+entirely.
 
-Picking up an old conversation is just as easy: resume any past session right where you left off, or
-fork a brand-new session starting from any specific message in its history.
+![The app config page showing terminal launch mode, a customizable resume command, and provider profiles](project_docs/screenshots/app-config.png)
 
 ## Getting started
 
@@ -99,10 +121,14 @@ expected; here's how to get past it:
 
 ## Privacy / how it works
 
-CC Deck runs entirely on your local filesystem. It reads and writes the same session and settings files
-Claude Code already uses under `~/.claude/` — nothing is ever uploaded anywhere. The only network
-request CC Deck itself makes is checking for its own updates, and those update artifacts are
-cryptographically signed so you can trust they came from this project.
+CC Deck runs entirely on your local filesystem. It reads and writes the same session and settings
+files Claude Code already uses under `~/.claude/`, and keeps its own data (snippets, backups, search
+index) under `~/.ccdeck/`. Nothing is ever uploaded anywhere. The only network request CC Deck itself
+makes is checking for its own updates, and those update artifacts are cryptographically signed so you
+can trust they came from this project.
+
+The optional semantic-search model is downloaded once, from Hugging Face, and then runs offline on
+your CPU forever after. Your prompts are never sent anywhere to be embedded.
 
 ---
 
@@ -115,9 +141,33 @@ plain TypeScript so it's easy to test and reason about. Full command contract an
 
 ```
 src-tauri/  Rust — native file access only (reads ~/.claude, settings.json tiers, search index)
-src/lib/    TypeScript — pure logic (parsing, session model) + Tauri API wrappers
-src/routes/ Svelte 5 — the UI (browse+search / view / edit / settings)
+src/lib/    TypeScript — pure logic (parsing, session model, prompt grammar) + Tauri API wrappers
+src/routes/ Svelte 5 — the UI (browse+search / view / edit / prompts / settings)
 ```
+
+### The Prompt Library, precisely
+
+Snippets are one hand-editable JSON file each, under `~/.ccdeck/prompts/`, with `id` canonical and
+the body as the single source of truth. A loader that can't parse a file repairs it **in memory**
+and never rewrites your disk; the repair persists only when you next save that snippet, and until
+then it's reported rather than swallowed.
+
+Variables use a single-brace, f-string-flavored grammar: `{name}` or `{name:default}`, where a name
+is `[A-Za-z0-9_-]+` and `{{` escapes a literal brace. Anything else between braces — JSON examples in
+a prompt body, for instance — stays verbatim. The same name is the same variable everywhere in a
+composed document, so `{task}` fills once and updates everywhere. Rust and TypeScript implement this
+grammar independently and assert the same shared test vectors, because a seam like that is exactly
+where two sides drift apart.
+
+On copy, each variable is either substituted in place or hoisted into a trailing `<prompt_vars>`
+block and referenced inline as `<prompt_var name="task"/>` — per variable, your choice, defaulting to
+hoisted. The point is to state a long value once instead of repeating it into a model's context every
+time it appears.
+
+Matching is lexical by default (fzf-style weighted scoring, always on) and hybrid when you opt into
+the embedding model. Design notes live in [`project_docs/prompts-design.md`](project_docs/prompts-design.md)
+(storage, schema, command surface) and [`project_docs/prompts-ux.md`](project_docs/prompts-ux.md)
+(every interaction, key by key).
 
 ### Build from source
 
@@ -130,6 +180,9 @@ pnpm dev              # frontend only, in a browser — fastest loop for UI work
 pnpm exec tauri dev   # full desktop app with native file access
 pnpm exec tauri build # installable bundles (.deb/.rpm/.AppImage on Linux, equivalent per-OS elsewhere)
 ```
+
+`pnpm dev` runs against bundled mock fixtures — a seeded snippet library, projects, and a sample
+session — so the whole UI is exercisable in a plain browser with no native shell.
 
 ## Contributing
 
@@ -156,6 +209,9 @@ CC Deck makes is its own update check.
 
 **Does CC Deck replace Claude Code?** No — it's a control center *for* Claude Code. You still need
 Claude Code installed; CC Deck makes it easier to see, configure, and launch.
+
+**Where do my snippets live?** In `~/.ccdeck/prompts/`, one JSON file each. They're yours: readable,
+diffable, and safe to keep in git.
 
 **Will editing settings in CC Deck break something?** CC Deck writes exactly the tier you edit, in the
 same JSON format Claude Code reads — nothing is merged behind your back, and conflicts across tiers

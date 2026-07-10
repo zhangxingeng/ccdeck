@@ -1,6 +1,6 @@
 [package]
 name = "ccstudio"
-version = "0.11.0"
+version = "0.12.0"
 description = "Offline desktop viewer and editor for Claude Code chat history"
 authors = ["zhangxingeng"]
 edition = "2021"
@@ -48,3 +48,37 @@ uuid = { version = "1", features = ["v4"] }
 # no-op mock; v4 splits stores into separate crates wired up by `v1`.) So no
 # extra feature list is needed here — a plain dependency is correct.
 keyring = "4"
+# Prompt Library semantic match (issue #24): ONNX text embeddings, opt-in.
+# default-features OFF is load-bearing: the defaults statically link a ~15-30MB
+# ONNX Runtime into every shipped binary. `ort-load-dynamic` instead loads
+# libonnxruntime at runtime from a file we download (pinned version + sha256)
+# only when the user clicks Download — non-opted users pay ~3-6MB of glue, not
+# the runtime. No hf-hub/image features: model files are fetched by our own
+# pinned-URL downloader, so their HTTP stacks would be dead weight.
+fastembed = { version = "5", default-features = false, features = ["ort-load-dynamic"] }
+# Direct dep only for `ort::init_from(<lib path>)` (fastembed doesn't
+# re-export it). Same exact pin as fastembed's own requirement, so cargo
+# unifies them into one crate; features are additive with fastembed's.
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic"] }
+# Downloader for the opt-in model + ONNX Runtime artifacts (embed_download).
+ureq = "3"
+# sha256 verification of every downloaded artifact BEFORE it is used or loaded
+# — the runtime dylib especially is native code; a checksum mismatch deletes
+# the file and reports error state, never loads.
+sha2 = "0.10"
+# Unpack the official Microsoft onnxruntime release archives (.tgz) to extract
+# just the shared library.
+flate2 = "1"
+tar = "0.4"
+# jsonrepair-style recovery for hand-edited snippet/roster JSON (contract
+# § Store robustness): Rust port of python json_repair, org-backed
+# (oramasearch), 1.x, steady releases — chosen over the single-release
+# `jsonrepair` and the stale `json-repair` crates (researched 2026-07).
+# Repair is IN-MEMORY only; the loader never rewrites the user's file.
+llm_json = "1"
+
+# Windows ships onnxruntime as a .zip instead of a .tgz. Major 4 on purpose:
+# tauri-plugin-updater already pulls zip 4.x, so this unifies to one compiled
+# copy instead of shipping two zip majors in the Windows binary.
+[target.'cfg(windows)'.dependencies]
+zip = { version = "4", default-features = false, features = ["deflate"] }
