@@ -265,7 +265,7 @@ pub async fn embed_status(state: State<'_, PromptsState>) -> Result<EmbedStatus,
     let status = |state: &str, error: Option<String>| EmbedStatus {
         state: state.to_string(),
         model_id: embed::MODEL_ID.to_string(),
-        model_size_mb: embed::MODEL_SIZE_MB,
+        model_size_mb: embed::model_size_mb(),
         runtime_size_mb: embed::runtime_size_mb(),
         error,
     };
@@ -304,41 +304,43 @@ pub async fn embed_download(
     if inner.downloading.swap(true, Ordering::SeqCst) {
         return Err("A download is already in progress".to_string());
     }
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        let run = || -> Result<(), String> {
-            let root = crate::datadir::data_root()?;
-            embed::download_artifacts(&root, &|p| {
-                let _ = on_progress.send(p);
-            })?;
-            // Warm everything while the user is already waiting on the
-            // download UI: load the model and embed the whole corpus now, so
-            // the first real query is instant instead of paying the bulk
-            // cost. No channel events for this (contract addendum: the
-            // command's Result is the terminal signal) — it runs between the
-            // last "model" event and the Result resolving.
-            let mut embedder = embed::load_embedder(&root)?;
-            let pieces = store::load_pieces(&store::prompts_dir()?)?;
-            let conn = embed::open_cache(&root)?;
-            while embed::ensure_embeddings(&conn, &mut embedder, &pieces, EMBED_TOPUP_PER_QUERY)? > 0 {}
-            if let Ok(mut guard) = inner.embedder.lock() {
-                *guard = Some(embedder);
-            }
-            if let Ok(mut e) = inner.embed_error.lock() {
-                *e = None;
-            }
-            inner.slow.store(false, Ordering::SeqCst);
-            Ok(())
-        };
-        let outcome = run();
-        inner.downloading.store(false, Ordering::SeqCst);
-        if let Err(e) = &outcome {
-            set_error(&inner, e.clone());
+    let worker_inner = inner.clone();
+    let joined = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let inner = worker_inner;
+        let root = crate::datadir::data_root()?;
+        embed::download_artifacts(&root, &|p| {
+            let _ = on_progress.send(p);
+        })?;
+        // Warm everything while the user is already waiting on the
+        // download UI: load the model and embed the whole corpus now, so
+        // the first real query is instant instead of paying the bulk
+        // cost. No channel events for this (contract addendum: the
+        // command's Result is the terminal signal) — it runs between the
+        // last "model" event and the Result resolving.
+        let mut embedder = embed::load_embedder(&root)?;
+        let pieces = store::load_pieces(&store::prompts_dir()?)?;
+        let conn = embed::open_cache(&root)?;
+        while embed::ensure_embeddings(&conn, &mut embedder, &pieces, EMBED_TOPUP_PER_QUERY)? > 0 {}
+        if let Ok(mut guard) = inner.embedder.lock() {
+            *guard = Some(embedder);
         }
-        outcome
+        if let Ok(mut e) = inner.embed_error.lock() {
+            *e = None;
+        }
+        inner.slow.store(false, Ordering::SeqCst);
+        Ok(())
     })
-    .await
-    .map_err(|e| e.to_string())?;
-    result
+    .await;
+    // Reset AFTER the await, whatever happened inside: a panicking closure
+    // never reaches an in-closure reset and would wedge embed_status at
+    // "downloading" until app restart (audit L1). A JoinError (panic) lands
+    // in the same error path as a plain failure.
+    inner.downloading.store(false, Ordering::SeqCst);
+    let outcome = joined.map_err(|e| e.to_string()).and_then(|r| r);
+    if let Err(e) = &outcome {
+        set_error(&inner, e.clone());
+    }
+    outcome
 }
 
 #[tauri::command]

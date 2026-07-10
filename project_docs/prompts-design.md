@@ -123,7 +123,8 @@ set_embed_enabled(enabled: bool) -> null
 - **Semantic (opt-in):** fastembed-rs (ONNX, CPU) with a small, mature retrieval model (builder
   picks the concrete model — constraints: fastembed-supported, ≤~130MB download, strong
   MTEB-retrieval-per-MB; e.g. bge-small-en-v1.5 class). Built as: the fastembed-blessed
-  quantized `Qdrant/bge-small-en-v1.5-onnx-Q` (~64MB, 384 dims, Cls pooling), pinned to an
+  quantized `Qdrant/bge-small-en-v1.5-onnx-Q` (~67MB, 384 dims, Cls pooling; all size figures
+  are decimal MB), pinned to an
   exact HF revision. Model downloads to `~/.ccdeck/models/`
   **only when the user clicks Download** in the Prompts view — never at install, never silently.
   The UI states the requirements before download (~size on disk, CPU-only inference, indicative

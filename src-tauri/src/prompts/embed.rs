@@ -38,8 +38,6 @@ use super::store::Piece;
 pub const MODEL_ID: &str = "Qdrant/bge-small-en-v1.5-onnx-Q";
 /// Pinned HF revision — URLs below are immutable snapshots, not `main`.
 const MODEL_REVISION: &str = "52398278842ec682c6f32300af41344b1c0b0bb2";
-/// Total download size of the model files, for honest up-front disclosure.
-pub const MODEL_SIZE_MB: u32 = 64;
 
 /// (filename, sha256, exact byte size) of every model artifact, verified
 /// after download. Sizes are pinned like the hashes (immutable revision) —
@@ -56,6 +54,13 @@ const MODEL_FILES: &[(&str, &str, u64)] = &[
 /// Total bytes of the "model" download stage.
 fn model_total_bytes() -> u64 {
     MODEL_FILES.iter().map(|(_, _, size)| size).sum()
+}
+
+/// Model download size for up-front disclosure — decimal MB, derived from the
+/// pinned byte sizes so it can never drift from them, and the same unit as
+/// [`runtime_size_mb`] (audit N1: the two are shown side by side to the user).
+pub fn model_size_mb() -> u32 {
+    (model_total_bytes() / 1_000_000) as u32
 }
 
 /// Pinned ONNX Runtime release (ort 2.0.0-rc.12 is designed for 1.24.x).
