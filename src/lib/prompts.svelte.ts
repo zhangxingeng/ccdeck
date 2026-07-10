@@ -39,13 +39,16 @@ import {
   type Span,
   emptyDoc,
   applyEdit,
-  insertSnippet as docInsertSnippet,
+  insertSnippetOverRange,
   replaceSpan,
   linkRange,
   caretQuery,
   spanStarts,
 } from './compose/doc';
 import { copyText } from './compose/variables';
+import { resolveHotkeys, type HotkeyCommand } from './prompts/hotkeys';
+import { deriveNotices, type Notice } from './prompts/notices';
+import { toasts } from './prompts/toasts.svelte';
 
 /** Light debounce so we don't hit the matcher on every literal keystroke. */
 const DEBOUNCE_MS = 110;
@@ -80,10 +83,16 @@ export const prompts = $state({
    *  one variable document-wide). Entries for names no longer in the doc are
    *  kept — retyping a name recalls its value; copy only reads live names. */
   fills: {} as Record<string, string>,
-  /** Copy-output mode (contract §Copy output), persisted in app config. */
-  asVariable: true,
-  /** Non-fatal persistence failure for the toggle — the in-session value
-   *  still works; only restart survival is at risk. Never silently hidden. */
+  /** Per-variable as-variable state (contract §Copy output), keyed by name. A
+   *  name absent here is ON — the founder's safe default (as-var never breaks;
+   *  in-place substitution of unexpected data can bloat the prompt). Session-
+   *  only, never persisted to the snippet ([JC-9]). */
+  asVars: {} as Record<string, boolean>,
+  /** Stored hotkey overrides (command id → chord), loaded from app config;
+   *  merged over the defaults by resolveHotkeys. Absent command = default. */
+  hotkeyOverrides: {} as Record<string, string>,
+  /** Non-fatal config persistence failure (hotkey rebind) — the in-session
+   *  binding still works; only restart survival is at risk. Never hidden. */
   configError: null as string | null,
   // live matching
   matchQuery: '',
@@ -102,7 +111,7 @@ let configLoaded = false;
 // ── lifecycle ────────────────────────────────────────────────────────────────
 
 /** Load snippets, the project roster, embed status, and (once) the persisted
- *  copy-mode toggle. Idempotent per session — re-entering the view refreshes
+ *  hotkey overrides. Idempotent per session — re-entering the view refreshes
  *  the library but keeps the compose doc and fills. */
 export async function initPrompts(): Promise<void> {
   try {
@@ -135,11 +144,39 @@ export async function initPrompts(): Promise<void> {
   if (!configLoaded) {
     configLoaded = true;
     try {
-      prompts.asVariable = (await getAppConfig()).promptsAsVariable;
+      prompts.hotkeyOverrides = (await getAppConfig()).hotkeys;
     } catch {
-      // The default (true) stands; a persist failure surfaces on toggle.
+      // Defaults stand (resolveHotkeys handles an empty map); a persist
+      // failure surfaces on rebind, not here.
     }
+    // Data events (repairs / unreadable files) flash a 5s toast on first load;
+    // the durable trace lives on in the gear's Notices (contract §S13).
+    announceDataEvents();
   }
+}
+
+/** The durable data-event notices (contract §S13 / §Store robustness): loader-
+ *  repaired snippets first (a one-click re-save fixes them), then unreadable
+ *  files. Derived, not stored — the sources are the snippet list + load errors. */
+export function notices(): Notice[] {
+  return deriveNotices(
+    prompts.snippets.filter((s) => s.recovered).map((s) => ({ id: s.id, title: s.title })),
+    prompts.snippetLoadErrors
+  );
+}
+
+/** Flash a single 5s toast summarizing the data events found on load. The toast
+ *  is the transient announce; the gear badge + Notices section is the record
+ *  that outlives it. */
+function announceDataEvents(): void {
+  const current = notices();
+  if (current.length === 0) return;
+  const repaired = current.filter((n) => n.kind === 'repaired').length;
+  const unreadable = current.filter((n) => n.kind === 'unreadable').length;
+  const parts: string[] = [];
+  if (repaired) parts.push(`${repaired} snippet${repaired === 1 ? '' : 's'} auto-repaired`);
+  if (unreadable) parts.push(`${unreadable} file${unreadable === 1 ? '' : 's'} couldn't be read`);
+  toasts.push(`${parts.join(' · ')} — see the gear for details.`);
 }
 
 /** Stop timers when leaving the view (the doc itself is kept — see header). */
@@ -246,14 +283,21 @@ export function composeEdit(start: number, end: number, inserted: string): void 
   scheduleMatch();
 }
 
-/** Insert a snippet's RAW body at the caret as a linked span — {var} tokens
- *  land verbatim and merge into the unified fill list (fill-at-insert is
- *  retired; variables resolve at copy time). */
+/** Insert a snippet's RAW body as a linked span, REPLACING the query line the
+ *  user typed to find it (line start → caret) — the single insert path behind
+ *  both triggers, mouse click and ↓-into-panel + Enter (contract §S2/S3). The
+ *  query was scaffolding; leaving it in front of the body is litter. {var}
+ *  tokens land verbatim and merge into the unified fill list (variables resolve
+ *  at copy time). */
 export function composeInsertSnippet(snippet: Snippet): Doc {
   const link: SpanLink = { snippetId: snippet.id, title: snippet.title, scope: snippet.scope };
-  const at = prompts.caret;
-  prompts.doc = docInsertSnippet(prompts.doc, at, snippet.body, link);
-  setSelection(at + snippet.body.length, at + snippet.body.length);
+  const caret = prompts.caret;
+  const lineStart = prompts.doc.text.lastIndexOf('\n', caret - 1) + 1;
+  prompts.doc = insertSnippetOverRange(prompts.doc, lineStart, caret, snippet.body, link);
+  const end = lineStart + snippet.body.length;
+  setSelection(end, end);
+  prompts.matchQuery = ''; // the query line was consumed by the insert
+  scheduleMatch(); // clears the now-stale suggestions
   prompts.focusNonce++;
   return prompts.doc;
 }
@@ -286,22 +330,49 @@ export function setFill(name: string, value: string): void {
 }
 
 /** The Copy Prompt deliverable: the doc's raw text through the copy pipeline
- *  (escapes resolved; XML dedup or substitute-in-place per the toggle). */
+ *  (escapes resolved; per-variable XML dedup or substitute-in-place). */
 export function copyOutput(): string {
-  return copyText(prompts.doc.text, prompts.fills, prompts.asVariable);
+  return copyText(prompts.doc.text, prompts.fills, prompts.asVars);
 }
 
-/** Flip the copy-output mode and persist it (app config, read-modify-write
- *  so unrelated fields survive). A failed persist keeps the in-session value
- *  and surfaces — losing the preference on restart must not be silent. */
-export async function setAsVariable(value: boolean): Promise<void> {
-  prompts.asVariable = value;
+/** Set one variable's as-variable mode (contract §Copy output). Absent = ON, so
+ *  an explicit `false` is how OFF is recorded. Session-only — never persisted to
+ *  the snippet ([JC-9]). */
+export function setAsVar(name: string, on: boolean): void {
+  prompts.asVars[name] = on;
+}
+
+/** The effective hotkey map — stored overrides merged over the defaults, each
+ *  normalized. Read inside a $derived to stay reactive to a rebind. */
+export function resolvedHotkeys(): Record<HotkeyCommand, string> {
+  return resolveHotkeys(prompts.hotkeyOverrides);
+}
+
+/** Rebind a command to `chord` and persist (app config, read-modify-write so
+ *  unrelated fields survive). The caller rejects conflicts before calling —
+ *  this just records and persists. A failed persist keeps the in-session
+ *  binding and surfaces on `configError`; losing it on restart must not be
+ *  silent. */
+export async function setHotkey(command: HotkeyCommand, chord: string): Promise<void> {
+  prompts.hotkeyOverrides = { ...prompts.hotkeyOverrides, [command]: chord };
+  await persistHotkeys();
+}
+
+/** Reset a command to its default (drop the override) and persist. */
+export async function resetHotkey(command: HotkeyCommand): Promise<void> {
+  const next = { ...prompts.hotkeyOverrides };
+  delete next[command];
+  prompts.hotkeyOverrides = next;
+  await persistHotkeys();
+}
+
+async function persistHotkeys(): Promise<void> {
   prompts.configError = null;
   try {
     const cfg = await getAppConfig();
-    await setAppConfig({ ...cfg, promptsAsVariable: value });
+    await setAppConfig({ ...cfg, hotkeys: prompts.hotkeyOverrides });
   } catch (e) {
-    prompts.configError = `Couldn't save the copy-mode preference: ${
+    prompts.configError = `Couldn't save the shortcut: ${
       e instanceof Error ? e.message : String(e)
     }`;
   }

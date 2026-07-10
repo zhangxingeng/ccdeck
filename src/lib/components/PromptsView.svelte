@@ -1,14 +1,15 @@
 <script lang="ts">
   /**
-   * Prompts — the Prompt Library view (issue #24, revised per the founder's
-   * feel-check). Scope tabs on top (Global + pinned projects — the active
-   * tab drives match pool, save scope, and tint); the compose box is the
-   * primary surface with situational affordances only; the library/match
-   * panel sits left and collapses for a distraction-free box. Orchestrates
-   * the snippet modal, save-selection-as-snippet, and the Copy toast.
+   * Prompts — the Prompt Library view (issue #24, Round-B UX pass). Scope tabs
+   * on top (Global + pinned projects — the active tab drives match pool, save
+   * scope, and tint) with the app-level config gear at their right end; the
+   * compose box is the primary surface with situational affordances; the
+   * library/match panel sits left and collapses for a distraction-free box.
+   * Orchestrates the snippet modal, Save as…, the view-scoped hotkeys, the
+   * ↓-into-panel keyboard bridge, and the toast stack.
    */
   import { onDestroy, onMount } from 'svelte';
-  import type { Snippet } from '$lib/prompts/types';
+  import type { Snippet, SnippetScope } from '$lib/prompts/types';
   import {
     prompts,
     initPrompts,
@@ -16,78 +17,115 @@
     activeProject,
     composeInsertSnippet,
     copyOutput,
+    resolvedHotkeys,
   } from '$lib/prompts.svelte';
   import { projectColorVar } from '$lib/prompts/palette';
   import { copyToClipboard } from '$lib/copy';
+  import { toasts } from '$lib/prompts/toasts.svelte';
+  import { eventMatchesChord } from '$lib/prompts/hotkeys';
   import ComposeBox from './prompts/ComposeBox.svelte';
   import MatchPanel from './prompts/MatchPanel.svelte';
   import SnippetModal, { type SnippetModalContext } from './prompts/SnippetModal.svelte';
   import ProjectTabs from './prompts/ProjectTabs.svelte';
   import ProjectManagerPopover from './prompts/ProjectManagerPopover.svelte';
-  import EmbeddingsPopover from './prompts/EmbeddingsPopover.svelte';
+  import ConfigPopover from './prompts/ConfigPopover.svelte';
 
   let panelCollapsed = $state(false);
   let managerOpen = $state(false);
-  // Dismissal is per-mount on purpose: the broken files are still broken on
-  // the next visit, and a data-loss warning that never comes back would
-  // itself be the silent loss it exists to prevent.
-  let loadErrorsDismissed = $state(false);
+  let configOpen = $state(false);
   let modalContext = $state<SnippetModalContext | null>(null);
-  let copyMsg = $state<string | null>(null);
-  let copyMsgTimer: ReturnType<typeof setTimeout> | null = null;
+  /** MatchPanel instance — only its exported focusFirst() is called (the ↓ step
+   *  into the panel). A structural type avoids the component-instance gymnastics. */
+  let matchPanel = $state<{ focusFirst: () => boolean } | undefined>(undefined);
 
   const hasSelection = $derived(prompts.selEnd > prompts.selStart);
-  /** The active tab's hue enters the CSS world here, once — everything
-   *  below styles with color-mix over --project-color (unset on Global,
-   *  so every fill falls back to its neutral). */
+  /** True while a modal or popover owns the keyboard — the view-scoped hotkeys
+   *  disarm so a rebind capture or a modal keystroke never triggers a command. */
+  const keyboardCaptured = $derived(modalContext !== null || managerOpen || configOpen);
+
+  /** The active tab's hue enters the CSS world here, once — everything below
+   *  styles with color-mix over --project-color (unset on Global). */
   const tintStyle = $derived.by(() => {
     const active = activeProject();
     return active ? `--project-color: ${projectColorVar(active.color)}` : '';
   });
-  /** Loader-repaired snippets (transient flag): fine to use, but the repair
-   *  persists only on an explicit re-save — worth a quiet nudge. */
-  const recoveredSnippets = $derived(prompts.snippets.filter((p) => p.recovered));
+
+  /** The active tab as a save scope — the default target for a hotkey Save as… */
+  function activeScope(): SnippetScope {
+    const active = activeProject();
+    return active ? { kind: 'project', project_id: active.id } : { kind: 'global' };
+  }
 
   onMount(() => {
     initPrompts();
+    window.addEventListener('keydown', onWindowKeydown);
   });
   onDestroy(() => {
     disposePrompts();
-    if (copyMsgTimer) clearTimeout(copyMsgTimer);
+    window.removeEventListener('keydown', onWindowKeydown);
   });
 
-  // ── insert flow: the raw body lands as-is; variables go to the fill list ──
+  // ── insert flow: one path, the raw body replaces the query line ──────────────
   function handleInsert(snippet: Snippet): void {
     composeInsertSnippet(snippet);
   }
 
-  // ── snippet modal (F3 / F4) ──────────────────────────────────────────────────
+  // ── snippet modal ────────────────────────────────────────────────────────────
   function openSpan(spanIndex: number): void {
     modalContext = { kind: 'span', spanIndex };
   }
 
-  function saveSelectionAsSnippet(): void {
-    if (!hasSelection) return;
-    modalContext = {
-      kind: 'new',
-      selStart: prompts.selStart,
-      selEnd: prompts.selEnd,
-      selectionText: prompts.doc.text.slice(prompts.selStart, prompts.selEnd),
-    };
+  /** Save as… — selection-aware (contract §S5/S6). With a selection, save it
+   *  (it becomes a linked span). With none, save the whole box as a fresh
+   *  snippet WITHOUT linking the draft (no range) — "save what I wrote". Either
+   *  way the modal opens pre-scoped to `scope`. */
+  function saveAs(scope: SnippetScope): void {
+    if (hasSelection) {
+      modalContext = {
+        kind: 'new',
+        selStart: prompts.selStart,
+        selEnd: prompts.selEnd,
+        selectionText: prompts.doc.text.slice(prompts.selStart, prompts.selEnd),
+        scope,
+      };
+    } else if (prompts.doc.text.length > 0) {
+      modalContext = { kind: 'new', selectionText: prompts.doc.text, scope };
+    }
   }
 
-  // ── Copy Prompt ────────────────────────────────────────────────────────────
+  // ── Copy Prompt ──────────────────────────────────────────────────────────────
   async function copyPrompt(): Promise<void> {
     const ok = await copyToClipboard(copyOutput());
-    copyMsg = ok ? 'Prompt copied to clipboard' : 'Copy failed — select the text manually';
-    if (copyMsgTimer) clearTimeout(copyMsgTimer);
-    copyMsgTimer = setTimeout(() => (copyMsg = null), 2500);
+    toasts.push(ok ? 'Prompt copied.' : 'Copy failed — select the text manually.');
+  }
+
+  // ── view-scoped hotkeys (contract §Hotkey map) ───────────────────────────────
+  function onWindowKeydown(e: KeyboardEvent): void {
+    if (keyboardCaptured) return; // a modal/popover owns the keyboard
+    const keys = resolvedHotkeys();
+    if (eventMatchesChord(e, keys.copyPrompt)) {
+      // Selection-aware (JC-4): native copy wins when text is selected in the
+      // box; we only claim the dead key-space when nothing is selected.
+      if (hasSelection) return;
+      e.preventDefault();
+      void copyPrompt();
+      return;
+    }
+    if (eventMatchesChord(e, keys.saveAs)) {
+      e.preventDefault(); // the browser owns Ctrl/Cmd+S
+      saveAs(activeScope());
+    }
   }
 </script>
 
 <div class="prompts-view" style={tintStyle}>
   <div class="prompts-view__tabs">
-    <ProjectTabs onOpenManager={() => (managerOpen = !managerOpen)} />
+    <div class="prompts-view__tabrow">
+      <div class="prompts-view__tabrow-tabs">
+        <ProjectTabs onOpenManager={() => (managerOpen = !managerOpen)} />
+      </div>
+      <ConfigPopover bind:open={configOpen} />
+    </div>
     {#if managerOpen}
       <ProjectManagerPopover onClose={() => (managerOpen = false)} />
     {/if}
@@ -95,48 +133,6 @@
 
   {#if prompts.loadError}
     <div class="prompts-view__error">Couldn't load the snippet library: {prompts.loadError}</div>
-  {/if}
-  {#if prompts.configError}
-    <div class="prompts-view__error">{prompts.configError}</div>
-  {/if}
-
-  {#if recoveredSnippets.length}
-    <div class="prompts-view__load-warn" role="status">
-      <div class="prompts-view__load-warn-text">
-        <strong>
-          {recoveredSnippets.length} snippet file{recoveredSnippets.length === 1 ? '' : 's'} auto-repaired
-        </strong>
-        — the JSON was invalid and was recovered in memory (the file on disk is untouched). Open
-        and save {recoveredSnippets.length === 1 ? 'it' : 'each'} to keep the repair:
-        {#each recoveredSnippets as p, i (p.id)}{i > 0 ? ', ' : ' '}<code>{p.title}</code>{/each}
-      </div>
-    </div>
-  {/if}
-
-  {#if prompts.snippetLoadErrors.length && !loadErrorsDismissed}
-    <div class="prompts-view__load-warn" role="status">
-      <div class="prompts-view__load-warn-text">
-        <strong>
-          {prompts.snippetLoadErrors.length} snippet file{prompts.snippetLoadErrors.length === 1 ? '' : 's'}
-          couldn't be read
-        </strong>
-        — fix or remove {prompts.snippetLoadErrors.length === 1 ? 'it' : 'them'} (the rest of the
-        library loaded fine):
-        <ul>
-          {#each prompts.snippetLoadErrors as e (e.file)}
-            <li><code>{e.file}</code>: {e.error}</li>
-          {/each}
-        </ul>
-      </div>
-      <button
-        type="button"
-        class="btn btn--ghost btn--sm"
-        onclick={() => (loadErrorsDismissed = true)}
-        aria-label="Dismiss snippet-file warning"
-      >
-        ✕
-      </button>
-    </div>
   {/if}
 
   <div class="prompts-view__cols">
@@ -153,25 +149,27 @@
       <aside class="prompts-view__panel">
         <div class="prompts-view__panel-head">
           <span class="prompts-view__panel-title">Library</span>
-          <span class="prompts-view__panel-tools">
-            <EmbeddingsPopover />
-            <button
-              type="button"
-              class="btn btn--ghost btn--sm"
-              onclick={() => (panelCollapsed = true)}
-              title="Hide the library panel (distraction-free box)"
-              aria-label="Hide the library panel"
-            >
-              ⟨
-            </button>
-          </span>
+          <button
+            type="button"
+            class="btn btn--ghost btn--sm"
+            onclick={() => (panelCollapsed = true)}
+            title="Hide the library panel (distraction-free box)"
+            aria-label="Hide the library panel"
+          >
+            ⟨
+          </button>
         </div>
-        <MatchPanel onInsert={handleInsert} />
+        <MatchPanel bind:this={matchPanel} onInsert={handleInsert} onEscape={() => prompts.focusNonce++} />
       </aside>
     {/if}
 
     <section class="prompts-view__compose">
-      <ComposeBox onOpenSpan={openSpan} onCopy={copyPrompt} onSaveSelection={saveSelectionAsSnippet} />
+      <ComposeBox
+        onOpenSpan={openSpan}
+        onCopy={copyPrompt}
+        onSaveAs={saveAs}
+        onStepIntoPanel={() => matchPanel?.focusFirst() ?? false}
+      />
     </section>
   </div>
 </div>
@@ -180,8 +178,14 @@
   <SnippetModal context={modalContext} onClose={() => (modalContext = null)} />
 {/if}
 
-{#if copyMsg}
-  <div class="toast" role="status">{copyMsg}</div>
+{#if toasts.items.length}
+  <div class="prompts-toasts" role="status" aria-live="polite">
+    {#each toasts.items as t (t.id)}
+      <button type="button" class="prompts-toast" onclick={() => toasts.dismiss(t.id)} title="Dismiss">
+        {t.text}
+      </button>
+    {/each}
+  </div>
 {/if}
 
 <style>
@@ -196,30 +200,14 @@
   .prompts-view__tabs {
     position: relative; /* anchors the project-manager popover */
   }
-
-  /* Non-blocking, dismissable: snippets that DID load work normally; this only
-     flags the files that didn't. Amber (template accent), not error red —
-     the library isn't broken, some files are. */
-  .prompts-view__load-warn {
+  .prompts-view__tabrow {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 0.5rem;
-    font-size: 0.72rem;
-    color: var(--text-muted);
-    border: 1px solid color-mix(in srgb, var(--accent-template) 30%, transparent);
-    background: color-mix(in srgb, var(--accent-template) 7%, transparent);
-    border-radius: 0.4rem;
-    padding: 0.5rem 0.75rem;
   }
-  .prompts-view__load-warn-text { flex: 1; }
-  .prompts-view__load-warn strong { color: var(--text); }
-  .prompts-view__load-warn ul {
-    margin: 0.25rem 0 0;
-    padding-left: 1.1rem;
-  }
-  .prompts-view__load-warn code {
-    font-family: var(--font-mono);
-    font-size: 0.68rem;
+  .prompts-view__tabrow-tabs {
+    flex: 1;
+    min-width: 0;
   }
 
   .prompts-view__error {
@@ -243,11 +231,6 @@
     align-items: center;
     justify-content: space-between;
     margin-bottom: 0.4rem;
-  }
-  .prompts-view__panel-tools {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.15rem;
   }
   .prompts-view__panel-peek {
     align-self: flex-start;
@@ -283,6 +266,31 @@
     display: flex;
     min-width: 0;
     position: relative; /* anchors the placeholder popover */
+  }
+
+  /* Toast stack: newest at the bottom, above everything, click to dismiss. */
+  .prompts-toasts {
+    position: fixed;
+    bottom: 1.25rem;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 200;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .prompts-toast {
+    font-family: inherit;
+    font-size: 0.8rem;
+    padding: 0.6rem 1.1rem;
+    border: 0;
+    border-radius: 0.5rem;
+    background: var(--text);
+    color: var(--bg);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+    cursor: pointer;
+    max-width: min(30rem, 92vw);
   }
 
   @media (max-width: 640px) {

@@ -10,6 +10,7 @@
   import { PALETTE_KEYS, type PaletteKey, type Project } from '$lib/prompts/types';
   import { prompts, saveProject, deleteProject, setActiveProject } from '$lib/prompts.svelte';
   import { projectColorVar } from '$lib/prompts/palette';
+  import { focusTrap } from '$lib/attachments/focusTrap';
 
   interface Props {
     onClose: () => void;
@@ -92,7 +93,7 @@
 <!-- Transparent click-away layer; the popover itself stops propagation. -->
 <div class="proj-mgr__backdrop" onclick={onClose} aria-hidden="true"></div>
 
-<div class="proj-mgr" role="dialog" aria-label="Manage projects" tabindex="-1" onkeydown={handleKeydown}>
+<div class="proj-mgr" role="dialog" aria-label="Manage projects" tabindex="-1" onkeydown={handleKeydown} {@attach focusTrap}>
   {#if prompts.projects.length === 0}
     <p class="proj-mgr__empty">No projects yet — create one below to get a colored tab.</p>
   {/if}

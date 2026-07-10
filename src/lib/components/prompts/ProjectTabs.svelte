@@ -15,18 +15,38 @@
 
   let { onOpenManager }: Props = $props();
 
+  let rowEl: HTMLDivElement | undefined = $state(undefined);
+
   const tabs = $derived.by(() => {
     const pinned = prompts.projects.filter((p) => p.pinned);
     const active = prompts.projects.find((p) => p.id === prompts.activeProjectId);
     return active && !active.pinned ? [...pinned, active] : pinned;
   });
+
+  // Roving-tabindex nav (contract §S8): the active tab is the single Tab stop;
+  // ←/→ move focus among the scope tabs (wrapping); Enter/Space activate
+  // natively (a focused tab button click). The ⋯ manager is not a scope tab and
+  // stays out of the roving set.
+  function handleKeydown(e: KeyboardEvent): void {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    if (!rowEl) return;
+    const items = [...rowEl.querySelectorAll<HTMLButtonElement>('.project-tabs__tab')];
+    const i = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (i < 0) return;
+    e.preventDefault();
+    const next = e.key === 'ArrowRight' ? (i + 1) % items.length : (i - 1 + items.length) % items.length;
+    items[next]?.focus();
+  }
 </script>
 
-<div class="project-tabs" role="tablist" aria-label="Prompt scope">
+<!-- tabindex="-1": the tablist owns the ←/→ handler (event delegation from the
+     roving tab buttons) but is never itself a Tab stop — the active tab is. -->
+<div class="project-tabs" role="tablist" aria-label="Prompt scope" tabindex="-1" bind:this={rowEl} onkeydown={handleKeydown}>
   <button
     type="button"
     role="tab"
     aria-selected={prompts.activeProjectId === null}
+    tabindex={prompts.activeProjectId === null ? 0 : -1}
     class="project-tabs__tab"
     class:project-tabs__tab--active={prompts.activeProjectId === null}
     onclick={() => setActiveProject(null)}
@@ -39,6 +59,7 @@
       type="button"
       role="tab"
       aria-selected={prompts.activeProjectId === p.id}
+      tabindex={prompts.activeProjectId === p.id ? 0 : -1}
       class="project-tabs__tab"
       class:project-tabs__tab--active={prompts.activeProjectId === p.id}
       style="--tab-color: {projectColorVar(p.color)}"

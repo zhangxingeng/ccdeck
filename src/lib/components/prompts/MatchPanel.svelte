@@ -1,30 +1,67 @@
 <script lang="ts">
   /**
    * Live match panel (F2): the debounced store feeds ranked hits for what's
-   * being typed; clicking one inserts it at the cursor. Arrow keys move
-   * within the list once it has focus (the BrowseView keyboard-nav idiom,
-   * kept minimal — the panel is a suggestion strip, not a browser).
+   * being typed. One insert path, two triggers (contract §S2/S3): click a hit,
+   * OR step in from the box with ↓ (parent calls `focusFirst`) then `Enter`.
+   * `↑`/`↓` move the highlight; `Esc` returns focus to the box without
+   * inserting. The panel is a suggestion strip, not a browser — nav stays
+   * minimal.
    */
   import type { Snippet } from '$lib/prompts/types';
   import { prompts } from '$lib/prompts.svelte';
 
   let {
     onInsert,
+    onEscape,
   }: {
     onInsert: (snippet: Snippet) => void;
+    /** `Esc` (or `↑` past the first hit) — return focus to the compose box. */
+    onEscape: () => void;
   } = $props();
 
   let listEl: HTMLDivElement | undefined = $state(undefined);
 
+  function hitButtons(): HTMLButtonElement[] {
+    return listEl ? [...listEl.querySelectorAll<HTMLButtonElement>('button.match-hit')] : [];
+  }
+
+  /** Step into the panel from the box (contract §S2): highlight the first hit.
+   *  Returns whether there was a hit to land on, so the box can keep the
+   *  keystroke as a caret move when the panel is empty. */
+  export function focusFirst(): boolean {
+    const items = hitButtons();
+    items[0]?.focus();
+    return items.length > 0;
+  }
+
   function handleKeydown(e: KeyboardEvent): void {
-    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-    if (!listEl) return;
-    const items = [...listEl.querySelectorAll<HTMLButtonElement>('button.match-hit')];
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      onEscape();
+      return;
+    }
+    const items = hitButtons();
     if (!items.length) return;
     const i = items.indexOf(document.activeElement as HTMLButtonElement);
-    const next = e.key === 'ArrowDown' ? Math.min(items.length - 1, i + 1) : Math.max(0, i - 1);
-    items[next]?.focus();
-    e.preventDefault();
+    if (e.key === 'Enter') {
+      // Enter inserts only after the explicit ↓ step (the hit holds focus) —
+      // never pre-armed while the caret is in the box (JC-2).
+      if (i >= 0 && prompts.hits[i]) {
+        e.preventDefault();
+        onInsert(prompts.hits[i].snippet);
+      }
+      return;
+    }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (e.key === 'ArrowUp' && i <= 0) {
+        // ↑ past the first hit hands focus back to the box — a natural exit.
+        onEscape();
+        return;
+      }
+      const next = e.key === 'ArrowDown' ? Math.min(items.length - 1, i + 1) : i - 1;
+      items[next]?.focus();
+    }
   }
 
   function snippet(body: string): string {

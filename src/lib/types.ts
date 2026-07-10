@@ -192,10 +192,13 @@ export interface AppConfig {
   launchCommand: string;
   /** Whether CC Deck checks for app updates automatically on launch. */
   updateCheckOnLaunch: boolean;
-  /** Prompt Library Copy-output mode (contract §Copy output): true (default)
-   *  = "as variable" dedup mode, false = substitute in place. Persisted here
-   *  (Rust `prompts_as_variable`) so the toggle survives restarts. */
-  promptsAsVariable: boolean;
+  /** Prompt Library hotkeys (contract §Hotkeys): command id → normalized chord
+   *  (e.g. `{ copyPrompt: "Mod+C" }`, where `Mod` is Ctrl/Cmd). An absent
+   *  command id falls back to its default, so a fresh install and a pre-hotkeys
+   *  config are the same case — no migration. Replaces the round-A
+   *  `promptsAsVariable` field, which is gone (as-variable is now per-variable,
+   *  per-session, never persisted — contract §Copy output). */
+  hotkeys: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------

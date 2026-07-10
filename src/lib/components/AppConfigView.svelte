@@ -47,9 +47,9 @@
     terminal: '',
     launchCommand: '',
     updateCheckOnLaunch: true,
-    // Prompt Library copy-mode default; owned by the Prompts view's toggle,
-    // carried here only so a pre-load save can't blank it.
-    promptsAsVariable: true,
+    // Prompt Library hotkeys; owned by the Prompts view's Shortcuts section,
+    // carried here only so a pre-load save can't blank them.
+    hotkeys: {},
   });
   let original = $state('');
   let saveMsg = $state<string | null>(null);

@@ -1,15 +1,22 @@
 <script module lang="ts">
+  import type { SnippetScope } from '$lib/prompts/types';
+
   export interface SnippetModalContext {
     /** 'span': opened from a linked span (chip / double-click) — edits the
-     *  stored snippet. 'new': save-selection-as-snippet — prefilled from the
-     *  selection, scoped to the active tab. */
+     *  stored snippet. 'new': Save as… (selection or whole box) — prefilled
+     *  from the given text, scoped per `scope`. */
     kind: 'span' | 'new';
     /** span kind only */
     spanIndex?: number;
-    /** new kind only: the selected range + its text */
+    /** new kind only: the source range + its text. Omit the range (or pass an
+     *  empty one) for a whole-box save that should NOT become a linked span. */
     selStart?: number;
     selEnd?: number;
     selectionText?: string;
+    /** new kind only: the initial save scope chosen at the Save as… control
+     *  (contract §S8 — save elsewhere without switching tabs). Defaults to the
+     *  active tab when omitted. */
+    scope?: SnippetScope;
   }
 </script>
 
@@ -23,7 +30,8 @@
    * cursor (lead ruling: provenance tint is about origin, not liveness).
    */
   import { untrack } from 'svelte';
-  import type { SnippetInput, SnippetScope } from '$lib/prompts/types';
+  import type { SnippetInput } from '$lib/prompts/types';
+  // SnippetScope is imported in the module <script> above and shared here.
   import {
     prompts,
     activeProject,
@@ -34,6 +42,8 @@
   } from '$lib/prompts.svelte';
   import { spanText, type SpanLink } from '$lib/compose/doc';
   import { parseVariables } from '$lib/compose/variables';
+  import { focusTrap } from '$lib/attachments/focusTrap';
+  import { toasts } from '$lib/prompts/toasts.svelte';
 
   interface Props {
     context: SnippetModalContext;
@@ -62,16 +72,23 @@
   let tab = $state<'content' | 'metadata'>('content');
 
   let title = $state(untrack(() => baseSnippet?.title ?? ''));
+  // Opened from a span, the body defaults to the span's CURRENT edited text, not
+  // the stored body (contract §S7): the user edited it because they meant to,
+  // and showing them the old text answers a question they didn't ask. `Original`
+  // (below) previews the stored body without ever overwriting this.
   let body = $state(
-    untrack(() =>
-      context.kind === 'new' ? (context.selectionText ?? '') : (baseSnippet?.body ?? spanCurrentText)
-    )
+    untrack(() => (context.kind === 'new' ? (context.selectionText ?? '') : spanCurrentText))
   );
   let keywordsStr = $state(untrack(() => (baseSnippet?.keywords ?? []).join(', ')));
   let tagsStr = $state(untrack(() => (baseSnippet?.tags ?? []).join(', ')));
   let category = $state(untrack(() => baseSnippet?.category ?? ''));
+  /** The initial scope chosen for a Save as… (new kind), captured once. */
+  const ctxScopeProjectId = untrack(() =>
+    context.scope?.kind === 'project' ? context.scope.project_id : null
+  );
   let dest = $state<'global' | 'project'>(
     untrack(() => {
+      if (context.scope) return context.scope.kind; // Save as… chose a scope
       if (baseSnippet) return baseSnippet.scope.kind;
       // New snippets are born scoped to the active tab (contract: the tab IS
       // the save scope).
@@ -81,14 +98,20 @@
   let saveError = $state<string | null>(null);
   let saving = $state(false);
   let confirmingDelete = $state(false);
+  /** Peek at the stored original (span kind) without reverting — JC-3. */
+  let showOriginal = $state(false);
+  let titleEl: HTMLInputElement | undefined = $state(undefined);
+  let bodyEl: HTMLTextAreaElement | undefined = $state(undefined);
 
   /** Read-only preview: what the body's variables parse to (names +
    *  defaults) — feedback that the grammar saw what the author meant. */
   const bodyVariables = $derived(parseVariables(body));
-  /** A project destination needs an anchor: the snippet's own project (when
-   *  editing one) or the active tab. */
+  /** A project destination needs an anchor: the Save as… scope, the snippet's
+   *  own project (when editing one), or the active tab. */
   const destProjectId = $derived(
-    baseSnippet?.scope.kind === 'project' ? baseSnippet.scope.project_id : prompts.activeProjectId
+    baseSnippet?.scope.kind === 'project'
+      ? baseSnippet.scope.project_id
+      : (ctxScopeProjectId ?? prompts.activeProjectId)
   );
   const destProjectName = $derived(
     prompts.projects.find((p) => p.id === destProjectId)?.name ?? activeProject()?.name ?? ''
@@ -111,10 +134,22 @@
     };
   }
 
-  /** Save the snippet, then refresh the originating span's link metadata (new
-   *  kind: link the saved selection). The span TEXT is never rewritten —
-   *  saving updates the library, not the prompt being composed. */
-  async function save(): Promise<void> {
+  /** Count other live spans of `snippetId` (excluding the one being saved) —
+   *  JC-7: Update does NOT re-sync other inserted copies (spans are point-in-
+   *  time snapshots), so a quiet toast keeps that from being a silent surprise. */
+  function otherCopyCount(snippetId: string): number {
+    return prompts.doc.spans.filter((s, i) => i !== spanIndex && s.link?.snippetId === snippetId).length;
+  }
+
+  /**
+   * Save. `mode` = 'update' writes back the same snippet id (append a version,
+   * never destroy the old body); 'new' creates a fresh snippet from the edited
+   * text, leaving the original untouched (contract §S7). Either way the
+   * originating span relinks to the snippet it now reflects. The span TEXT is
+   * never rewritten from a modal edit — saving updates the library, not the
+   * prompt being composed.
+   */
+  async function save(mode: 'update' | 'new'): Promise<void> {
     if (!title.trim() || !body) {
       saveError = 'A snippet needs a title and a body.';
       return;
@@ -122,14 +157,20 @@
     saving = true;
     saveError = null;
     try {
-      // A dangling id (snippet deleted / hand-removed) saves as new.
-      const saved = await saveSnippet(buildInput(snippet?.id));
+      // 'update' keeps the id (a dangling id falls back to create); 'new' forces
+      // a create even when a stored snippet exists.
+      const id = mode === 'update' ? snippet?.id : undefined;
+      const others = fromSpan && mode === 'update' && snippet ? otherCopyCount(snippet.id) : 0;
+      const saved = await saveSnippet(buildInput(id));
       const newLink: SpanLink = { snippetId: saved.id, title: saved.title, scope: saved.scope };
       if (fromSpan) {
         // linked = the span still shows the stored body verbatim; anything
         // else is linked-modified (origin preserved, divergence marked).
         const state = spanCurrentText === saved.body ? 'linked' : 'linked-modified';
         composeReplaceSpan(spanIndex, spanCurrentText, { state, link: newLink });
+        if (others > 0) {
+          toasts.push(`${others} other inserted cop${others === 1 ? 'y' : 'ies'} left unchanged.`);
+        }
       } else if (context.kind === 'new') {
         const state = (context.selectionText ?? '') === saved.body ? 'linked' : 'linked-modified';
         composeLinkRange(context.selStart ?? 0, context.selEnd ?? 0, newLink, state);
@@ -164,6 +205,15 @@
       onClose();
     }
   }
+
+  // Initial focus (contract popover table): Title when creating, Body when
+  // editing a span. Runs once on mount — no tracked reads. The focus-trap
+  // attachment leaves focus alone when it is already inside, so whichever runs
+  // second, the intended field wins.
+  $effect(() => {
+    const target = untrack(() => (fromSpan ? bodyEl : titleEl));
+    target?.focus();
+  });
 </script>
 
 <div
@@ -174,7 +224,7 @@
   onkeydown={handleBackdropKeydown}
   tabindex="-1"
 >
-  <div class="modal snippet-modal">
+  <div class="modal snippet-modal" tabindex="-1" {@attach focusTrap}>
     <div class="snippet-modal__head">
       <h3 id="snippet-modal-title">{title || baseSnippet?.title || 'New snippet'}</h3>
       <div class="snippet-modal__tabs" role="tablist" aria-label="Snippet sections">
@@ -206,6 +256,7 @@
         <span>Title</span>
         <input
           type="text"
+          bind:this={titleEl}
           bind:value={title}
           autocomplete="off"
           spellcheck="false"
@@ -213,10 +264,19 @@
         />
       </label>
 
-      <label class="snippet-modal__field snippet-modal__field--body">
-        <span>Body</span>
-        <textarea class="snippet-modal__body" bind:value={body} spellcheck="false"></textarea>
-      </label>
+      {#if showOriginal && baseSnippet}
+        <!-- JC-3: Original PREVIEWS the stored body, read-only — it never
+             reverts the edit. Reverting would be a separate labeled action. -->
+        <label class="snippet-modal__field snippet-modal__field--body">
+          <span>Original (stored — read-only)</span>
+          <textarea class="snippet-modal__body snippet-modal__body--readonly" readonly spellcheck="false" value={baseSnippet.body}></textarea>
+        </label>
+      {:else}
+        <label class="snippet-modal__field snippet-modal__field--body">
+          <span>Body</span>
+          <textarea class="snippet-modal__body" bind:this={bodyEl} bind:value={body} spellcheck="false"></textarea>
+        </label>
+      {/if}
 
       {#if bodyVariables.length}
         <div class="snippet-modal__vars" aria-label="Variables found in the body">
@@ -274,11 +334,31 @@
           {confirmingDelete ? 'Really delete?' : 'Delete snippet'}
         </button>
       {/if}
+      {#if fromSpan && baseSnippet}
+        <button
+          type="button"
+          class="btn btn--ghost btn--sm"
+          aria-pressed={showOriginal}
+          onclick={() => (showOriginal = !showOriginal)}
+          title="Preview the stored original, read-only — it never reverts your edit"
+        >
+          {showOriginal ? 'Back to edit' : 'Original'}
+        </button>
+      {/if}
       <span class="snippet-modal__actions-spacer"></span>
       <button type="button" class="btn btn--ghost btn--sm" onclick={onClose}>Cancel</button>
-      <button type="button" class="btn btn--primary btn--sm" disabled={saving} onclick={save}>
-        {snippet ? 'Save' : 'Save snippet'}
-      </button>
+      {#if fromSpan}
+        <button type="button" class="btn btn--ghost btn--sm" disabled={saving} onclick={() => save('new')}>
+          Save as new
+        </button>
+        <button type="button" class="btn btn--primary btn--sm" disabled={saving} onclick={() => save('update')}>
+          Update snippet
+        </button>
+      {:else}
+        <button type="button" class="btn btn--primary btn--sm" disabled={saving} onclick={() => save('update')}>
+          Save snippet
+        </button>
+      {/if}
     </div>
   </div>
 </div>
@@ -333,6 +413,11 @@
   .snippet-modal__body:focus {
     outline: none;
     border-color: var(--accent-snippet);
+  }
+  .snippet-modal__body--readonly {
+    background: var(--bg-subtle);
+    color: var(--text-muted);
+    cursor: default;
   }
 
   /* Read-only variable preview: names + defaults as parsed — quiet feedback

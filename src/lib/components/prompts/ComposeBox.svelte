@@ -15,22 +15,28 @@
    * double-clicking the span.
    */
   import { onMount, untrack } from 'svelte';
-  import { prompts, composeEdit, setSelection, setAsVariable } from '$lib/prompts.svelte';
+  import { prompts, composeEdit, setSelection } from '$lib/prompts.svelte';
   import { linkedSpanAt, spanStarts, diffTexts } from '$lib/compose/doc';
-  import { parseVariables } from '$lib/compose/variables';
+  import type { SnippetScope } from '$lib/prompts/types';
   import { projectColorVar } from '$lib/prompts/palette';
   import VariableFillList from './VariableFillList.svelte';
+  import SaveAsControl from './SaveAsControl.svelte';
 
   interface Props {
     /** Explicit open-the-snippet-modal gesture (chip click / span double-click). */
     onOpenSpan: (spanIndex: number) => void;
     /** Copy Prompt — the parent owns the clipboard call + toast. */
     onCopy: () => void;
-    /** Save the active selection as a snippet (opens the modal prefilled). */
-    onSaveSelection: () => void;
+    /** Save (selection-aware, in the parent) to `scope` — opens the snippet
+     *  modal prefilled with the selection if there is one, else the whole box. */
+    onSaveAs: (scope: SnippetScope) => void;
+    /** ↓ at the very end of the text steps into the match panel; returns
+     *  whether the panel had a hit to land on, so the box keeps ↓ as a caret
+     *  move when the panel is empty (contract §S2). */
+    onStepIntoPanel: () => boolean;
   }
 
-  let { onOpenSpan, onCopy, onSaveSelection }: Props = $props();
+  let { onOpenSpan, onCopy, onSaveAs, onStepIntoPanel }: Props = $props();
 
   let textareaEl: HTMLTextAreaElement | undefined = $state(undefined);
   let highlightEl: HTMLDivElement | undefined = $state(undefined);
@@ -39,7 +45,6 @@
   let scrollNonce = $state(0);
 
   const hasText = $derived(prompts.doc.text.length > 0);
-  const hasVariables = $derived(parseVariables(prompts.doc.text).length > 0);
 
   /** Highlight-layer render list: span state, its slice of the text, and
    *  its hue — greyish for global snippets, the OWNING project's color for
@@ -81,6 +86,19 @@
     if (d) composeEdit(d.start, d.end, d.inserted);
     // The browser's caret is authoritative after an input event.
     setSelection(textareaEl.selectionStart, textareaEl.selectionEnd);
+  }
+
+  function handleTextareaKeydown(e: KeyboardEvent): void {
+    if (e.key !== 'ArrowDown' || !textareaEl) return;
+    // ↓ is natively inert only when the caret sits at the very end of the text —
+    // the one position where repurposing it to step into the match panel can't
+    // steal a caret move (contract §S2). Anywhere else, ↓ moves the caret as a
+    // user editing mid-document expects. onStepIntoPanel returns false when the
+    // panel is empty, so ↓ then falls through to its default no-op.
+    const atEnd =
+      textareaEl.selectionStart === textareaEl.selectionEnd &&
+      textareaEl.selectionEnd === textareaEl.value.length;
+    if (atEnd && onStepIntoPanel()) e.preventDefault();
   }
 
   function syncScroll(): void {
@@ -213,6 +231,7 @@
       class="compose__input"
       value={prompts.doc.text}
       oninput={handleInput}
+      onkeydown={handleTextareaKeydown}
       onscroll={syncScroll}
       ondblclick={handleDblclick}
       spellcheck="false"
@@ -221,35 +240,22 @@
     ></textarea>
 
     {#if savePos}
-      <!-- mousedown is swallowed so the click doesn't steal focus and
-           collapse the very selection it acts on. -->
-      <button
-        type="button"
-        class="compose__save-sel"
-        style="left: {savePos.left}px; top: {savePos.top}px"
-        onmousedown={(e) => e.preventDefault()}
-        onclick={onSaveSelection}
-        title="Turn the selected text into a reusable library snippet, scoped to the active tab"
-      >
-        Save as snippet
-      </button>
+      <!-- Floating fast-path next to a selection; SaveAsControl swallows
+           mousedown so the click doesn't collapse the selection it acts on. -->
+      <div class="compose__save-sel" style="left: {savePos.left}px; top: {savePos.top}px">
+        <SaveAsControl variant="floating" label="Save as snippet" onSave={onSaveAs} />
+      </div>
     {/if}
+
+    <!-- Always present (contract §S5): "save what I just wrote" needs no
+         selection. Selection-aware in the parent — the selection if there is
+         one, else the whole box. -->
+    <div class="compose__save-as">
+      <SaveAsControl label="Save as…" onSave={onSaveAs} />
+    </div>
 
     {#if hasText}
       <div class="compose__copy">
-        {#if hasVariables}
-          <label
-            class="compose__asvar"
-            title="On: variables copy as <prompt_var> references with one value block. Off: values substitute in place."
-          >
-            <input
-              type="checkbox"
-              checked={prompts.asVariable}
-              onchange={(e) => setAsVariable(e.currentTarget.checked)}
-            />
-            <span>as variables</span>
-          </label>
-        {/if}
         <button type="button" class="btn btn--primary btn--sm" onclick={onCopy}>
           Copy prompt
         </button>
@@ -395,24 +401,18 @@
     border-bottom: 2px dotted color-mix(in srgb, var(--span-color, var(--text-faint)) 75%, transparent);
   }
 
-  /* ── situational affordances (contract: no persistent buttons) ─────────── */
+  /* ── situational affordances ───────────────────────────────────────────── */
+  /* Floating save-as, anchored next to a live selection (fast mouse path). */
   .compose__save-sel {
     position: absolute;
-    z-index: 2;
-    font-family: inherit;
-    font-size: 0.68rem;
-    font-weight: 600;
-    padding: 0.25rem 0.6rem;
-    border-radius: 1rem;
-    border: 1px solid var(--border-strong);
-    background: var(--bg-card);
-    color: var(--text);
-    cursor: pointer;
-    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.14);
-    white-space: nowrap;
+    z-index: 3;
   }
-  .compose__save-sel:hover {
-    border-color: color-mix(in srgb, var(--project-color, var(--accent-snippet)) 60%, var(--border));
+  /* Always-present save-as, bottom-left (contract §S5). */
+  .compose__save-as {
+    position: absolute;
+    left: 0.75rem;
+    bottom: 0.75rem;
+    z-index: 2;
   }
   .compose__copy {
     position: absolute;
@@ -422,18 +422,5 @@
     display: flex;
     align-items: center;
     gap: 0.6rem;
-  }
-  .compose__asvar {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    font-size: 0.68rem;
-    color: var(--text-muted);
-    cursor: pointer;
-    user-select: none;
-    /* Readable over whatever text scrolls beneath it. */
-    background: color-mix(in srgb, var(--bg-card) 82%, transparent);
-    border-radius: 1rem;
-    padding: 0.15rem 0.5rem;
   }
 </style>
