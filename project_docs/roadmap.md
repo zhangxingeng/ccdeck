@@ -1,8 +1,9 @@
 # CC Deck — Roadmap
 
-Status: **Phases 1–7 shipped through v0.7.2**, committed on `main`. This doc replaces the
-open-ended "Search Phase 2" tail in [`project_docs/search-design.md`](search-design.md) (that doc's own Phase 2 section is now
-marked done and points here).
+Status: actively shipping on `main` — each phase below records what landed, its decisions, and its
+verification. This doc replaces the open-ended "Search Phase 2" tail in
+[`project_docs/search-design.md`](search-design.md) (that doc's own Phase 2 section is now marked
+done and points here).
 
 ## Why the pivot
 
@@ -591,7 +592,7 @@ run — a cache artifact, not a real dangling reference; the production build re
 **Live GUI verification: performed by the founder** (top-nav save controls, toast auto-dismiss,
 auto-clean) before the v0.10.0 release.
 
-## Phase 15 — Harness parity + the generic migration protocol (DONE 2026-07-09, branches awaiting merge)
+## Phase 15 — Harness parity + the generic migration protocol (DONE 2026-07-09, merged to main)
 
 Two coupled tracks, run lead-gated with sonnet teammates through checkpoint dialogues:
 
@@ -617,6 +618,72 @@ Two coupled tracks, run lead-gated with sonnet teammates through checkpoint dial
 - **Deferred with issues filed:** flat-mode check-links `/generic_docs/` prefix resolution
   (ai-first-docs#17), upstream-merge of two generic memory rails (ai-first-docs#18),
   retire-nudge hook port (#23).
+
+## Phase 16 — Prompt Library ships: snippets, projects, keyboard-first compose (DONE 2026-07-10, v0.12.0, closes #24)
+
+Closes the Prompt Library epic's **Core build** (#24, epic #7) — save any prompt or fragment as a
+**snippet**, group snippets into colored **projects**, and compose without leaving the keyboard:
+type to search, arrow into the match panel, Enter inserts over the query line. Two living
+contracts govern the feature and are meant to be kept current, not restated here:
+[`project_docs/prompts-design.md`](prompts-design.md) (storage, schema, command surface, variable
+grammar, match engine) and [`project_docs/prompts-ux.md`](prompts-ux.md) (every interaction, key
+by key).
+
+- **Rename mid-round: "pieces" → "snippets"** (`5b4a989`) — the founder's call, free to make
+  because the feature had never shipped. Complete across Rust/TS/Svelte/CSS/docs/UI copy, but
+  **stops at the storage boundary on purpose**: on-disk snippet JSON field names and the
+  embeddings cache's `piece_id` column keep the old name, so existing `~/.ccdeck/prompts/` data
+  and caches keep loading with no schema migration.
+- **Projects are first-class**: colored (a fixed palette-key set, never a raw hex, so dark-mode
+  contrast stays retunable in one theme file), pinnable as tabs, with an unpinned-but-active
+  project surfacing as a temporary trailing tab so scope is never invisible. Deleting a project
+  rescopes its snippets to Global rather than destroying them.
+- **Variable grammar v2**: single-brace f-string style (`{name}` / `{name:default}`), implemented
+  independently in Rust and TypeScript against a shared test-vector table — the seam a prior audit
+  round had caught diverging.
+- **Per-variable copy** replaces one global toggle: each variable defaults to hoisted (rendered as
+  `<prompt_var>` and listed once in a trailing `<prompt_vars>` block) because hoisting never
+  breaks while substituting an unexpectedly-long value inline can bloat the prompt — an
+  asymmetric-failure-mode default, not a smarter heuristic. `AppConfig.prompts_as_variable` was
+  removed (the choice is per-variable, per-session, never persisted); `AppConfig.hotkeys` was
+  added in its place.
+- **Keyboard-first compose**: newline-as-query, `↓` steps into the match panel only when the caret
+  sits at the very end of the text (the one spot `↓` is natively inert in a textarea), `Enter`
+  inserts over the query line rather than after it (the query was scaffolding for the search, not
+  text worth keeping). An always-present, selection-aware `Save as…` closes the "can't save the
+  whole box" gap. The snippet modal defaults to the edited span text (not the stale stored body)
+  with a read-only **Original** preview and an **Update vs. Save-as-new** choice. Toasts
+  auto-dismiss at 5s; a data-touching event (an auto-repair) additionally leaves a durable trace in
+  a **Notices** list, so a transient surface is never the only record of something that changed a
+  user's file. The config popover moved out of the library panel (where it rendered behind the
+  compose box) to the tab row, portalled to escape ancestor clipping. Command hotkeys are
+  Mod-normalized (Ctrl on Windows/Linux, Cmd on macOS) and rebindable; a chord must carry Ctrl/Cmd
+  or it's rejected as a plain keystroke a user might type into the box.
+- **Store robustness**: a JSON parse failure triggers in-memory repair — never rewrites the user's
+  file; the repaired form only persists on the user's next explicit save — surfaced via toast plus
+  a Notices badge rather than a silent swallow or a permanent banner.
+
+### Verification (Phase 16)
+
+Per the merge commit (`601f228`): svelte-check 248/0/0, 9 smoke suites, 134 cargo tests, clippy at
+baseline, clean build. A cold audit fuzzed the Rust/TS grammar seam over 800k inputs (zero
+divergences) and the span model over 1,049,159 operations (zero invariant violations), and found
+two hotkey-dispatch defects (window-level `Mod+C`/chord dispatch reasoning about the wrong
+selection), both fixed and proven in a browser before merge. Tagged and released as **v0.12.0**
+(minor, not patch — a new feature surface and a new data root; nothing existing changes shape, so
+no install needs a migration).
+
+### Deferred, not dropped
+
+- **Issue #25** — M4 organization layer (browse-by-tag panel, bulk tag/category management).
+- **Compose-surface Playwright e2e** — held until this round's interactions settled; now
+  actionable.
+- Presets, RAG auto-assembly, sharing/export — issue #7's original deferred list.
+- `path`-driven auto-scoping of projects — the field exists on the project record; no behavior
+  hangs on it yet.
+- Three README screenshots need recapturing (cosmetic).
+- Chord validation requires Ctrl/Cmd specifically rather than any modifier — a deliberate
+  narrowing, one line to loosen if it proves too strict.
 
 ## Verification performed (historical — Phase 7 snapshot, 2026-07-05)
 
@@ -687,3 +754,13 @@ none of these are committed work — each needs its own design pass before becom
   as the first live run of the iterative teammate protocol. Founder did the visual verification pass
   before release. (Release-history entries for v0.7.0–v0.9.0 were not recorded at the time; noted
   here for the next reader rather than backfilled.)
+- **v0.10.1** — Delete-only editing (#14): turn/block-level soft delete, bulk multi-select, and
+  tool_use/tool_result cascade, alongside read-only thinking/tool-call rendering restored for
+  browsing (removed entirely in Phase 9; revived here read-only, not editable). Not recorded in a
+  phase entry at the time; noted here for the next reader rather than backfilled.
+- **v0.11.0** — Provider profiles (#21): keychain-backed storage and a management UI for
+  AI-provider credentials (e.g. DeepSeek), with `ANTHROPIC_*` env injection and a masked-clipboard
+  fallback for Resume / Fork-and-resume. Not recorded in a phase entry at the time; noted here for
+  the next reader rather than backfilled.
+- **v0.12.0 (2026-07-10)** — Phase 16: the Prompt Library ships (#24, epic #7's Core build). See
+  Phase 16 above for the full record.
