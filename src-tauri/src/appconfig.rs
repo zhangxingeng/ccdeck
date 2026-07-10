@@ -10,6 +10,7 @@
 //! side needs these values at terminal-launch time, before any webview is
 //! involved.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -56,13 +57,18 @@ pub struct AppConfig {
     /// embeddings are strictly opt-in — "ready + downloaded + enabled" is
     /// what turns hybrid matching on.
     pub embed_enabled: bool,
-    /// Prompt Library compose-box "as variable" copy toggle (contract § Copy
-    /// output; JSON key `promptsAsVariable`). Defaults to `true`: dedup mode
-    /// — a long value is stated once as a `<prompt_var>` block, never
-    /// repeated inline. The frontend persists the toggle through the
-    /// existing config get/set commands.
-    #[serde(default = "default_true")]
-    pub prompts_as_variable: bool,
+    /// Prompt Library hotkeys (contract § Hotkeys): command id → normalized
+    /// chord string, e.g. `"copyPrompt" -> "Mod+C"`, where `Mod` stands for
+    /// `Ctrl` on Windows/Linux and `Cmd` on macOS so one stored binding is
+    /// correct cross-platform and a config file is portable. An absent command
+    /// id falls back to its default — a fresh install and a pre-hotkeys config
+    /// are the same case, and neither needs a migration (the empty map is the
+    /// all-defaults state). `BTreeMap` for deterministic key ordering, so a
+    /// user who git-tracks `~/.ccdeck/config.json` gets diff-stable output.
+    /// Persisted through the existing `get_app_config`/`set_app_config` — no
+    /// new command surface. Only *command* hotkeys live here; spatial/context
+    /// keys (`↓`/`Enter`/`Esc`) are not rebindable and are not stored.
+    pub hotkeys: BTreeMap<String, String>,
 }
 
 impl Default for AppConfig {
@@ -72,7 +78,7 @@ impl Default for AppConfig {
             launch_command: String::new(),
             update_check_on_launch: true,
             embed_enabled: false,
-            prompts_as_variable: true,
+            hotkeys: BTreeMap::new(),
         }
     }
 }
@@ -324,16 +330,47 @@ mod tests {
     }
 
     #[test]
-    fn prompts_as_variable_defaults_true_and_round_trips() {
-        // Contract § Copy output: the toggle defaults ON — a config written
-        // before the field existed must load as enabled; an explicit false
-        // must survive, under the camelCase key its siblings use.
-        let old: AppConfig = serde_json::from_str(r#"{"terminal":""}"#).unwrap();
-        assert!(old.prompts_as_variable, "missing key must default to true");
-        let off: AppConfig = serde_json::from_str(r#"{"promptsAsVariable":false}"#).unwrap();
-        assert!(!off.prompts_as_variable);
+    fn deserialize_ignores_removed_prompts_as_variable_key() {
+        // Contract § Copy output removed `prompts_as_variable` this round (the
+        // as-variable choice is now per-variable, per-session, never persisted).
+        // A released config file on a founder's/user's disk still carries the
+        // stale `promptsAsVariable` key — because AppConfig sets no
+        // `deny_unknown_fields`, that key is simply ignored and the config loads
+        // cleanly, exactly like the retired `terminalArgs` key. This proves the
+        // removal is not a breaking migration, by parsing a fixture with the key
+        // rather than reasoning about serde's usual behavior.
+        let with_stale = r#"{"terminal":"konsole -e","launchCommand":"echo hi","promptsAsVariable":false}"#;
+        let config: AppConfig = serde_json::from_str(with_stale).unwrap();
+        assert_eq!(config.terminal, "konsole -e");
+        assert_eq!(config.launch_command, "echo hi");
+        // The serialized form no longer emits the field at all.
         let json = serde_json::to_string(&AppConfig::default()).unwrap();
-        assert!(json.contains(r#""promptsAsVariable":true"#), "camelCase like its siblings: {json}");
+        assert!(!json.contains("promptsAsVariable"), "field is gone: {json}");
+    }
+
+    #[test]
+    fn hotkeys_default_empty_and_round_trip() {
+        // Contract § Hotkeys: an absent `hotkeys` key deserializes to the empty
+        // map (the all-defaults state — a fresh install and a pre-hotkeys config
+        // are the same case, no migration). A populated map round-trips under
+        // the camelCase key its siblings use, and BTreeMap keeps the serialized
+        // key order deterministic so a git-tracked config file diffs cleanly.
+        let old: AppConfig = serde_json::from_str(r#"{"terminal":""}"#).unwrap();
+        assert!(old.hotkeys.is_empty(), "missing key must default to empty map");
+
+        let json =
+            r#"{"hotkeys":{"copyPrompt":"Mod+C","saveAs":"Mod+S"}}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.hotkeys.get("copyPrompt").map(String::as_str), Some("Mod+C"));
+        assert_eq!(config.hotkeys.get("saveAs").map(String::as_str), Some("Mod+S"));
+
+        let out = serde_json::to_string(&config).unwrap();
+        assert!(out.contains(r#""hotkeys":{"#), "camelCase key: {out}");
+        // BTreeMap orders keys lexicographically: "copyPrompt" before "saveAs".
+        assert!(
+            out.contains(r#""hotkeys":{"copyPrompt":"Mod+C","saveAs":"Mod+S"}"#),
+            "deterministic key order: {out}"
+        );
     }
 
     #[test]
