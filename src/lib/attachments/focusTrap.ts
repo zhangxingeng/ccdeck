@@ -35,8 +35,15 @@ export function focusTrap(node: HTMLElement): () => void {
   }
 
   // Move focus in unless it is already inside (opening from a child keeps it).
+  // Deferred a frame on purpose: a portalled host is moved to <body> by its
+  // portal attachment during the same mount flush, and moving a focused node
+  // blurs it. Focusing on the next frame lands AFTER that move, so focus sticks
+  // inside the panel (and the panel's keyboard handlers then actually fire).
+  let rafId = 0;
   if (!node.contains(document.activeElement)) {
-    (focusables()[0] ?? node).focus();
+    rafId = requestAnimationFrame(() => {
+      (focusables()[0] ?? node).focus();
+    });
   }
 
   function onKeydown(e: KeyboardEvent): void {
@@ -65,6 +72,7 @@ export function focusTrap(node: HTMLElement): () => void {
 
   node.addEventListener('keydown', onKeydown);
   return () => {
+    cancelAnimationFrame(rafId);
     node.removeEventListener('keydown', onKeydown);
     // Restore focus to wherever attention was before this opened (the trigger).
     previouslyFocused?.focus();

@@ -45,8 +45,13 @@
     pos = { top: r.bottom + GAP, left };
   }
 
-  // Position after the panel is in the DOM, and keep it pinned to the anchor as
-  // the page scrolls or resizes. DOM measurement is $effect's legitimate job.
+  // Position after the panel is in the DOM, keep it pinned to the anchor as the
+  // page scrolls/resizes, and close on Escape. Escape is handled at the window
+  // (not the panel) on purpose: the panel is portalled to <body>, so focus can
+  // legitimately sit anywhere inside it, and a panel-scoped handler would miss
+  // an Escape that a descendant didn't bubble. A descendant that wants Escape
+  // for itself (the rebinding capture) stops propagation, giving innermost-
+  // first behaviour for free.
   $effect(() => {
     if (!open) {
       pos = null;
@@ -55,21 +60,22 @@
     void anchor;
     reposition();
     const onMove = (): void => reposition();
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
+    };
     window.addEventListener('resize', onMove);
     // Capture-phase: catch scrolls on any ancestor, not just the window.
     window.addEventListener('scroll', onMove, true);
+    window.addEventListener('keydown', onKey);
     return () => {
       window.removeEventListener('resize', onMove);
       window.removeEventListener('scroll', onMove, true);
+      window.removeEventListener('keydown', onKey);
     };
   });
-
-  function onKeydown(e: KeyboardEvent): void {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      onClose();
-    }
-  }
 </script>
 
 {#if open}
@@ -82,7 +88,6 @@
       aria-label={label}
       tabindex="-1"
       style={pos ? `top: ${pos.top}px; left: ${pos.left}px;` : 'visibility: hidden;'}
-      onkeydown={onKeydown}
       {@attach focusTrap}
     >
       {@render children()}
