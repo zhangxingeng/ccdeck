@@ -96,85 +96,68 @@ console.log('variable grammar');
   );
 }
 
-// ── code is verbatim: no variables parsed, no escapes resolved ───────────────
-console.log('code is verbatim');
+// ── the grammar is UNIFORM: there is no Markdown awareness ───────────────────
+// It does not know what a fence or a backtick is. An earlier draft excluded code
+// from parsing; that was cut. "Variables work everywhere except inside backticks
+// and except inside fences" is a rule you must be TOLD — unguessable-without-the-
+// contract is the disease this round exists to cure. "It's a Python format
+// string" is a rule the user already knows. We do not invent protocols.
+console.log('no markdown awareness');
 {
-  // Inline code spans.
-  eq(names('`{x}`'), [], 'inline code: `{x}` is not a variable');
-  eq(copyText('`{x}`', {}, {}), '`{x}`', 'inline code copies out byte for byte');
-  eq(names('use {a} and `{b}`'), ['a'], 'a variable outside code, none inside it');
+  // Backticks are ordinary characters.
+  eq(names('`{x}`'), ['x'], 'a backtick is just a character — `{x}` IS a variable');
+  eq(names('{a}`{b}`{c}'), ['a', 'b', 'c'], 'backticks do not fence anything off');
   eq(
-    names('{a}`{b}`{c}'),
-    ['a', 'c'],
-    'a variable abutting an inline-code span on either side still parses'
-  );
-  eq(
-    copyText('``a `b` c``', {}, {}),
-    '``a `b` c``',
-    'a double-backtick span carries a lone backtick verbatim'
-  );
-  eq(names('a ` b {x} c'), ['x'], 'an unpaired backtick is prose — it must not swallow the rest');
-
-  // Fenced blocks.
-  const fenced = 'before {a}\n```\nlet x = {b};\n```\nafter {c}';
-  eq(names(fenced), ['a', 'c'], 'fenced block: braces inside are prose, outside still parse');
-  eq(
-    copyText(fenced, { a: '1', c: '2' }, { a: false, c: false }),
-    'before 1\n```\nlet x = {b};\n```\nafter 2',
-    'the fenced block copies out byte for byte'
+    copyText('`{x}`', { x: 'V' }, { x: false }),
+    '`V`',
+    'a variable in an inline code span substitutes like any other'
   );
 
-  // THE escape case. A fenced Handlebars/Rust `{{name}}` must survive intact —
-  // resolving escapes inside a fence would copy it out as `{name}`, silently
-  // corrupting the exact characters the user typed.
-  const handlebars = '```\n{{name}}\n```';
-  eq(names(handlebars), [], 'fenced {{name}} is not a variable');
+  // So are fences.
+  const fenced = 'before {a}\n```rust\nlet x = {b};\n```\nafter {c}';
+  eq(names(fenced), ['a', 'b', 'c'], 'a {name} inside a fence IS a variable');
   eq(
-    copyText(handlebars, {}, {}),
-    handlebars,
-    'fenced {{name}} does NOT unescape — verbatim means verbatim'
+    copyText(fenced, { a: '1', b: '2', c: '3' }, { a: false, b: false, c: false }),
+    'before 1\n```rust\nlet x = 2;\n```\nafter 3',
+    'a fenced variable substitutes like any other'
   );
+
+  // The cost, accepted knowingly — and LOUD, not silent: the chip renders the
+  // variable names it contains and the fill list lists them, so a stray `name`
+  // from a code sample is visible, and the user escapes it as {{name}} exactly as
+  // they would in Python. The UI surfacing parsed variables is what makes this
+  // safe.
+  eq(names('```\n{{name}}\n```'), [], 'a fenced {{name}} is an ESCAPE, not a variable');
+  eq(
+    copyText('```\n{{name}}\n```', {}, {}),
+    '```\n{name}\n```',
+    'a fenced {{name}} UNESCAPES to {name} — Python semantics, everywhere'
+  );
+
+  // ⚠ The one genuinely silent case, asserted rather than prevented (see the
+  // module header): a Rust format! escape in a code sample unescapes on copy,
+  // because under Python semantics `{{` MEANS a literal brace. To keep a literal
+  // `{{`, write `{{{{` — same as Python.
   eq(
     copyText('```rust\nformat!("{{}}", x)\n```', {}, {}),
+    '```rust\nformat!("{}", x)\n```',
+    'a Rust format! escape unescapes on copy — correct under Python semantics'
+  );
+  eq(
+    copyText('```rust\nformat!("{{{{}}}}", x)\n```', {}, {}),
     '```rust\nformat!("{{}}", x)\n```',
-    'a Rust format! escape survives a fence intact'
+    'to KEEP a literal {{, write {{{{ — exactly as in Python'
   );
 
-  // Escapes at a fence boundary still resolve OUTSIDE the fence.
-  eq(
-    copyText('{{a}}\n```\n{{b}}\n```\n{{c}}', {}, {}),
-    '{a}\n```\n{{b}}\n```\n{c}',
-    'escapes resolve outside the fence and are left alone inside it'
-  );
+  // Rule 3 from the other side: everything Python could not read as a plain field
+  // stays literal on its own, with no carve-out doing the work.
+  for (const t of ['{a: 1}', '{ return x }', '{a.b}', '{my var}', '{:x}', '{"json": 1}', '{}']) {
+    eq(names(t), [], `not a Python field, so literal: ${t}`);
+    eq(copyText(t, {}, {}), t, `…and it copies out untouched: ${t}`);
+  }
 
-  // An unterminated fence runs to the end of the document: a half-typed code
-  // block must not expose its braces to the parser mid-keystroke.
-  eq(names('text {a}\n```\n{b} and {c}'), ['a'], 'an unterminated fence stays code to EOF');
-  eq(
-    copyText('```\n{b}', {}, {}),
-    '```\n{b}',
-    'an unterminated fence at EOF copies out verbatim'
-  );
-
-  // Info strings, indentation, longer fences.
-  eq(names('```rust\n{x}\n```'), [], 'a fence with an info string still fences');
-  eq(names('  ```\n  {x}\n  ```'), [], 'an indented fence still fences');
-  eq(names('````\n```\n{x}\n```\n````'), [], 'a 4-backtick fence contains a 3-backtick line');
-
-  // Every variable-free document reconstructs exactly — the scanner never loses
-  // or adds a byte, however ragged the backticks are.
-  for (const t of [
-    '',
-    'plain',
-    '```\n```',
-    '`',
-    '``',
-    'a`b',
-    '```\nunclosed',
-    '`{b}`',
-    '```\n{b}\n```',
-    'trailing\n',
-  ]) {
+  // Variable-free documents reconstruct exactly — the scanner never loses a byte.
+  for (const t of ['', 'plain', '```\n```', '`', 'a`b', 'trailing\n']) {
     eq(copyText(t, {}, {}), t, `byte-preserving: ${JSON.stringify(t)}`);
   }
 }
@@ -400,7 +383,7 @@ console.log('contenteditable round-trip');
     normalize({
       nodes: [
         { kind: 'text', text: 'a\n\nb ' },
-        { kind: 'chip', ...chip('mid', 'Review {lang}\n\n```\n{not_a_var}\n```', a) },
+        { kind: 'chip', ...chip('mid', 'Review {lang}\n\n```\nlet x = {size};\n```', a) },
         { kind: 'text', text: ' z' },
       ],
     }),
