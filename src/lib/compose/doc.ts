@@ -1,351 +1,314 @@
 /**
- * Compose-box document model — the provenance state machine from
- * project_docs/prompts-design.md (§Compose surface), as pure data + pure
- * transforms. No DOM, no Svelte: the <textarea> is only an input device; this
- * model is the single source of truth, which is what makes the state machine
- * unit-testable (tests/prompts_smoke.mjs) and the Copy promise trivial.
+ * The compose-box document model: a flat list of nodes, each either free-typed
+ * text or an inserted snippet (a "chip"). Pure data + pure transforms — no DOM,
+ * no Svelte. The Doc is the single source of truth; the contenteditable is only
+ * an input device.
  *
- * Invariants (restored by normalize() after every transform):
- *   - spans tile the text exactly: sum(span.length) === text.length
- *   - no zero-length spans
- *   - no two adjacent 'typed' spans (merged)
+ * ── Why this is a node list and not the old span model ───────────────────────
+ *
+ * Until v0.13 a Doc was one `text` string plus `spans[]` annotating ranges of it,
+ * under the invariant `sum(span.length) === text.length` — spans TILE the text.
+ * That invariant is precisely what had to die.
+ *
+ * A chip RENDERS as its name and the variables it contains, but CONTRIBUTES its
+ * whole body to the copied prompt. Rendered ≠ contributed. The tiling invariant
+ * asserts they are equal, so no amount of guarding could have grown a chip on top
+ * of it: a <textarea> can only render the characters it contains, which is exactly
+ * why a snippet's body used to sit in the box as editable text — and exactly why
+ * editing it in place was possible at all.
+ *
+ * That inline edit was the whole defect. It silently diverged the composed text
+ * from the stored snippet and flipped the span into a third provenance state,
+ * `linked-modified`, which persisted nothing: two places to edit one thing, with
+ * different consequences and no signal about which was which.
+ *
+ * So a chip is an ATOM. It cannot be split, clipped, or partially selected —
+ * which is why the entire clip-and-demote algebra of the old model (applyEdit's
+ * transition table, linkRange, replaceSpan, spanStarts, diffTexts) is deleted
+ * rather than ported, and why `linked-modified` goes with it. A chip that cannot
+ * be edited in place cannot be modified in place. Editing happens in the popup,
+ * always, and nowhere else.
  */
-import type { SnippetScope } from '../prompts/types';
+import { parseVariables } from './variables';
 
-export type SpanState = 'typed' | 'linked' | 'linked-modified';
-
-/** Provenance carried by a linked / linked-modified span: which snippet the
- *  text came from, nothing more. The document holds RAW literal text —
- *  {var} tokens included — and variables resolve only at copy time, so
- *  there is no per-span template/fills state to carry. */
-export interface SpanLink {
-  snippetId: string;
-  title: string;
-  scope: SnippetScope;
+/** Free-typed text. Freely editable — the box is still a text box. */
+export interface TextNode {
+  kind: 'text';
+  text: string;
 }
 
-export interface Span {
-  state: SpanState;
-  length: number;
-  link?: SpanLink; // present iff state !== 'typed'
+/**
+ * An inserted snippet. Atomic: never inline-editable, never split.
+ *
+ * `content` is the snippet's body, carried ON the chip rather than read through
+ * to the library by name. That is deliberate, and it is what makes `Use once`
+ * possible at all: a chip may legitimately differ from the file of the same name
+ * because the user tweaked it for this one prompt without polluting their
+ * library. Carrying the body also makes a composed draft durable — the library
+ * changing, or the snippet being deleted outright, cannot reach in and mutate or
+ * gut a prompt someone is halfway through writing.
+ *
+ * `cid` identifies this chip INSTANCE, not the snippet: the same snippet can be
+ * inserted twice, and `Use once` on one copy must not touch the other.
+ */
+export interface ChipNode {
+  kind: 'chip';
+  cid: string;
+  name: string;
+  content: string;
 }
+
+export type Node = TextNode | ChipNode;
 
 export interface Doc {
-  text: string;
-  spans: Span[];
+  nodes: Node[];
+}
+
+/** A fresh chip-instance id. Only ever compared for equality — its shape is not
+ *  a contract, and it is never persisted (a chip lives in a draft, not on disk). */
+export function newCid(): string {
+  return crypto.randomUUID();
 }
 
 export function emptyDoc(): Doc {
-  return { text: '', spans: [] };
+  return { nodes: [] };
 }
 
-/** A doc that is all typed text (dev/test convenience). */
+/** A doc that is all free-typed text. */
 export function docFromText(text: string): Doc {
-  return normalize({ text, spans: text ? [{ state: 'typed', length: text.length }] : [] });
-}
-
-function typed(length: number): Span {
-  return { state: 'typed', length };
-}
-
-/** Drop zero-length spans and merge adjacent typed runs. */
-function normalize(doc: Doc): Doc {
-  const spans: Span[] = [];
-  for (const s of doc.spans) {
-    if (s.length <= 0) continue;
-    const prev = spans[spans.length - 1];
-    if (prev && prev.state === 'typed' && s.state === 'typed') prev.length += s.length;
-    else spans.push({ ...s });
-  }
-  return { text: doc.text, spans };
-}
-
-/** Start offset of each span (parallel array). */
-export function spanStarts(doc: Doc): number[] {
-  const starts: number[] = [];
-  let off = 0;
-  for (const s of doc.spans) {
-    starts.push(off);
-    off += s.length;
-  }
-  return starts;
-}
-
-export interface SpanRef {
-  index: number;
-  start: number;
-  end: number;
-  span: Span;
-}
-
-/** The linked/linked-modified span the caret is "in" for the edit-affordance
- *  chip: interior wins, then the span ending exactly at the caret, then the
- *  one starting there. Returns null over typed text. */
-export function linkedSpanAt(doc: Doc, caret: number): SpanRef | null {
-  const starts = spanStarts(doc);
-  let atEnd: SpanRef | null = null;
-  let atStart: SpanRef | null = null;
-  for (let i = 0; i < doc.spans.length; i++) {
-    const span = doc.spans[i];
-    if (span.state === 'typed') continue;
-    const start = starts[i];
-    const end = start + span.length;
-    const ref = { index: i, start, end, span };
-    if (caret > start && caret < end) return ref;
-    if (caret === end) atEnd = ref;
-    if (caret === start && !atStart) atStart = ref;
-  }
-  return atEnd ?? atStart;
-}
-
-/** Text content of span `index`. */
-export function spanText(doc: Doc, index: number): string {
-  const start = spanStarts(doc)[index];
-  return doc.text.slice(start, start + doc.spans[index].length);
+  return normalize({ nodes: text ? [{ kind: 'text', text }] : [] });
 }
 
 /**
- * Insert a snippet's raw body text at `offset` as a fresh 'linked' span
- * ({var} tokens land verbatim — they resolve at copy time). Splitting a
- * linked span in two marks both halves linked-modified — the original snippet
- * no longer appears intact, which is exactly what that state signals.
- */
-export function insertSnippet(doc: Doc, offset: number, text: string, link: SpanLink): Doc {
-  if (!text) return doc;
-  const starts = spanStarts(doc);
-  const spans: Span[] = [];
-  let placed = false;
-  const newSpan: Span = { state: 'linked', length: text.length, link };
-
-  for (let i = 0; i < doc.spans.length; i++) {
-    const s = doc.spans[i];
-    const start = starts[i];
-    const end = start + s.length;
-    if (!placed && offset > start && offset < end) {
-      // Split this span around the insertion point.
-      const demote = s.state !== 'typed';
-      const state: SpanState = demote ? 'linked-modified' : s.state;
-      spans.push({ ...s, state, length: offset - start });
-      spans.push(newSpan);
-      spans.push({ ...s, state, length: end - offset });
-      placed = true;
-    } else {
-      if (!placed && offset === start) {
-        spans.push(newSpan);
-        placed = true;
-      }
-      spans.push({ ...s });
-    }
-  }
-  if (!placed) spans.push(newSpan); // offset === text.length (or empty doc)
-
-  return normalize({
-    text: doc.text.slice(0, offset) + text + doc.text.slice(offset),
-    spans,
-  });
-}
-
-/**
- * Insert a snippet's raw body over the range [start, end) as one 'linked' span:
- * clear the range (as a user deletion would), then drop the snippet in at
- * `start`. This is the one insert transform behind BOTH triggers (mouse click
- * and ↓-into-panel + Enter) — the query line the user typed to find the
- * snippet is scaffolding, so the inserted body replaces it rather than landing
- * after it (contract §Compose surface: "leaving the query in front is litter").
- * Composed from the tested primitives so the provenance state machine stays in
- * one place: clearing a range that clips a linked span marks the remainder
- * linked-modified, exactly as an equivalent hand-deletion would.
- */
-export function insertSnippetOverRange(
-  doc: Doc,
-  start: number,
-  end: number,
-  text: string,
-  link: SpanLink
-): Doc {
-  const cleared = end > start ? applyEdit(doc, start, end, '') : doc;
-  return insertSnippet(cleared, start, text, link);
-}
-
-/**
- * The general inline edit: replace [start, end) with `inserted` (user-typed
- * text). This is the provenance state machine's core transition table:
+ * Canonical form: no empty text nodes, no two adjacent text nodes, no duplicate
+ * chip ids.
  *
- * - Pure insertion strictly inside a span is absorbed by it; a linked span
- *   absorbing an edit becomes linked-modified (F1: inline edit diverges the
- *   span, never touches the stored snippet).
- * - Pure insertion at a span boundary is new typed text — typing at the edge
- *   of a linked span must not silently grow the snippet's claimed region.
- * - A replacement contained in one span (but not covering all of it) is an
- *   inline edit of that span: absorbed, linked → linked-modified.
- * - Replacing a span exactly and entirely removes it; the inserted text is
- *   typed (you replaced the snippet's text wholesale with your own).
- * - A range crossing span boundaries clips every overlapped span (a clipped
- *   linked span becomes linked-modified; fully covered spans are removed) and
- *   the inserted text lands as a new typed span at the cut.
+ * The duplicate-id sweep is a correctness guard, not tidiness. Copy/pasting a chip
+ * inside the box hands us the same `cid` twice; if both survived, `Use once` on one
+ * instance would silently rewrite the other — the very silent-divergence class this
+ * redesign exists to kill, arriving through the clipboard. The later copy keeps the
+ * body and gets a fresh identity, which is what a copy IS.
  */
-export function applyEdit(doc: Doc, start: number, end: number, inserted: string): Doc {
-  const text = doc.text.slice(0, start) + inserted + doc.text.slice(end);
-  const starts = spanStarts(doc);
-  const spans: Span[] = [];
+export function normalize(doc: Doc): Doc {
+  const nodes: Node[] = [];
+  const seen = new Set<string>();
 
-  const containerIdx = doc.spans.findIndex((s, i) => {
-    const s0 = starts[i];
-    const s1 = s0 + s.length;
-    return start === end
-      ? s0 < start && start < s1 // pure insertion: strictly interior only
-      : s0 <= start && end <= s1 && !(start === s0 && end === s1);
-  });
-
-  if (containerIdx >= 0) {
-    // Absorbed by one span.
-    for (let i = 0; i < doc.spans.length; i++) {
-      const s = doc.spans[i];
-      if (i !== containerIdx) {
-        spans.push({ ...s });
-        continue;
-      }
-      const newLen = s.length - (end - start) + inserted.length;
-      const state: SpanState = s.state === 'typed' ? 'typed' : 'linked-modified';
-      if (newLen > 0) spans.push({ ...s, state, length: newLen });
-    }
-    return normalize({ text, spans });
-  }
-
-  // Boundary insertion, whole-span replacement, or a cross-span range:
-  // clip overlapped spans, put `inserted` as typed text at the cut.
-  let insertedPlaced = false;
-  for (let i = 0; i < doc.spans.length; i++) {
-    const s = doc.spans[i];
-    const s0 = starts[i];
-    const s1 = s0 + s.length;
-
-    const keptLeft = Math.max(0, Math.min(start, s1) - s0);
-    const keptRight = Math.max(0, s1 - Math.max(end, s0));
-    const clipped = keptLeft + keptRight < s.length;
-
-    if (!insertedPlaced && s1 > start && keptLeft >= 0 && s0 <= start) {
-      // This span carries the cut point: left remainder, inserted, right remainder.
-      if (keptLeft > 0) {
-        const state: SpanState = clipped && s.state !== 'typed' ? 'linked-modified' : s.state;
-        spans.push({ ...s, state, length: keptLeft });
-      }
-      if (inserted) spans.push(typed(inserted.length));
-      insertedPlaced = true;
-      if (keptRight > 0) {
-        const state: SpanState = clipped && s.state !== 'typed' ? 'linked-modified' : s.state;
-        spans.push({ ...s, state, length: keptRight });
-      }
+  for (const n of doc.nodes) {
+    if (n.kind === 'text') {
+      if (!n.text) continue;
+      const prev = nodes[nodes.length - 1];
+      if (prev?.kind === 'text') prev.text += n.text;
+      else nodes.push({ ...n });
       continue;
     }
-
-    const kept = keptLeft + keptRight;
-    if (kept > 0) {
-      const state: SpanState = clipped && s.state !== 'typed' ? 'linked-modified' : s.state;
-      spans.push({ ...s, state, length: kept });
-    }
+    const cid = seen.has(n.cid) ? newCid() : n.cid;
+    seen.add(cid);
+    nodes.push({ ...n, cid });
   }
-  if (!insertedPlaced && inserted) spans.push(typed(inserted.length)); // append at doc end
-
-  return normalize({ text, spans });
-}
-
-/** Replace span `index`'s text and metadata wholesale (instance-mode Apply,
- *  placeholder re-fill, save-back relink). The caller decides the new state —
- *  this transform is mechanical. */
-export function replaceSpan(doc: Doc, index: number, newText: string, span: Omit<Span, 'length'>): Doc {
-  const starts = spanStarts(doc);
-  const start = starts[index];
-  const old = doc.spans[index];
-  const spans = doc.spans.map((s, i) =>
-    i === index ? ({ ...span, length: newText.length } as Span) : { ...s }
-  );
-  return normalize({
-    text: doc.text.slice(0, start) + newText + doc.text.slice(start + old.length),
-    spans,
-  });
-}
-
-/** Convert [start, end) into one linked span (F4: save-selection-as-snippet —
- *  the selection becomes a linked span pointing at the new snippet). Text is
- *  unchanged; overlapped spans are clipped (a clipped linked span keeps its
- *  own link but no longer appears intact → linked-modified). */
-export function linkRange(
-  doc: Doc,
-  start: number,
-  end: number,
-  link: SpanLink,
-  state: Exclude<SpanState, 'typed'> = 'linked'
-): Doc {
-  if (end <= start) return doc;
-  const starts = spanStarts(doc);
-  const spans: Span[] = [];
-  let placed = false;
-  for (let i = 0; i < doc.spans.length; i++) {
-    const s = doc.spans[i];
-    const s0 = starts[i];
-    const s1 = s0 + s.length;
-    const keptLeft = Math.max(0, Math.min(start, s1) - s0);
-    const keptRight = Math.max(0, s1 - Math.max(end, s0));
-    const clipped = keptLeft + keptRight < s.length;
-    if (keptLeft > 0) {
-      const state: SpanState = clipped && s.state !== 'typed' ? 'linked-modified' : s.state;
-      spans.push({ ...s, state, length: keptLeft });
-    }
-    if (!placed && s1 > start) {
-      spans.push({ state, length: end - start, link });
-      placed = true;
-    }
-    if (keptRight > 0) {
-      const state: SpanState = clipped && s.state !== 'typed' ? 'linked-modified' : s.state;
-      spans.push({ ...s, state, length: keptRight });
-    }
-  }
-  return normalize({ text: doc.text, spans });
+  return { nodes };
 }
 
 /**
- * The document's raw literal text — provenance is a span-level annotation,
- * never markup inside `text`. Copy Prompt feeds this through the variable
- * copy pipeline (compose/variables.ts); everything else (the match query,
- * the fill list) reads the same raw text. Named (rather than callers
- * reading .text) because it IS the "spans tile the text" promise.
+ * The composed prompt's raw text: typed text and each chip's CONTENT, in order.
+ *
+ * This is the seam where rendered and contributed diverge — the box shows a chip
+ * as a short label, and this returns its whole body. Everything downstream (the
+ * variable fill list, Copy Prompt) reads this, never the rendered form.
  */
 export function flatten(doc: Doc): string {
-  return doc.text;
+  return doc.nodes.map((n) => (n.kind === 'text' ? n.text : n.content)).join('');
 }
 
-/** The live-match query for a caret position: what you're typing right now =
- *  the current line up to the caret (trimmed, tail-capped so one long line
- *  doesn't swamp the matcher). */
-export function caretQuery(text: string, caret: number, cap = 120): string {
-  const upto = text.slice(0, Math.max(0, Math.min(caret, text.length)));
+/** The chip with this id, or undefined. */
+export function chipAt(doc: Doc, cid: string): ChipNode | undefined {
+  const n = doc.nodes.find((node) => node.kind === 'chip' && node.cid === cid);
+  return n?.kind === 'chip' ? n : undefined;
+}
+
+/** The variable names a chip's body uses — the chip's label shows these, and its
+ *  popup fills exactly these. Derived from the body, never stored: the body is the
+ *  single source of truth, and a stored copy could only drift from it. */
+export function chipVariables(chip: ChipNode): string[] {
+  return parseVariables(chip.content).map((v) => v.name);
+}
+
+/**
+ * Where a caret sits.
+ *
+ * `node` indexes doc.nodes. If that node is TEXT, `offset` is the character
+ * offset within it. If it is a CHIP — or `node` is past the end — the caret is
+ * an insertion point *before* that index, with no text to split. Both cases are
+ * real: a caret genuinely can sit between two adjacent chips, where the model
+ * holds no text node at all.
+ *
+ * Chips are atomic, so a caret is never *inside* one.
+ */
+export interface Caret {
+  node: number;
+  offset: number;
+}
+
+/**
+ * Insert a snippet as a chip, replacing the query line the user typed to find it
+ * (from the start of the caret's line up to the caret).
+ *
+ * The query was scaffolding — the user typed "senior review" only to summon the
+ * snippet, so leaving it sitting in front of the inserted chip is litter. This is
+ * the single insert path behind both triggers: clicking a match, and ↓-into-panel
+ * then Enter.
+ */
+export function insertChip(doc: Doc, caret: Caret, chip: Omit<ChipNode, 'kind'>): Doc {
+  const at = Math.max(0, Math.min(caret.node, doc.nodes.length));
+  const node = doc.nodes[at];
+  const chipNode: ChipNode = { kind: 'chip', ...chip };
+
+  // The caret sits between nodes (before a chip, or past the end): there is no
+  // query text to consume, so just land the chip there.
+  if (!node || node.kind !== 'text') {
+    return normalize({
+      nodes: [...doc.nodes.slice(0, at), chipNode, ...doc.nodes.slice(at)],
+    });
+  }
+
+  const offset = Math.max(0, Math.min(caret.offset, node.text.length));
+  const lineStart = node.text.lastIndexOf('\n', offset - 1) + 1;
+
+  return normalize({
+    nodes: [
+      ...doc.nodes.slice(0, at),
+      { kind: 'text', text: node.text.slice(0, lineStart) },
+      chipNode,
+      { kind: 'text', text: node.text.slice(offset) },
+      ...doc.nodes.slice(at + 1),
+    ],
+  });
+}
+
+/** Replace a chip's body — `Use once` (this prompt only, nothing written to the
+ *  library) and the popup's Save (which also wrote the file). */
+export function replaceChipContent(doc: Doc, cid: string, content: string): Doc {
+  return normalize({
+    nodes: doc.nodes.map((n) => (n.kind === 'chip' && n.cid === cid ? { ...n, content } : n)),
+  });
+}
+
+/** Retarget a chip at a different snippet — the popup's Save under a NEW name,
+ *  which created a new file. The chip now reflects the snippet it actually is. */
+export function retargetChip(doc: Doc, cid: string, name: string, content: string): Doc {
+  return normalize({
+    nodes: doc.nodes.map((n) => (n.kind === 'chip' && n.cid === cid ? { ...n, name, content } : n)),
+  });
+}
+
+/**
+ * Dissolve a chip into plain typed text, keeping its body.
+ *
+ * This is what the popup's `Delete` does to the chip it was opened from: the file
+ * is removed from the library, and the words stay in the prompt. Deleting a library
+ * entry must not silently mutilate the prompt someone is in the middle of writing —
+ * the link is gone; the writing is theirs. It also leaves no chip pointing at a
+ * snippet that no longer exists.
+ *
+ * (Removing a chip *from the prompt* needs no transform: it is an atom, so
+ * Backspace already does exactly that.)
+ */
+export function dissolveChip(doc: Doc, cid: string): Doc {
+  return normalize({
+    nodes: doc.nodes.map(
+      (n): Node => (n.kind === 'chip' && n.cid === cid ? { kind: 'text', text: n.content } : n)
+    ),
+  });
+}
+
+// ── the contenteditable seam ─────────────────────────────────────────────────
+// The box renders these and reads them back. Keeping both directions as pure
+// functions over plain data — rather than letting the component walk the DOM
+// straight into state — is what makes the round-trip testable:
+//
+//     doc → toRenderNodes → (DOM) → fromRawNodes → doc
+//
+// must be the identity. If it is not, a user's prompt silently corrupts into
+// something that still LOOKS plausible in the box and copies out wrong.
+
+/** What the box renders for one node. A chip shows its name and its variables —
+ *  never its body. The founder's reasoning: "I rarely read it. If I want to read
+ *  it, it means I want to edit it. And if I want to edit it, I'd click into it."
+ *  Body text in the box is clutter serving no reader. */
+export type RenderNode =
+  | { kind: 'text'; text: string }
+  | { kind: 'chip'; cid: string; name: string; vars: string[] };
+
+export function toRenderNodes(doc: Doc): RenderNode[] {
+  return doc.nodes.map((n) =>
+    n.kind === 'text'
+      ? { kind: 'text' as const, text: n.text }
+      : { kind: 'chip' as const, cid: n.cid, name: n.name, vars: chipVariables(n) }
+  );
+}
+
+/** One child of the contenteditable, read back off the DOM: either a chip element
+ *  (identified by its `data-cid`) or a run of text. */
+export interface RawNode {
+  /** The element's data-cid, or null for a plain text run. */
+  cid: string | null;
+  text: string;
+}
+
+/** Zero-width space. The renderer pads around chips with one so the browser always
+ *  has somewhere to put a caret — a chip at the very start or end of the box, or two
+ *  adjacent chips, otherwise leave nowhere to click. It is display scaffolding, never
+ *  content: stripped on the way back in, so it can never reach a copied prompt. */
+export const ZWSP = '​';
+
+/**
+ * Rebuild the Doc from what the DOM now holds, carrying each surviving chip's body
+ * across by `cid`.
+ *
+ * Reading the DOM back wholesale — rather than intercepting each edit and patching
+ * the model — is what makes this robust. Typing, paste, cut, drag, undo, IME
+ * composition and every other inputType all arrive here as "the box now contains
+ * this", with no per-event transition table to get wrong. The browser gives chips
+ * atomicity for free (they are contenteditable="false"), so a chip either survives
+ * an edit intact or is gone entirely.
+ *
+ * A chip whose `cid` is unknown to `prev` is DROPPED, not coerced into text: its body
+ * lives only in the model, so there is nothing faithful to put in its place, and
+ * rendering its label instead would silently substitute the words "code_review" for
+ * the code-review prompt itself. (In practice this only arises if a chip element is
+ * pasted in from outside the box.)
+ */
+export function fromRawNodes(raw: RawNode[], prev: Doc): Doc {
+  const byCid = new Map(
+    prev.nodes.filter((n): n is ChipNode => n.kind === 'chip').map((n) => [n.cid, n])
+  );
+
+  const nodes: Node[] = [];
+  for (const r of raw) {
+    if (r.cid === null) {
+      nodes.push({ kind: 'text', text: r.text.replaceAll(ZWSP, '') });
+      continue;
+    }
+    const chip = byCid.get(r.cid);
+    if (chip) nodes.push({ ...chip });
+    // Unknown cid → dropped (see doc comment).
+  }
+  // normalize() re-issues a duplicate cid — that is how a copy/pasted chip becomes
+  // its own instance rather than a shared one.
+  return normalize({ nodes });
+}
+
+/**
+ * The live-match query for a caret: what you are typing right now — the current line
+ * of the caret's text node, up to the caret. Tail-capped so one very long line cannot
+ * swamp the matcher.
+ *
+ * A chip ends the query by construction (it is a different node), which is the
+ * behavior we want: having just inserted a snippet, you are not still querying for
+ * one.
+ */
+export function caretQuery(text: string, offset: number, cap = 120): string {
+  const upto = text.slice(0, Math.max(0, Math.min(offset, text.length)));
   const lineStart = upto.lastIndexOf('\n') + 1;
   const line = upto.slice(lineStart).trim();
   return line.length > cap ? line.slice(line.length - cap) : line;
-}
-
-/**
- * Minimal-diff between two texts as a single replacement: returns the range
- * [start, end) in `oldText` and the `inserted` replacement from `newText`.
- * Used by the compose box to translate a textarea `input` event (any
- * inputType — typing, paste, cut, undo, IME) into one applyEdit call: common
- * prefix/suffix trimming is deterministic and covers every mutation the
- * browser can make in one event. Returns null when the texts are equal.
- */
-export function diffTexts(
-  oldText: string,
-  newText: string
-): { start: number; end: number; inserted: string } | null {
-  if (oldText === newText) return null;
-  let p = 0;
-  const maxP = Math.min(oldText.length, newText.length);
-  while (p < maxP && oldText[p] === newText[p]) p++;
-  let so = oldText.length;
-  let sn = newText.length;
-  while (so > p && sn > p && oldText[so - 1] === newText[sn - 1]) {
-    so--;
-    sn--;
-  }
-  return { start: p, end: so, inserted: newText.slice(p, sn) };
 }

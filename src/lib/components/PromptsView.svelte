@@ -1,60 +1,46 @@
 <script lang="ts">
   /**
-   * Prompts — the Prompt Library view (issue #24, Round-B UX pass). Scope tabs
-   * on top (Global + pinned projects — the active tab drives match pool, save
-   * scope, and tint) with the app-level config gear at their right end; the
-   * compose box is the primary surface with situational affordances; the
-   * library/match panel sits left and collapses for a distraction-free box.
-   * Orchestrates the snippet modal, Save as…, the view-scoped hotkeys, the
-   * ↓-into-panel keyboard bridge, and the toast stack.
+   * Prompts — the Prompt Library view. Project tabs on top (a project is a name
+   * and a folder); the compose box is the primary surface; the library panel
+   * sits left, lists the active project's snippets, and collapses for a
+   * distraction-free box. Orchestrates the snippet modal, Save as…, the two
+   * fixed hotkeys, the ↓-into-panel keyboard bridge, and the toast stack.
+   *
+   * There is no scope and no tint: a snippet lives in the folder it sits in, so
+   * "which project does this save to?" has exactly one answer — the active one.
    */
   import { onDestroy, onMount } from 'svelte';
-  import type { Snippet, SnippetScope } from '$lib/prompts/types';
+  import type { Snippet } from '$lib/prompts/types';
   import {
     prompts,
     initPrompts,
     disposePrompts,
-    activeProject,
     composeInsertSnippet,
     copyOutput,
-    resolvedHotkeys,
+    touchSnippet,
   } from '$lib/prompts.svelte';
-  import { projectColorVar } from '$lib/prompts/palette';
+  import { chipAt } from '$lib/compose/doc';
   import { copyToClipboard } from '$lib/copy';
   import { toasts } from '$lib/prompts/toasts.svelte';
-  import { HOTKEY_COMMANDS, eventMatchesChord } from '$lib/prompts/hotkeys';
   import ComposeBox from './prompts/ComposeBox.svelte';
   import MatchPanel from './prompts/MatchPanel.svelte';
   import SnippetModal, { type SnippetModalContext } from './prompts/SnippetModal.svelte';
   import ProjectTabs from './prompts/ProjectTabs.svelte';
   import ProjectManagerPopover from './prompts/ProjectManagerPopover.svelte';
-  import ConfigPopover from './prompts/ConfigPopover.svelte';
 
   let panelCollapsed = $state(false);
   let managerOpen = $state(false);
-  let configOpen = $state(false);
   let modalContext = $state<SnippetModalContext | null>(null);
   /** MatchPanel instance — only its exported focusFirst() is called (the ↓ step
    *  into the panel). A structural type avoids the component-instance gymnastics. */
   let matchPanel = $state<{ focusFirst: () => boolean } | undefined>(undefined);
+  /** ComposeBox instance. The box owns the selection, so the view reaches in for
+   *  the two things that need it: the Mod+S save and the Esc-back-to-box focus. */
+  let composeBox = $state<{ saveAs: () => void; focus: () => void } | undefined>(undefined);
 
-  const hasSelection = $derived(prompts.selEnd > prompts.selStart);
   /** True while a modal or popover owns the keyboard — the view-scoped hotkeys
-   *  disarm so a rebind capture or a modal keystroke never triggers a command. */
-  const keyboardCaptured = $derived(modalContext !== null || managerOpen || configOpen);
-
-  /** The active tab's hue enters the CSS world here, once — everything below
-   *  styles with color-mix over --project-color (unset on Global). */
-  const tintStyle = $derived.by(() => {
-    const active = activeProject();
-    return active ? `--project-color: ${projectColorVar(active.color)}` : '';
-  });
-
-  /** The active tab as a save scope — the default target for a hotkey Save as… */
-  function activeScope(): SnippetScope {
-    const active = activeProject();
-    return active ? { kind: 'project', project_id: active.id } : { kind: 'global' };
-  }
+   *  disarm so a modal keystroke never triggers a command. */
+  const keyboardCaptured = $derived(modalContext !== null || managerOpen);
 
   onMount(() => {
     initPrompts();
@@ -65,32 +51,37 @@
     window.removeEventListener('keydown', onWindowKeydown);
   });
 
-  // ── insert flow: one path, the raw body replaces the query line ──────────────
-  function handleInsert(snippet: Snippet): void {
-    composeInsertSnippet(snippet);
+  // ── insert flow: one path, the chip replaces the query line ──────────────────
+  async function handleInsert(snippet: Snippet): Promise<void> {
+    composeInsertSnippet(snippet.name, snippet.content);
+    // Using a snippet is the ONLY thing that feeds the at-rest sort, so the
+    // insert path is where it has to be recorded — this is what makes the panel
+    // open on what you actually reach for.
+    await touchSnippet(snippet.name);
   }
 
-  // ── snippet modal ────────────────────────────────────────────────────────────
-  function openSpan(spanIndex: number): void {
-    modalContext = { kind: 'span', spanIndex };
+  // ── the popup: two entrances, one surface ────────────────────────────────────
+  // Clicking a chip, or saving typed text. Those are the only two ways a snippet
+  // body is ever edited — which is the whole point of the redesign.
+
+  /** Clicking a chip. The doc holds the chip's current name and content, so the
+   *  popup opens on what the box actually shows. */
+  function openChip(cid: string): void {
+    const chip = chipAt(prompts.doc, cid);
+    if (chip === undefined) return; // deleted out from under the click
+    modalContext = { cid, name: chip.name, content: chip.content };
   }
 
-  /** Save as… — selection-aware (contract §S5/S6). With a selection, save it
-   *  (it becomes a linked span). With none, save the whole box as a fresh
-   *  snippet WITHOUT linking the draft (no range) — "save what I wrote". Either
-   *  way the modal opens pre-scoped to `scope`. */
-  function saveAs(scope: SnippetScope): void {
-    if (hasSelection) {
-      modalContext = {
-        kind: 'new',
-        selStart: prompts.selStart,
-        selEnd: prompts.selEnd,
-        selectionText: prompts.doc.text.slice(prompts.selStart, prompts.selEnd),
-        scope,
-      };
-    } else if (prompts.doc.text.length > 0) {
-      modalContext = { kind: 'new', selectionText: prompts.doc.text, scope };
+  /** Save typed text as a snippet. ComposeBox resolved selection-vs-whole-box
+   *  before calling — it owns the selection, so it is the only place that can
+   *  answer "what did the user mean to save?" without a second, drifting copy. */
+  function saveAsSnippet(text: string): void {
+    if (prompts.activeProjectPath === null) {
+      toasts.push('Add a prompt folder first — ⋯ above the compose box.');
+      return;
     }
+    if (text.length === 0) return;
+    modalContext = { content: text };
   }
 
   // ── Copy Prompt ──────────────────────────────────────────────────────────────
@@ -99,16 +90,14 @@
     toasts.push(ok ? 'Prompt copied.' : 'Copy failed — select the text manually.');
   }
 
-  // ── view-scoped hotkeys (contract §Hotkey map) ───────────────────────────────
-  /** Is a text-entry element focused right now? These hotkeys fire from a window
-   *  listener, so the guard must reason about where focus actually is — not the
-   *  compose box's stored selection, which goes stale the moment focus leaves it
-   *  (e.g. into a variable fill input). */
-  function textEntryFocused(): boolean {
-    const el = document.activeElement;
-    if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) return true;
-    return el instanceof HTMLElement && el.isContentEditable;
-  }
+  // ── view-scoped hotkeys — fixed, not rebindable ──────────────────────────────
+  // Two commands, two constants: Mod+C copies the composed prompt, Mod+S saves
+  // as a snippet ("Mod" = Ctrl on Windows/Linux, Cmd on macOS). Rebinding was cut
+  // (contract §Cuts) — nobody ever rebound them, and the capture/conflict UI cost
+  // ~410 lines to defend a capability with no users. Both chords carry Mod by
+  // construction now, so the old "a hand-edited config bound a bare key, don't
+  // steal a keystroke a text field would insert" backstop has nothing left to
+  // defend against and is gone with it.
 
   /** Does native copy have something to act on, wherever focus is? A text-entry
    *  element's own non-collapsed selection, or a non-collapsed document
@@ -131,37 +120,33 @@
 
   function onWindowKeydown(e: KeyboardEvent): void {
     if (keyboardCaptured) return; // a modal/popover owns the keyboard
-    const keys = resolvedHotkeys();
-    const command = HOTKEY_COMMANDS.find((c) => eventMatchesChord(e, keys[c]));
-    if (!command) return;
-    // Dispatch-time backstop (defense in depth): a chord without Ctrl/Cmd is a
-    // plain keystroke a focused text field would insert — never steal it, even
-    // if a hand-edited config bound a command to a bare key. The capture UI and
-    // resolveHotkeys forbid such a binding, but the dispatcher must not depend
-    // on that being the only line of defense (a bricked compose box is the cost).
-    if (!(e.ctrlKey || e.metaKey) && textEntryFocused()) return;
-    if (command === 'copyPrompt') {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    const key = e.key.toLowerCase();
+    if (key === 'c') {
       // Selection-aware (JC-4 / §S9): native copy owns Ctrl/Cmd+C whenever
       // anything is selected where focus actually is; we claim only the empty
-      // key-space the OS leaves us when nothing is selected anywhere.
+      // key-space the OS leaves us when nothing is selected anywhere. Without
+      // this, Copy Prompt would hijack a copy out of a variable fill input.
       if (nativeSelectionActive()) return;
       e.preventDefault();
       void copyPrompt();
       return;
     }
-    // saveAs — the browser owns Ctrl/Cmd+S.
-    e.preventDefault();
-    saveAs(activeScope());
+    if (key === 's') {
+      // saveAs — the browser owns Ctrl/Cmd+S, so we take it. Delegated to the
+      // box because the box owns the selection this acts on.
+      e.preventDefault();
+      composeBox?.saveAs();
+    }
   }
 </script>
 
-<div class="prompts-view" style={tintStyle}>
+<div class="prompts-view">
   <div class="prompts-view__tabs">
     <div class="prompts-view__tabrow">
       <div class="prompts-view__tabrow-tabs">
         <ProjectTabs onOpenManager={() => (managerOpen = !managerOpen)} />
       </div>
-      <ConfigPopover bind:open={configOpen} />
     </div>
     {#if managerOpen}
       <ProjectManagerPopover onClose={() => (managerOpen = false)} />
@@ -196,23 +181,28 @@
             ⟨
           </button>
         </div>
-        <MatchPanel bind:this={matchPanel} onInsert={handleInsert} onEscape={() => prompts.focusNonce++} />
+        <MatchPanel bind:this={matchPanel} onInsert={handleInsert} onEscape={() => composeBox?.focus()} />
       </aside>
     {/if}
 
     <section class="prompts-view__compose">
       <ComposeBox
-        onOpenSpan={openSpan}
+        bind:this={composeBox}
+        onOpenChip={openChip}
         onCopy={copyPrompt}
-        onSaveAs={saveAs}
+        onSaveAsSnippet={saveAsSnippet}
         onStepIntoPanel={() => matchPanel?.focusFirst() ?? false}
       />
     </section>
   </div>
 </div>
 
-{#if modalContext}
-  <SnippetModal context={modalContext} onClose={() => (modalContext = null)} />
+{#if modalContext && prompts.activeProjectPath !== null}
+  <SnippetModal
+    context={modalContext}
+    project={prompts.activeProjectPath}
+    onClose={() => (modalContext = null)}
+  />
 {/if}
 
 {#if toasts.items.length}

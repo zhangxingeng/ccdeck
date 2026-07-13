@@ -1,9 +1,16 @@
 /**
- * Toast store — the transient half of the notification model (contract
- * project_docs/prompts-ux.md §S13). Every toast auto-dismisses after 5 seconds:
- * confirmations (copy succeeded, snippet saved) simply vanish, and data events
- * (a JSON auto-repair) flash here too but ALSO leave a durable Notice (see
- * notices.ts) so the transient surface is never their only record.
+ * Toast store — the *whole* notification model, not half of one (contract
+ * project_docs/prompts-ux.md §Conventions). Toasts are transient by design:
+ * every one auto-dismisses after 5 seconds and nothing durable hides in one, so
+ * missing a toast costs the user nothing.
+ *
+ * That is a constraint on callers, not just a description: only ever toast a
+ * confirmation of something the user just did (copied, saved). If you find
+ * yourself wanting a toast for something the user must act on later, the toast
+ * is the wrong surface — the durable-notice tier it would need was cut in 0.13
+ * along with the schema-repair events that were its only producer, and a
+ * "you'll want to know this" message that self-destructs in 5 seconds is worse
+ * than no message.
  *
  * Function-based factory (stack/svelte/design_protocol) so the reactive array
  * survives the export boundary; timers live in a closure and are cleared on
@@ -15,7 +22,7 @@ export interface Toast {
   text: string;
 }
 
-/** Contract §S13: "Every toast auto-dismisses after 5 seconds." */
+/** Contract §Conventions: "Toasts are transient — 5 seconds, or click to dismiss." */
 const TOAST_TTL_MS = 5000;
 
 function createToasts() {

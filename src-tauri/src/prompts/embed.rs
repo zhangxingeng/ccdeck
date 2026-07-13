@@ -1,20 +1,37 @@
-//! The opt-in semantic path: a pinned embedding model + a pinned ONNX Runtime
-//! shared library, both downloaded ONLY when the user clicks Download (never
-//! at install, never silently), verified against hardcoded sha256 checksums
-//! BEFORE any use, then loaded via ort's dynamic loading.
+//! The semantic path: a pinned embedding model + a pinned ONNX Runtime shared
+//! library, fetched over the network, verified against hardcoded sha256
+//! checksums BEFORE any use, then loaded via ort's dynamic loading.
+//!
+//! **There is no opt-in, and no UI. `state::spawn_background_index` downloads
+//! these artifacts silently on launch, with no user action.** Do not add a
+//! prompt, a toggle, or a progress bar back: the silence is the design, and it
+//! is honest for one specific reason. Lexical match (`lexical.rs`) is
+//! unconditional and instant, so the download blocks nothing and a failure —
+//! slow network, dead mirror, unsupported platform — degrades to a *fully
+//! working* app with better-than-nothing ranking. Semantic match improves the
+//! order of results; it is never a prerequisite for having them. Asking a user
+//! to approve something that can only make their search better, and whose
+//! failure they will never feel, is a decision with no wrong answer — which is
+//! a decision not worth taking someone's attention for. (That trade is what
+//! makes it honest rather than sneaky: silence would be indefensible the moment
+//! anything here *blocked* a user or degraded a result they'd otherwise get.)
 //!
 //! Why dynamic loading (Gate-1 ruling, issue #24): fastembed's default
 //! statically links a 15-30MB ONNX Runtime into every shipped binary. With
-//! `ort-load-dynamic` non-opted users pay only a few MB of glue; the runtime
-//! arrives as a separate, checksummed, user-approved download. A failed or
-//! missing runtime degrades to lexical-only — never blocks the app.
+//! `ort-load-dynamic` the shipped binary carries only a few MB of glue and the
+//! runtime arrives separately and checksummed — so a platform we have no
+//! runtime build for, or a machine that never reaches the network, pays nothing
+//! and still runs. A failed or missing runtime degrades to lexical-only; it can
+//! never block the app.
 //!
-//! Security posture: downloading native code is an RCE vector if done
-//! sloppily. Every artifact here has a pinned exact version/revision and a
-//! hardcoded sha256 computed from the official source (Microsoft's GitHub
-//! release for the runtime, the fastembed-blessed Hugging Face repo at a
-//! pinned revision for the model). A checksum mismatch deletes the file and
-//! reports error state — it never loads.
+//! Security posture — this is the part the background download raises the
+//! stakes on: fetching native code is an RCE vector if done sloppily, and here
+//! nobody is watching it happen. Every artifact has a pinned exact
+//! version/revision and a hardcoded sha256 computed from the official source
+//! (Microsoft's GitHub release for the runtime, the fastembed-blessed Hugging
+//! Face repo at a pinned revision for the model). Bytes that fail the checksum
+//! are discarded and never written, and nothing is loaded that was not verified
+//! first — so a compromised mirror gets an error in the log, not execution.
 
 use std::fs;
 use std::io::Read;
@@ -26,7 +43,6 @@ use fastembed::{
     UserDefinedEmbeddingModel,
 };
 use rusqlite::Connection;
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::store::Snippet;
@@ -39,41 +55,24 @@ pub const MODEL_ID: &str = "Qdrant/bge-small-en-v1.5-onnx-Q";
 /// Pinned HF revision — URLs below are immutable snapshots, not `main`.
 const MODEL_REVISION: &str = "52398278842ec682c6f32300af41344b1c0b0bb2";
 
-/// (filename, sha256, exact byte size) of every model artifact, verified
-/// after download. Sizes are pinned like the hashes (immutable revision) —
-/// they let the "model" progress stage report one fixed total across all
-/// five files instead of restarting per file.
-const MODEL_FILES: &[(&str, &str, u64)] = &[
-    ("model_optimized.onnx", "51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431", 66_465_124),
-    ("tokenizer.json", "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66", 711_396),
-    ("config.json", "13582bcf2effc85b7bf3d3f5532e686bc1c9ce86bb009d10f0ec33cbe92299dd", 706),
-    ("special_tokens_map.json", "5d5b662e421ea9fac075174bb0688ee0d9431699900b90662acd44b2a350503a", 695),
-    ("tokenizer_config.json", "0b29c7bfc889e53b36d9dd3e686dd4300f6525110eaa98c76a5dafceb2029f53", 1_242),
+/// (filename, sha256) of every model artifact, verified after download.
+const MODEL_FILES: &[(&str, &str)] = &[
+    ("model_optimized.onnx", "51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431"),
+    ("tokenizer.json", "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"),
+    ("config.json", "13582bcf2effc85b7bf3d3f5532e686bc1c9ce86bb009d10f0ec33cbe92299dd"),
+    ("special_tokens_map.json", "5d5b662e421ea9fac075174bb0688ee0d9431699900b90662acd44b2a350503a"),
+    ("tokenizer_config.json", "0b29c7bfc889e53b36d9dd3e686dd4300f6525110eaa98c76a5dafceb2029f53"),
 ];
-
-/// Total bytes of the "model" download stage.
-fn model_total_bytes() -> u64 {
-    MODEL_FILES.iter().map(|(_, _, size)| size).sum()
-}
-
-/// Model download size for up-front disclosure — decimal MB, derived from the
-/// pinned byte sizes so it can never drift from them, and the same unit as
-/// [`runtime_size_mb`] (audit N1: the two are shown side by side to the user).
-pub fn model_size_mb() -> u32 {
-    (model_total_bytes() / 1_000_000) as u32
-}
 
 /// Pinned ONNX Runtime release (ort 2.0.0-rc.12 is designed for 1.24.x).
 const ORT_VERSION: &str = "1.24.4";
 
-/// One platform's runtime artifact: the official Microsoft release archive,
-/// its sha256, the shared library's path inside the archive, and the exact
-/// archive byte size (progress total + up-front size disclosure).
+/// One platform's runtime artifact: the official Microsoft release archive, its
+/// sha256, and the shared library's path inside the archive.
 struct OrtArtifact {
     archive: &'static str,
     sha256: &'static str,
     lib_in_archive: &'static str,
-    download_bytes: u64,
 }
 
 /// The runtime artifact for the platform this binary was built for. `None` on
@@ -84,21 +83,18 @@ const ORT_ARTIFACT: Option<OrtArtifact> = Some(OrtArtifact {
     archive: "onnxruntime-linux-x64-1.24.4.tgz",
     sha256: "3a211fbea252c1e66290658f1b735b772056149f28321e71c308942cdb54b747",
     lib_in_archive: "onnxruntime-linux-x64-1.24.4/lib/libonnxruntime.so.1.24.4",
-    download_bytes: 8_155_822,
 });
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const ORT_ARTIFACT: Option<OrtArtifact> = Some(OrtArtifact {
     archive: "onnxruntime-osx-arm64-1.24.4.tgz",
     sha256: "93787795f47e1eee369182e43ed51b9e5da0878ab0346aecf4258979b8bba989",
     lib_in_archive: "onnxruntime-osx-arm64-1.24.4/lib/libonnxruntime.1.24.4.dylib",
-    download_bytes: 30_937_282,
 });
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 const ORT_ARTIFACT: Option<OrtArtifact> = Some(OrtArtifact {
     archive: "onnxruntime-win-x64-1.24.4.zip",
     sha256: "d2319fddfb6ea4db99ccc4b60c85c517bcd855721f5daa6a06d40d7cb2ee2357",
     lib_in_archive: "onnxruntime-win-x64-1.24.4/lib/onnxruntime.dll",
-    download_bytes: 74_442_783,
 });
 #[cfg(not(any(
     all(target_os = "linux", target_arch = "x86_64"),
@@ -107,28 +103,9 @@ const ORT_ARTIFACT: Option<OrtArtifact> = Some(OrtArtifact {
 )))]
 const ORT_ARTIFACT: Option<OrtArtifact> = None;
 
-/// Progress event streamed over the `embed_download` Channel (contract):
-/// stage `runtime` (the ONNX Runtime archive, bytes), `model` (all five
-/// model files under one fixed byte total), then `index` (embedding the
-/// existing library, SNIPPET counts — emitted by the command's warm-up loop,
-/// so the popover's "Download & index" is literally what one click does).
-/// Completion and error are NOT channel events: the command's Result is the
-/// terminal signal and the frontend re-fetches `embed_status` afterward.
-#[derive(Debug, Clone, Serialize)]
-pub struct DownloadProgress {
-    pub stage: String, // "runtime" | "model" | "index"
-    pub done: u64,
-    pub total: u64,
-}
-
 /// Is semantic matching even possible on this build's platform?
 pub fn platform_supported() -> bool {
     ORT_ARTIFACT.is_some()
-}
-
-/// Archive download size for up-front disclosure (0 on unsupported platforms).
-pub fn runtime_size_mb() -> u32 {
-    ORT_ARTIFACT.as_ref().map(|a| (a.download_bytes / 1_000_000) as u32).unwrap_or(0)
 }
 
 fn models_dir(root: &Path) -> PathBuf {
@@ -152,7 +129,7 @@ pub fn artifacts_present(root: &Path) -> bool {
     let Some(lib) = runtime_lib_path(root) else {
         return false;
     };
-    lib.is_file() && MODEL_FILES.iter().all(|(name, _, _)| model_files_dir(root).join(name).is_file())
+    lib.is_file() && MODEL_FILES.iter().all(|(name, _)| model_files_dir(root).join(name).is_file())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -161,51 +138,23 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Download `url` streaming stage-accumulated progress to `on_progress`
-/// (`stage_base` = bytes this stage completed before this file), then verify
-/// the hardcoded checksum. A mismatch discards the bytes and errors — the
-/// caller never sees unverified content.
-fn download_verified(
-    url: &str,
-    expected_sha256: &str,
-    file: &str,
-    stage: &str,
-    stage_base: u64,
-    stage_total: u64,
-    on_progress: &dyn Fn(DownloadProgress),
-) -> Result<Vec<u8>, String> {
+/// Download `url` in full, then verify the hardcoded checksum. A mismatch
+/// discards the bytes and errors — the caller never sees unverified content,
+/// which is the invariant the whole security posture rests on.
+fn download_verified(url: &str, expected_sha256: &str, file: &str) -> Result<Vec<u8>, String> {
     let response = ureq::get(url).call().map_err(|e| format!("download of {file} failed: {e}"))?;
-    let mut reader = response.into_body().into_reader();
     let mut bytes: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 64 * 1024];
-    let mut last_emit: u64 = 0;
-    loop {
-        let n = reader.read(&mut chunk).map_err(|e| format!("download of {file} interrupted: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&chunk[..n]);
-        // Emit at most every 512KB — per-64KB events would flood the channel.
-        if bytes.len() as u64 - last_emit >= 512 * 1024 {
-            last_emit = bytes.len() as u64;
-            on_progress(DownloadProgress {
-                stage: stage.to_string(),
-                done: stage_base + last_emit,
-                total: stage_total,
-            });
-        }
-    }
+    response
+        .into_body()
+        .into_reader()
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("download of {file} interrupted: {e}"))?;
     let actual = sha256_hex(&bytes);
     if actual != expected_sha256 {
         return Err(format!(
             "checksum mismatch for {file} (expected {expected_sha256}, got {actual}); discarded"
         ));
     }
-    on_progress(DownloadProgress {
-        stage: stage.to_string(),
-        done: stage_base + bytes.len() as u64,
-        total: stage_total,
-    });
     Ok(bytes)
 }
 
@@ -253,10 +202,12 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
-/// The full Download-click flow: fetch + verify + install the runtime lib and
-/// every model file (skipping ones already present — the flow is resumable).
-/// Blocking; run it on a worker thread.
-pub fn download_artifacts(root: &Path, on_progress: &dyn Fn(DownloadProgress)) -> Result<(), String> {
+/// Fetch + verify + install the runtime lib and every model file, skipping the
+/// ones already on disk — so a run interrupted by a quit or a dead network
+/// resumes on the next launch instead of starting over. Blocking; the caller
+/// (`state::spawn_background_index`) runs it on a worker thread nothing waits
+/// for, and swallows nothing: a failure is logged and matching stays lexical.
+pub fn download_artifacts(root: &Path) -> Result<(), String> {
     let artifact = ORT_ARTIFACT
         .as_ref()
         .ok_or("Semantic match is not available on this platform (no ONNX Runtime build)")?;
@@ -266,30 +217,18 @@ pub fn download_artifacts(root: &Path, on_progress: &dyn Fn(DownloadProgress)) -
             "https://github.com/microsoft/onnxruntime/releases/download/v{ORT_VERSION}/{}",
             artifact.archive
         );
-        let archive = download_verified(
-            &url,
-            artifact.sha256,
-            artifact.archive,
-            "runtime",
-            0,
-            artifact.download_bytes,
-            on_progress,
-        )?;
+        let archive = download_verified(&url, artifact.sha256, artifact.archive)?;
         let lib = extract_lib(artifact, &archive)?;
         write_atomic(&lib_path, &lib)?;
     }
-    let stage_total = model_total_bytes();
-    let mut stage_base: u64 = 0;
-    for (name, sha, size) in MODEL_FILES {
+    for (name, sha) in MODEL_FILES {
         let dest = model_files_dir(root).join(name);
         if dest.is_file() {
-            stage_base += size; // resumable: already-present bytes count as done
             continue;
         }
         let url = format!("https://huggingface.co/{MODEL_ID}/resolve/{MODEL_REVISION}/{name}");
-        let bytes = download_verified(&url, sha, name, "model", stage_base, stage_total, on_progress)?;
+        let bytes = download_verified(&url, sha, name)?;
         write_atomic(&dest, &bytes)?;
-        stage_base += size;
     }
     Ok(())
 }
@@ -333,33 +272,36 @@ pub fn load_embedder(root: &Path) -> Result<TextEmbedding, String> {
 // prompts/ at any time — deliberately outside the hand-editable prompts dir.
 // ---------------------------------------------------------------------------
 
-/// The text a snippet is embedded from. Title carries strong signal; keywords
-/// add the user's own vocabulary; body carries the substance.
+/// The text a snippet is embedded from: its name (a hand-chosen label, strong
+/// signal) and its content (the substance).
 pub fn embedding_text(snippet: &Snippet) -> String {
-    format!("{}\n{}\n{}", snippet.title, snippet.keywords.join(" "), snippet.body)
+    format!("{}\n{}", snippet.name, snippet.content)
 }
 
-pub fn body_hash(snippet: &Snippet) -> String {
+pub fn content_hash(snippet: &Snippet) -> String {
     sha256_hex(embedding_text(snippet).as_bytes())
 }
 
+/// A snippet's cache identity is now `(project, name)` — there is no uuid to key
+/// on, and a bare name is not unique across projects.
 pub fn open_cache(root: &Path) -> Result<Connection, String> {
     let dir = root.join("cache");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let conn = Connection::open(dir.join("embeddings.sqlite")).map_err(|e| e.to_string())?;
-    // The `piece_id` column keeps its legacy name deliberately: the snippet
-    // rename stops at the storage boundary. Renaming it would need a schema
-    // migration under the founder's existing cache file (CREATE TABLE IF NOT
-    // EXISTS won't alter an existing table, so a `SELECT snippet_id` would
-    // then error on it) for zero user-visible gain — this cache is derived and
-    // internal. It maps 1:1 to `Snippet::id`.
+    // The legacy table was keyed by snippet uuid — an identity that no longer
+    // exists, so every row in it is unreachable. Dropping it is safe and correct:
+    // this cache is derived data, rebuildable from the .md files at any time.
+    // (`CREATE TABLE IF NOT EXISTS` cannot alter the old table's shape, so the
+    // new schema needs its own name regardless.)
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS embeddings (
-            piece_id  TEXT NOT NULL,
-            model_id  TEXT NOT NULL,
-            body_hash TEXT NOT NULL,
-            vector    BLOB NOT NULL,
-            PRIMARY KEY (piece_id, model_id)
+        "DROP TABLE IF EXISTS embeddings;
+         CREATE TABLE IF NOT EXISTS snippet_embeddings (
+            project      TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            model_id     TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            vector       BLOB NOT NULL,
+            PRIMARY KEY (project, name, model_id)
         );",
     )
     .map_err(|e| e.to_string())?;
@@ -374,45 +316,50 @@ fn blob_to_vector(b: &[u8]) -> Vec<f32> {
     b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 
-/// Bring the cache up to date for `snippets`: embed missing/stale entries (at
-/// most `limit` per call, so a huge hand-imported corpus warms up over a few
-/// queries instead of blocking one) and drop rows for deleted snippets.
-/// Returns how many snippets are still stale after this pass.
+/// Bring the cache up to date for **one project's** snippets: embed the
+/// missing/stale ones (at most `limit` per call, so a huge corpus warms up over
+/// a few queries instead of blocking one) and drop rows for snippets that no
+/// longer exist. Returns how many are still stale after this pass.
+///
+/// Every statement is scoped to `project`, and that scoping is load-bearing, not
+/// tidiness: the cleanup deletes cached rows that are absent from `snippets`, so
+/// an unscoped delete would wipe every *other* project's vectors on every query
+/// against this one. The corruption would be invisible — semantic match would
+/// just silently degrade to "slow sometimes" as each project re-embedded the
+/// library the last query threw away.
 pub fn ensure_embeddings(
     conn: &Connection,
     embedder: &mut TextEmbedding,
+    project: &str,
     snippets: &[Snippet],
     limit: usize,
 ) -> Result<usize, String> {
     let cached: Vec<(String, String)> = {
         let mut stmt = conn
-            .prepare("SELECT piece_id, body_hash FROM embeddings WHERE model_id = ?1")
+            .prepare(
+                "SELECT name, content_hash FROM snippet_embeddings WHERE project = ?1 AND model_id = ?2",
+            )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map([MODEL_ID], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .query_map((project, MODEL_ID), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
             .map_err(|e| e.to_string())?;
         rows.filter_map(|r| r.ok()).collect()
     };
-    // Drop rows for snippets that no longer exist.
-    let live: std::collections::HashSet<&str> = snippets.iter().map(|p| p.id.as_str()).collect();
-    for (piece_id, _) in cached.iter().filter(|(id, _)| !live.contains(id.as_str())) {
-        conn.execute("DELETE FROM embeddings WHERE piece_id = ?1 AND model_id = ?2", (piece_id, MODEL_ID))
-            .map_err(|e| e.to_string())?;
-    }
-    let is_fresh = |p: &&Snippet| {
-        cached
-            .iter()
-            .any(|(id, hash)| id == &p.id && hash == &body_hash(p))
-    };
-    let stale: Vec<&Snippet> = snippets.iter().filter(|p| !is_fresh(p)).collect();
+    let live: Vec<&str> = snippets.iter().map(|s| s.name.as_str()).collect();
+    prune_cache(conn, project, &live)?;
+    let is_fresh =
+        |s: &&Snippet| cached.iter().any(|(n, hash)| n == &s.name && hash == &content_hash(s));
+    let stale: Vec<&Snippet> = snippets.iter().filter(|s| !is_fresh(s)).collect();
     let batch: Vec<&Snippet> = stale.iter().take(limit).copied().collect();
     if !batch.is_empty() {
-        let texts: Vec<String> = batch.iter().map(|p| embedding_text(p)).collect();
+        let texts: Vec<String> = batch.iter().map(|s| embedding_text(s)).collect();
         let vectors = embedder.embed(texts, None).map_err(|e| e.to_string())?;
         for (snippet, vector) in batch.iter().zip(vectors) {
             conn.execute(
-                "INSERT OR REPLACE INTO embeddings (piece_id, model_id, body_hash, vector) VALUES (?1, ?2, ?3, ?4)",
-                (&snippet.id, MODEL_ID, body_hash(snippet), vector_to_blob(&vector)),
+                "INSERT OR REPLACE INTO snippet_embeddings (project, name, model_id, content_hash, vector) VALUES (?1, ?2, ?3, ?4, ?5)",
+                (project, &snippet.name, MODEL_ID, content_hash(snippet), vector_to_blob(&vector)),
             )
             .map_err(|e| e.to_string())?;
         }
@@ -420,16 +367,44 @@ pub fn ensure_embeddings(
     Ok(stale.len().saturating_sub(batch.len()))
 }
 
-/// All cached vectors for the current model — the in-memory pool the linear
-/// cosine scan runs over (microseconds at ≤10k snippets; no vector DB by design).
-pub fn cached_vectors(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>, String> {
+/// Drop this project's cached rows for snippets that no longer exist.
+///
+/// Split out from [`ensure_embeddings`] so the project scoping can be tested
+/// without a 67MB model in the loop — this is the statement where an omitted
+/// `project = ?1` would silently delete every other project's vectors.
+fn prune_cache(conn: &Connection, project: &str, live: &[&str]) -> Result<(), String> {
+    let cached: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT name FROM snippet_embeddings WHERE project = ?1 AND model_id = ?2")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map((project, MODEL_ID), |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    for name in cached.iter().filter(|name| !live.contains(&name.as_str())) {
+        conn.execute(
+            "DELETE FROM snippet_embeddings WHERE project = ?1 AND name = ?2 AND model_id = ?3",
+            (project, name, MODEL_ID),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// One project's cached vectors for the current model, keyed by snippet name —
+/// the in-memory pool the linear cosine scan runs over (microseconds at ≤10k
+/// snippets; no vector DB by design).
+pub fn cached_vectors(conn: &Connection, project: &str) -> Result<Vec<(String, Vec<f32>)>, String> {
     let mut stmt = conn
-        .prepare("SELECT piece_id, vector FROM embeddings WHERE model_id = ?1")
+        .prepare("SELECT name, vector FROM snippet_embeddings WHERE project = ?1 AND model_id = ?2")
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([MODEL_ID], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))
+        .query_map((project, MODEL_ID), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })
         .map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(|r| r.ok()).map(|(id, blob)| (id, blob_to_vector(&blob))).collect())
+    Ok(rows.filter_map(|r| r.ok()).map(|(name, blob)| (name, blob_to_vector(&blob))).collect())
 }
 
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -451,6 +426,57 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cache with two projects, each holding a snippet — including one that
+    /// shares a name across both, which is legal now that names are only unique
+    /// within a project.
+    fn seeded_cache() -> (PathBuf, Connection) {
+        let root = std::env::temp_dir().join(format!("ccdeck-embed-cache-{}", uuid::Uuid::new_v4()));
+        let conn = open_cache(&root).unwrap();
+        for (project, name) in
+            [("/a", "keep"), ("/a", "shared"), ("/a", "stale"), ("/b", "shared"), ("/b", "other")]
+        {
+            conn.execute(
+                "INSERT INTO snippet_embeddings (project, name, model_id, content_hash, vector) VALUES (?1, ?2, ?3, 'h', ?4)",
+                (project, name, MODEL_ID, vector_to_blob(&[1.0f32, 0.0])),
+            )
+            .unwrap();
+        }
+        (root, conn)
+    }
+
+    #[test]
+    fn pruning_one_project_never_touches_another_project_vectors() {
+        // The bug this guards: an unscoped DELETE would wipe every other
+        // project's cache on every query, and the damage would be invisible —
+        // semantic match would just present as "slow sometimes" forever as each
+        // project re-embedded the library the last query threw away.
+        let (root, conn) = seeded_cache();
+
+        prune_cache(&conn, "/a", &["keep", "shared"]).unwrap();
+
+        let a: Vec<String> = cached_vectors(&conn, "/a").unwrap().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(a, vec!["keep".to_string(), "shared".to_string()], "/a drops only its own stale row");
+
+        let mut b: Vec<String> =
+            cached_vectors(&conn, "/b").unwrap().into_iter().map(|(n, _)| n).collect();
+        b.sort();
+        assert_eq!(
+            b,
+            vec!["other".to_string(), "shared".to_string()],
+            "/b must be untouched — including its snippet that shares a name with one in /a"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn cached_vectors_are_scoped_to_one_project() {
+        let (root, conn) = seeded_cache();
+        assert_eq!(cached_vectors(&conn, "/a").unwrap().len(), 3);
+        assert_eq!(cached_vectors(&conn, "/b").unwrap().len(), 2);
+        assert!(cached_vectors(&conn, "/unknown").unwrap().is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn sha256_matches_known_vector() {
@@ -484,30 +510,23 @@ mod tests {
             "data:text/plain,x", // ureq rejects non-http schemes → download error path
             "00",
             "f",
-            "model",
-            0,
-            0,
-            &|_| {},
         )
         .unwrap_err();
         assert!(err.contains('f'));
     }
 
-    /// The whole opt-in flow against the real pinned URLs: download + verify
-    /// + extract + dynamically load ONNX Runtime + build the embedder + run
-    /// inference + rank by cosine. Network + ~75MB, so opt-in like the
-    /// feature itself: `cargo test --lib -- --ignored`. This is the guard
-    /// that the pinned URLs/checksums and the user-defined model wiring
-    /// (pooling, quantization) actually work — no unit test can fake it.
+    /// The whole semantic path against the real pinned URLs: download, verify,
+    /// extract, dynamically load ONNX Runtime, build the embedder, run
+    /// inference, rank by cosine. Network + ~75MB, so it is opt-in for the
+    /// *test runner* (`cargo test --lib -- --ignored`), not for the user. This
+    /// is the guard that the pinned URLs/checksums and the user-defined model
+    /// wiring (pooling, quantization) actually work — no unit test can fake it,
+    /// and nothing else catches a mirror that moved or a checksum that rotted.
     #[test]
     #[ignore = "network + ~75MB download; run explicitly with -- --ignored"]
-    fn full_opt_in_flow_downloads_loads_and_embeds() {
+    fn full_semantic_path_downloads_loads_and_embeds() {
         let root = std::env::temp_dir().join(format!("ccdeck-embed-e2e-{}", uuid::Uuid::new_v4()));
-        download_artifacts(&root, &|p| {
-            assert!(matches!(p.stage.as_str(), "runtime" | "model"), "download stages only here");
-            assert!(p.done <= p.total);
-        })
-        .expect("download + verify + extract");
+        download_artifacts(&root).expect("download + verify + extract");
         assert!(artifacts_present(&root));
 
         let mut embedder = load_embedder(&root).expect("dynamic load + model init");

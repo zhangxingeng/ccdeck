@@ -42,33 +42,33 @@ where you left off — or fork a brand-new session from any single message in it
 The best prompt you wrote last week is gone. You typed it, it worked, and it scrolled away.
 
 CC Deck gives it a home. Save any prompt — or any fragment of one — as a **snippet**, and it's
-waiting for you next time. Group snippets into colored **projects**, pin the ones you use, and keep
-a *writing* voice separate from a *code review* voice.
+waiting for you next time. Point CC Deck at a folder and that folder *is* a **project**: every
+Markdown file in it is a snippet, and subfolders group them, so keeping a *writing* voice separate
+from a *code review* voice is just `mkdir`.
 
-![A composed prompt built from color-coded snippets with fillable variables and per-variable defaults](project_docs/screenshots/prompt-compose.png)
+![A composed prompt built from snippets, with fillable variables](project_docs/screenshots/prompt-compose.png)
 
 Composing is where it comes together. Start typing, and matching snippets appear as you go; press
-`↓` and `Enter` and one drops into place. Each snippet keeps its own color, so you can see at a
-glance what came from where. Anything you write in `{curly braces}` becomes a **variable** you fill
-in at the end — `{ticket}`, `{task}`, or `{n:5}` with a default already set. Fill them once, and
-every mention updates. Then copy the whole thing and paste it wherever you're working.
+`↓` and `Enter` and one drops in as a **chip** — a solid block you can move and delete but never
+mangle by accident. Anything you write in `{curly braces}` becomes a **variable** you fill in at the
+end: `{ticket}`, `{task}`. Fill one once and every mention of it updates. Then copy the whole thing
+and paste it wherever you're working.
 
-You never have to touch the mouse. Type to search, arrow to choose, Enter to insert, `Ctrl+S` to
-save, `Ctrl+C` to copy — and if those aren't the keys you want, change them.
+You never have to touch the mouse: type to search, arrow to choose, Enter to insert, `Ctrl+S` to
+save, `Ctrl+C` to copy.
 
-<p align="center">
-  <img src="project_docs/screenshots/prompt-projects.png" alt="The project manager listing colored projects with pin, open, and delete actions" width="47%">
-  <img src="project_docs/screenshots/prompt-settings.png" alt="The settings panel showing file-repair notices, the optional local search model, and editable keyboard shortcuts" width="47%">
-</p>
+![The project manager listing prompt folders, with open and remove actions](project_docs/screenshots/prompt-projects.png)
 
-Search finds your snippets by spelling out of the box. If you want it to find them by *meaning* —
-so "fix a bug" turns up the snippet you titled `repro-first` — you can switch on a small local model
-with one click. It's about 115 MB, runs on your CPU, and works entirely offline. Nothing ever leaves
-your machine, and ordinary search keeps working whether you download it or not.
+Search finds your snippets by spelling out of the box, instantly. It also finds them by *meaning* —
+so "fix a bug" turns up the snippet you titled `repro-first`. That second half runs on a small local
+model that CC Deck fetches quietly in the background the first time you run it; there's nothing to
+turn on and nothing to wait for, because plain search works from the first keystroke whether the
+model ever arrives or not. It runs on your CPU, entirely offline, and your prompts are never sent
+anywhere.
 
-Your snippets are plain JSON files on your disk, one per snippet. Edit them in any text editor you
-like. If you make a typo in one, CC Deck repairs it in memory, tells you it did, and leaves your file
-exactly as you wrote it until you decide to save.
+Your snippets are plain Markdown files, in a folder you chose, on your disk — the filename *is* the
+snippet's name. Edit them in any text editor. Keep them in git and read the diffs. CC Deck never
+rewrites a file you didn't ask it to.
 
 ## Settings without the JSON
 
@@ -120,13 +120,16 @@ expected; here's how to get past it:
 ## Privacy / how it works
 
 CC Deck runs entirely on your local filesystem. It reads and writes the same session and settings
-files Claude Code already uses under `~/.claude/`, and keeps its own data (snippets, backups, search
-index) under `~/.ccdeck/`. Nothing is ever uploaded anywhere. The only network request CC Deck itself
-makes is checking for its own updates, and those update artifacts are cryptographically signed so you
-can trust they came from this project.
+files Claude Code already uses under `~/.claude/`, and keeps its own data (backups, search index)
+under `~/.ccdeck/`. Your snippets aren't in there at all — they live in the folder you chose, and
+they're yours. Nothing is ever uploaded anywhere.
 
-The optional semantic-search model is downloaded once, from Hugging Face, and then runs offline on
-your CPU forever after. Your prompts are never sent anywhere to be embedded.
+CC Deck makes exactly two kinds of network request, both to fetch, never to send: its own update
+check (those artifacts are cryptographically signed, so you can trust they came from this project),
+and a one-time download of the local semantic-search model, from Hugging Face and Microsoft's
+official ONNX Runtime release. Both of those are checksum-verified against hashes pinned in the
+source before anything is loaded. Afterwards the model runs offline on your CPU forever; your prompts
+are never sent anywhere to be embedded.
 
 ---
 
@@ -145,26 +148,33 @@ src/routes/ Svelte 5 — the UI (browse+search / view / edit / prompts / setting
 
 ### The Prompt Library, precisely
 
-Snippets are one hand-editable JSON file each, under `~/.ccdeck/prompts/`, with `id` canonical and
-the body as the single source of truth. A loader that can't parse a file repairs it **in memory**
-and never rewrites your disk; the repair persists only when you next save that snippet, and until
-then it's reported rather than swallowed.
+**The filesystem is the schema.** A snippet is a Markdown file whose filename is its name; its
+content is the prompt, and that's the whole model — no id, no metadata, no wrapper. A project is a
+name and a folder, and every `*.md` under it, recursively, is one of its snippets. So a snippet's
+name is its path (`rust/code_review`), grouping is `mkdir`, and "is this file valid?" isn't a
+question anyone can ask. The app is a viewer onto a folder it does not own: it writes back
+byte-exactly, and removing a project forgets a path without deleting a single file.
 
-Variables use a single-brace, f-string-flavored grammar: `{name}` or `{name:default}`, where a name
-is `[A-Za-z0-9_-]+` and `{{` escapes a literal brace. Anything else between braces — JSON examples in
-a prompt body, for instance — stays verbatim. The same name is the same variable everywhere in a
-composed document, so `{task}` fills once and updates everywhere. Rust and TypeScript implement this
-grammar independently and assert the same shared test vectors, because a seam like that is exactly
-where two sides drift apart.
+Variables are **a Python format string, and nothing more**: `{name}` where a name is
+`[A-Za-z0-9_-]+`, `{{` escapes a literal brace, and anything else in braces is literal because
+Python couldn't read it as a field either. The rule is uniform over the whole body — a `{name}`
+inside a code fence *is* a variable, deliberately, because "variables work everywhere, except inside
+backticks" is a rule you have to be told, and "it's a Python format string" is one you already know.
+One name is one variable document-wide, so `{task}` fills once and updates everywhere. An unfilled
+variable resolves to a sentinel that asks the model for it, so a forgotten one still produces a
+working prompt.
 
 On copy, each variable is either substituted in place or hoisted into a trailing `<prompt_vars>`
 block and referenced inline as `<prompt_var name="task"/>` — per variable, your choice, defaulting to
 hoisted. The point is to state a long value once instead of repeating it into a model's context every
 time it appears.
 
-Matching is lexical by default (fzf-style weighted scoring, always on) and hybrid when you opt into
-the embedding model. Design notes live in [`project_docs/prompts-design.md`](project_docs/prompts-design.md)
-(storage, schema, command surface) and [`project_docs/prompts-ux.md`](project_docs/prompts-ux.md)
+Matching is lexical always (fzf-style weighted scoring, instant, unconditional) and blends in
+semantic similarity once the local embedding model has quietly installed itself in the background.
+Semantic match improves the ranking; it is never a prerequisite for it, which is exactly why it can
+be silent — a download that is slow, failed, or impossible on this platform degrades to a fully
+working app. Design notes live in [`project_docs/prompts-design.md`](project_docs/prompts-design.md)
+(storage, grammar, command surface) and [`project_docs/prompts-ux.md`](project_docs/prompts-ux.md)
 (every interaction, key by key).
 
 ### Build from source
@@ -208,8 +218,8 @@ CC Deck makes is its own update check.
 **Does CC Deck replace Claude Code?** No — it's a control center *for* Claude Code. You still need
 Claude Code installed; CC Deck makes it easier to see, configure, and launch.
 
-**Where do my snippets live?** In `~/.ccdeck/prompts/`, one JSON file each. They're yours: readable,
-diffable, and safe to keep in git.
+**Where do my snippets live?** In whatever folder you point CC Deck at, one Markdown file each — the
+filename is the snippet's name. They're yours: readable, diffable, and safe to keep in git.
 
 **Will editing settings in CC Deck break something?** CC Deck writes exactly the tier you edit, in the
 same JSON format Claude Code reads — nothing is merged behind your back, and conflicts across tiers

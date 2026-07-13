@@ -13,7 +13,7 @@
     "tauri": "tauri",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
-    "test:smoke": "tsx tests/smoke.mjs && tsx tests/edit_smoke.mjs && tsx tests/edit_roundtrip_smoke.mjs && tsx tests/title_smoke.mjs && tsx tests/group_smoke.mjs && tsx tests/resume_provider_smoke.mjs && tsx tests/prompts_smoke.mjs && tsx tests/hotkeys_smoke.mjs && tsx tests/notices_smoke.mjs"
+    "test:smoke": "tsx tests/smoke.mjs && tsx tests/edit_smoke.mjs && tsx tests/edit_roundtrip_smoke.mjs && tsx tests/title_smoke.mjs && tsx tests/group_smoke.mjs && tsx tests/resume_provider_smoke.mjs && tsx tests/prompts_smoke.mjs"
   },
   "license": "MIT",
   "dependencies": {

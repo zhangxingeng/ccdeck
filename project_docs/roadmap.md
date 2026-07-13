@@ -685,6 +685,94 @@ no install needs a migration).
 - Chord validation requires Ctrl/Cmd specifically rather than any modifier — a deliberate
   narrowing, one line to loosen if it proves too strict.
 
+*(Superseded by Phase 17 — #25 was closed as **cut**, not built; the project `path` field became the
+project's identity; hotkey chords stopped being configurable at all.)*
+
+## Phase 17 — Prompt Library subtraction: a snippet is a Markdown file (built on `prompt-simplify`, targets v0.13.0, closes #31)
+
+The Prompt Library shipped in v0.12.0 and became the half of ccdeck the founder actually used daily
+— and it was over-featured to the point where **its own designer had forgotten how to use it**: nine
+UI surfaces and ~15 affordances, several unguessable without having read the UX contract. That was
+the defect. Not a missing feature — an excess of them. **This round is a subtraction**, and its
+measure of success is that the founder can open the app after two weeks away and still know how
+everything works without reading anything.
+
+The two living contracts were rewritten from the round's plan and the merged code, and remain the
+place to look: [`project_docs/prompts-design.md`](prompts-design.md) (storage, command surface,
+grammar, match engine, the compose model) and [`project_docs/prompts-ux.md`](prompts-ux.md) (every
+interaction, plus a table of what was cut and why it stays cut).
+
+- **A snippet is a Markdown file whose filename is its name.** No uuid, no JSON, no
+  `title`/`body`/`keywords`/`tags`/`category`/`scope`/`placeholders`/`versions` — the file *is* the
+  prompt. Once the metadata was cut the schema had exactly one structured field left, and a JSON file
+  wrapping a single string field is a worse text file: it escapes a prompt's quotes and newlines into
+  one unreadable line, which destroys the git diff the library exists to serve. Subfolders became the
+  organization system (`rust/code_review.md`), replacing tags/categories — grouping is now `mkdir`.
+- **A project is a name and a folder**, and the folder *is* the project: every `*.md` under it,
+  recursively, is one of its snippets. No roster ids, no `scope` field, **no Global scope at all**
+  (`active: null` means "no project configured yet"). Nothing can drift out of sync with the
+  filesystem, because the filesystem is the only source of truth. Two invariants guard the user's
+  repo: **app state never gets written into a project folder** (it is git-tracked — a `last_used`
+  write per insert would dirty the tree on every use, so the roster/usage/active live in
+  `~/.ccdeck/prompts-state.json`), and **`remove_project` forgets a path, never deletes files**.
+- **The grammar is a Python format string** — `{name}` everywhere, `{{`/`}}` to escape, `{name:default}`
+  removed (every variable is a string, and all share one implicit default: the sentinel *"variable not
+  set, ask user for it"*, so a forgotten variable still yields a working prompt). The earlier
+  markdown-aware design carved code fences and backticks out of the grammar; that was **reverted on
+  purpose**, because *"variables work everywhere except inside backticks and fences"* is a rule you
+  must be **told**, while *"it's a Python format string"* is one the user — and every LLM reading the
+  output — already knows. It had also failed on contact: the first realistic fixture put its
+  placeholder in backticks and the carve-out silently ate it. **One implementation, in TypeScript**;
+  `grammar.rs` was deleted rather than simplified, which makes two-language divergence structurally
+  impossible instead of test-guarded.
+- **Chips replace span-tiling, and a chip is never editable in place.** An inserted snippet renders as
+  its name plus its variable names, is `contenteditable=false`, and opens the popup on click — always.
+  The fix was not a guard: the old model's invariant `sum(span.length) === text.length` asserted that
+  what a node *renders* equals what it *contributes*, and a chip renders a label while contributing a
+  whole body. That invariant is *why* inline editing was possible at all, so it had to die rather than
+  be defended. The `linked-modified` provenance state went with it. `Use once` (apply an edit to this
+  chip in this prompt, write nothing to the library) is what keeps the rule a simplification rather
+  than a cage; the popup's Delete removes the file but leaves the words as plain text.
+- **Search filters down.** An empty query used to return nothing in *both* layers, so the user had to
+  type to make their own library appear. It now returns the whole library, most-recently-used first;
+  typing narrows it. No "recent or relevant?" toggle, because the question answers itself: with no
+  query there is no score to rank by.
+- **Cut entirely** (not deprecated, no flags left behind): the embeddings UI — the engine stays and now
+  downloads/indexes silently in the background, degrading to lexical with nothing for the user to see
+  or retry; hotkey rebinding (~410 lines defending a capability nobody used); Notices and the
+  auto-repair machinery (it existed to defend a JSON schema that no longer exists — a `.md` file cannot
+  fail to parse); version history (`git` does it better, and "save under a new name" is more obvious);
+  project colors and pinning; the config gear popover; the `Original` preview and the `Update` vs
+  `Save as new` split (the name field decides it).
+- **No migration ships.** v0.13 does not read `~/.ccdeck/prompts/<uuid>.json` — no import, no legacy
+  path. A deliberate, founder-approved break, justified by the fact that he was the only user of the
+  prompt half in practice: shipping a migration for a population of one and carrying its code forever
+  is exactly the impressive-and-idle upkeep this round existed to remove. His own library was converted
+  once by hand, as a throwaway script.
+
+### Status and verification (Phase 17)
+
+Built on branch `prompt-simplify` across three worktree-isolated lanes (store / compose / shell) plus
+a concurrent docs lane. **Not yet merged or tagged** — the version files still read 0.12.0. The
+authoritative gate is the lead running the full `check_cmd` on the merged branch and then *driving the
+app*, because static green passes a merge the app cannot run. Rust-side coverage lives with the code:
+`store.rs` asserts byte-exact save round-trips and that no name can escape the project folder;
+`appstate.rs` asserts that using the app writes nothing into the project folder and that
+`remove_project` leaves every `.md` byte-for-byte intact; `state.rs` asserts the at-rest recency order
+and that an exact name hit is never buried by a semantic score.
+
+### Deferred, not dropped
+
+- **Splitting the Prompt Library into its own repo** — issue **#32**. The founder's judgment: *"a
+  desktop app is actually fine."* Set aside deliberately, because splitting a product whose
+  interaction model is still moving means maintaining two moving things.
+- **Issue #25** (the organization layer) was **closed as cut** — subfolders replaced it.
+- **Compose-surface Playwright e2e** — still held, now against a much smaller surface.
+
+The **`prompt-import` skill was retired** (deleted, with its `.claude/skills/` symlink) rather than
+ported: it existed to translate prose into the old JSON schema, and importing a Markdown prompt into
+a folder of Markdown prompts is `cp`.
+
 ## Verification performed (historical — Phase 7 snapshot, 2026-07-05)
 
 Counts and file names below reflect the tree as of the CC Deck rebrand (Phase 7); later phases

@@ -1,71 +1,38 @@
 <script lang="ts">
   /**
-   * The scope tab row atop the Prompts view (contract §Compose surface):
-   * Global first (neutral — it is not a project record), then every pinned
-   * project. The active tab IS the scope — match pool, save target, tint.
-   * An unpinned project activated through the manager shows as a temporary
-   * trailing tab while active, so the current scope is never invisible.
+   * The project tab row. A project is a name and a folder, so every project in
+   * the roster is simply a tab — there is no pin (nothing to promote) and no
+   * color (nothing to decorate).
+   *
+   * There is no "Global" tab, and its absence is the point: a snippet lives in
+   * the folder it sits in, so a scope belonging to no folder cannot exist. An
+   * empty roster is not a scope either — it renders as the add-a-folder prompt
+   * in the panel below, not as a tab you could compose against.
+   *
+   * Plain Tab-stop buttons, not a roving tablist: the roving version was one of
+   * the affordances nobody could guess without having read the UX contract, and
+   * a handful of tabs does not need its own navigation model.
    */
   import { prompts, setActiveProject } from '$lib/prompts.svelte';
-  import { projectColorVar } from '$lib/prompts/palette';
 
   interface Props {
     onOpenManager: () => void;
   }
 
   let { onOpenManager }: Props = $props();
-
-  let rowEl: HTMLDivElement | undefined = $state(undefined);
-
-  const tabs = $derived.by(() => {
-    const pinned = prompts.projects.filter((p) => p.pinned);
-    const active = prompts.projects.find((p) => p.id === prompts.activeProjectId);
-    return active && !active.pinned ? [...pinned, active] : pinned;
-  });
-
-  // Roving-tabindex nav (contract §S8): the active tab is the single Tab stop;
-  // ←/→ move focus among the scope tabs (wrapping); Enter/Space activate
-  // natively (a focused tab button click). The ⋯ manager is not a scope tab and
-  // stays out of the roving set.
-  function handleKeydown(e: KeyboardEvent): void {
-    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-    if (!rowEl) return;
-    const items = [...rowEl.querySelectorAll<HTMLButtonElement>('.project-tabs__tab')];
-    const i = items.indexOf(document.activeElement as HTMLButtonElement);
-    if (i < 0) return;
-    e.preventDefault();
-    const next = e.key === 'ArrowRight' ? (i + 1) % items.length : (i - 1 + items.length) % items.length;
-    items[next]?.focus();
-  }
 </script>
 
-<!-- tabindex="-1": the tablist owns the ←/→ handler (event delegation from the
-     roving tab buttons) but is never itself a Tab stop — the active tab is. -->
-<div class="project-tabs" role="tablist" aria-label="Prompt scope" tabindex="-1" bind:this={rowEl} onkeydown={handleKeydown}>
-  <button
-    type="button"
-    role="tab"
-    aria-selected={prompts.activeProjectId === null}
-    tabindex={prompts.activeProjectId === null ? 0 : -1}
-    class="project-tabs__tab"
-    class:project-tabs__tab--active={prompts.activeProjectId === null}
-    onclick={() => setActiveProject(null)}
-  >
-    Global
-  </button>
-
-  {#each tabs as p (p.id)}
+<div class="project-tabs" role="tablist" aria-label="Prompt projects">
+  {#each prompts.projects as p (p.path)}
     <button
       type="button"
       role="tab"
-      aria-selected={prompts.activeProjectId === p.id}
-      tabindex={prompts.activeProjectId === p.id ? 0 : -1}
+      aria-selected={prompts.activeProjectPath === p.path}
       class="project-tabs__tab"
-      class:project-tabs__tab--active={prompts.activeProjectId === p.id}
-      style="--tab-color: {projectColorVar(p.color)}"
-      onclick={() => setActiveProject(p.id)}
+      class:project-tabs__tab--active={prompts.activeProjectPath === p.path}
+      title={p.path}
+      onclick={() => setActiveProject(p.path)}
     >
-      <span class="project-tabs__dot" aria-hidden="true"></span>
       {p.name}
     </button>
   {/each}
@@ -74,8 +41,8 @@
     type="button"
     class="project-tabs__manage"
     onclick={onOpenManager}
-    title="Manage projects"
-    aria-label="Manage projects"
+    title="Manage prompt folders"
+    aria-label="Manage prompt folders"
   >
     ⋯
   </button>
@@ -91,7 +58,6 @@
   .project-tabs__tab {
     display: inline-flex;
     align-items: center;
-    gap: 0.4rem;
     font-family: inherit;
     font-size: 0.76rem;
     padding: 0.3rem 0.75rem;
@@ -100,26 +66,20 @@
     background: transparent;
     color: var(--text-muted);
     cursor: pointer;
-    transition: background 0.12s, color 0.12s, border-color 0.12s;
+    transition:
+      background 0.12s,
+      color 0.12s,
+      border-color 0.12s;
   }
   .project-tabs__tab:hover {
     background: var(--bg-subtle);
     color: var(--text);
   }
-  /* Active tab: a quiet fill of the tab's own hue — Global falls back to a
-     neutral grey base, keeping the first tab colorless by design. */
   .project-tabs__tab--active {
-    background: color-mix(in srgb, var(--tab-color, var(--text-muted)) 12%, transparent);
-    border-color: color-mix(in srgb, var(--tab-color, var(--text-muted)) 25%, transparent);
+    background: color-mix(in srgb, var(--text-muted) 12%, transparent);
+    border-color: color-mix(in srgb, var(--text-muted) 25%, transparent);
     color: var(--text);
     font-weight: 600;
-  }
-  .project-tabs__dot {
-    width: 0.5rem;
-    height: 0.5rem;
-    border-radius: 50%;
-    background: var(--tab-color);
-    flex-shrink: 0;
   }
   .project-tabs__manage {
     font-family: inherit;

@@ -121,36 +121,46 @@ Internal-echo prefixes to filter from user text / titles:
 `<command-name>` `<local-command-stdout>` `<command-message>` `<command-args>`
 `<local-command-caveat>` `<system-reminder>` `<teammate-message` `<task-notification>`
 
-## Prompt Library (issue #24)
+## Prompt Library (issue #24, rewritten by #31)
 
-Full engineering contract: [`project_docs/prompts-design.md`](project_docs/prompts-design.md)
-(storage layout, project model, snippet schema, variable grammar, copy-output XML mode, match
-engine, compose-surface behavior, store robustness). Code: `src-tauri/src/prompts/`,
-`src/lib/compose/`. Summary of the 11-command surface (same conventions as above):
+**A snippet is a Markdown file whose filename is its name; a project is a name and a folder, and
+every `*.md` under it (recursively) is one of its snippets.** No uuid, no schema, no `scope` field —
+the filesystem is the source of truth, which is what makes the library hand-editable and
+git-committable. Full engineering contract:
+[`project_docs/prompts-design.md`](project_docs/prompts-design.md) (storage, the two model
+invariants, variable grammar, copy output, match engine, the chip compose model); interaction
+contract: [`project_docs/prompts-ux.md`](project_docs/prompts-ux.md). Code: `src-tauri/src/prompts/`,
+`src/lib/compose/`. The 9-command surface (same conventions as above):
 
 ```
-list_snippets() -> Snippet[]                 // one JSON file per snippet at ~/.ccdeck/prompts/
-save_snippet(snippet) -> Snippet               // create/update; append-only body versioning
-delete_snippet(id) -> null
-snippet_load_errors() -> {file,error}[]    // broken hand-edited files, surfaced not hidden
-list_projects() -> Project[]             // roster in ~/.ccdeck/projects.json
-save_project(project) -> Project         // create/update (rename, color, pin)
-delete_project(id) -> null               // rescopes the project's snippets to global
-match_snippets(query, project_id, limit) -> MatchHit[]  // pool = global + project_id's snippets
-embed_status() -> EmbedStatus            // incl. model+runtime download sizes (decimal MB)
-embed_download(channel) -> null          // streams {stage: runtime|model|index, done, total}
-set_embed_enabled(bool) -> null
+list_projects() -> {projects: Project[], active: string | null}  // active: null = none configured yet
+add_project(name, path) -> Project        // the folder must exist; re-adding a path renames it
+remove_project(path) -> null              // forgets the path. NEVER deletes files.
+set_active_project(path) -> null          // persisted; restored on launch
+list_snippets(project) -> Snippet[]       // recursive *.md scan of the folder
+save_snippet(project, name, content) -> Snippet   // same name updates, a new name creates
+delete_snippet(project, name) -> null
+match_snippets(project, query, limit) -> MatchHit[]  // empty query = everything, recency-first
+touch_snippet(project, name) -> null      // records usage in app-local state
 ```
 
-Snippets scope to a project id (`scope: {kind: global|project, project_id}`), not a filesystem
-path. Variables are single-brace f-string syntax (`{name}` / `{name:default}`, Rust+TS
-implemented identically against shared test vectors); copy output offers a dedup "as variable"
-XML mode alongside plain substitution. The snippet store repairs hand-edited JSON in memory on
-load but never rewrites the file — a repair persists only on the snippet's next explicit save.
+`Project {name, path}`, `Snippet {name, content}`, `MatchHit {name, score}`. Embedding has **no
+command surface**: the model downloads and indexes in the background, silently, degrading to the
+always-on lexical matcher on any failure. Variables are a **Python format string** (`{name}`, `{{`/`}}`
+escapes, no code-fence carve-out), implemented once in TypeScript — Rust treats a body as an opaque
+string.
 
-**Data root `~/.ccdeck/`** (env `CCDECK_DATA_DIR` overrides; `src-tauri/src/datadir.rs`): snippets,
-`projects.json`, `backups/` (session-edit backups), `index/` (search cache), `models/` + `cache/`
-(opt-in embeddings, download ending in an index stage). On startup
+**Two invariants the code enforces and any change must preserve:** app state (usage timestamps,
+roster, active project) is **never** written into a project folder — it is git-tracked, so a
+`last_used` write per insert would dirty the user's tree on every use; and `remove_project` forgets a
+path but **never deletes files**. Both live in `src-tauri/src/prompts/appstate.rs`, which exists for
+exactly that reason.
+
+**Data root `~/.ccdeck/`** (env `CCDECK_DATA_DIR` overrides; `src-tauri/src/datadir.rs`):
+`prompts-state.json` (the project roster, the active project, usage timestamps — the only
+non-Markdown prompt persistence), `backups/` (session-edit backups), `index/` (search cache),
+`models/` + `cache/embeddings.sqlite` (the embedding artifacts and vector cache — derived data,
+rebuildable). Snippets themselves live in the user's own folders, not here. On startup
 `migrate_legacy_state()` moves the pre-0.12 artifacts out of `~/.claude` (`.ccstudio-backups`,
 `.ccstudio-config.json`, `.ccstudio-index`) — invariant since: nothing ccdeck-owned lives under
 `~/.claude`.

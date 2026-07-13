@@ -1,6 +1,6 @@
 /**
  * Focus-trap attachment — the a11y contract for every modal and popover
- * (project_docs/prompts-ux.md §"Popover geometry, focus trap, and Escape").
+ * (project_docs/prompts-ux.md §"Popovers, focus trap, and Escape").
  * While the host element is mounted: focus moves into it, `Tab`/`Shift+Tab`
  * cycle *within* it and never escape to the page behind, and the element that
  * held focus before it opened is re-focused on close. A mouse-off product where

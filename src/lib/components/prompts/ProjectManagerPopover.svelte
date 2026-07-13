@@ -1,15 +1,18 @@
 <script lang="ts">
   /**
-   * Project manager popover: create, rename, recolor, pin/unpin, delete —
-   * and reach unpinned projects (clicking a row activates it as the scope).
-   * Colors are palette keys only; swatches render from the --project-<key>
-   * tokens via the single palette helper. Deleting rescopes the project's
-   * snippets to Global (backend semantics) — said in the confirm label so the
-   * consequence is read before the click, not discovered after.
+   * Project manager: add a folder, rename it, forget it. That is the whole
+   * surface, because a project is now a name and a folder and there is nothing
+   * else about it to manage — no color, no pin, no activate button (the tab is
+   * the activate button).
+   *
+   * **Removing a project never deletes files.** It forgets a path. The user's
+   * prompts are their own — that is the entire reason the folder is theirs to
+   * choose, and the confirm label says so before the click rather than leaving
+   * the consequence to be discovered after.
    */
-  import { PALETTE_KEYS, type PaletteKey, type Project } from '$lib/prompts/types';
-  import { prompts, saveProject, deleteProject, setActiveProject } from '$lib/prompts.svelte';
-  import { projectColorVar } from '$lib/prompts/palette';
+  import { isTauri } from '$lib/api';
+  import type { Project } from '$lib/prompts/types';
+  import { prompts, addProject, renameProject, removeProject } from '$lib/prompts.svelte';
   import { focusTrap } from '$lib/attachments/focusTrap';
 
   interface Props {
@@ -18,26 +21,56 @@
 
   let { onClose }: Props = $props();
 
-  /** Which project's swatch strip is expanded ('new' = the create row). */
-  let colorPickFor = $state<string | null>(null);
-  let confirmingDeleteId = $state<string | null>(null);
-  let newName = $state('');
-  let newColor = $state<PaletteKey>('blue');
+  let confirmingRemove = $state<string | null>(null);
   let error = $state<string | null>(null);
+  let busy = $state(false);
 
   async function run(action: () => Promise<unknown>): Promise<void> {
     error = null;
+    busy = true;
     try {
       await action();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
     }
   }
 
-  /** The input is uncontrolled (value= + onchange), so a rejected save
-   *  would otherwise leave typed-but-unpersisted text on screen lying about
-   *  the roster — on failure (or a no-op edit) the input is reset to the
-   *  stored name, the truth. */
+  /** The OS directory picker. In browser-dev there is no OS dialog, so fall back
+   *  to a typed path — the add-a-project flow stays exercisable without Tauri. */
+  async function pickFolder(): Promise<string | null> {
+    if (!isTauri()) {
+      return window.prompt('Folder path (browser-dev only):', '/dev/mock/prompts');
+    }
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const picked = await open({
+      directory: true,
+      multiple: false,
+      title: 'Choose a folder for your prompts',
+    });
+    return typeof picked === 'string' ? picked : null;
+  }
+
+  /** The folder's own name is the obvious default — the user picked it, so they
+   *  already named it once. They can still rename it in the row afterwards. */
+  function basename(path: string): string {
+    const parts = path.split(/[\\/]/).filter(Boolean);
+    return parts[parts.length - 1] ?? path;
+  }
+
+  async function add(): Promise<void> {
+    const path = await pickFolder();
+    if (path === null || path.trim() === '') return;
+    await run(async () => {
+      await addProject(basename(path.trim()), path.trim());
+      onClose(); // you added it to work in it — get out of the way
+    });
+  }
+
+  /** The input is uncontrolled (value= + onchange), so a rejected rename would
+   *  otherwise leave typed-but-unpersisted text on screen lying about the
+   *  roster. On failure (or a no-op edit) it resets to the stored name. */
   async function rename(p: Project, input: HTMLInputElement): Promise<void> {
     const trimmed = input.value.trim();
     if (!trimmed || trimmed === p.name) {
@@ -46,40 +79,20 @@
     }
     error = null;
     try {
-      await saveProject({ ...p, name: trimmed });
+      await renameProject(trimmed, p.path);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       input.value = p.name;
     }
   }
 
-  function recolor(p: Project, color: PaletteKey): void {
-    colorPickFor = null;
-    if (color !== p.color) void run(() => saveProject({ ...p, color }));
-  }
-
-  function togglePin(p: Project): void {
-    void run(() => saveProject({ ...p, pinned: !p.pinned }));
-  }
-
-  function handleDelete(p: Project): void {
-    if (confirmingDeleteId !== p.id) {
-      confirmingDeleteId = p.id;
+  function handleRemove(p: Project): void {
+    if (confirmingRemove !== p.path) {
+      confirmingRemove = p.path;
       return;
     }
-    confirmingDeleteId = null;
-    void run(() => deleteProject(p.id));
-  }
-
-  async function create(): Promise<void> {
-    const name = newName.trim();
-    if (!name) return;
-    await run(async () => {
-      const saved = await saveProject({ name, color: newColor, pinned: true, path: null });
-      setActiveProject(saved.id); // a fresh project is what you came to work in
-      newName = '';
-      colorPickFor = null;
-    });
+    confirmingRemove = null;
+    void run(() => removeProject(p.path));
   }
 
   function handleKeydown(e: KeyboardEvent): void {
@@ -93,20 +106,23 @@
 <!-- Transparent click-away layer; the popover itself stops propagation. -->
 <div class="proj-mgr__backdrop" onclick={onClose} aria-hidden="true"></div>
 
-<div class="proj-mgr" role="dialog" aria-label="Manage projects" tabindex="-1" onkeydown={handleKeydown} {@attach focusTrap}>
+<div
+  class="proj-mgr"
+  role="dialog"
+  aria-label="Manage prompt folders"
+  tabindex="-1"
+  onkeydown={handleKeydown}
+  {@attach focusTrap}
+>
   {#if prompts.projects.length === 0}
-    <p class="proj-mgr__empty">No projects yet — create one below to get a colored tab.</p>
+    <p class="proj-mgr__empty">
+      No prompt folders yet. Pick any directory — every <code>.md</code> file under it becomes a
+      snippet, so a git repo works and your prompts stay yours.
+    </p>
   {/if}
 
-  {#each prompts.projects as p (p.id)}
-    <div class="proj-mgr__row" style="--swatch-color: {projectColorVar(p.color)}">
-      <button
-        type="button"
-        class="proj-mgr__dot"
-        title="Change color"
-        aria-label="Change color of {p.name}"
-        onclick={() => (colorPickFor = colorPickFor === p.id ? null : p.id)}
-      ></button>
+  {#each prompts.projects as p (p.path)}
+    <div class="proj-mgr__row">
       <input
         type="text"
         class="proj-mgr__name"
@@ -117,91 +133,19 @@
       />
       <button
         type="button"
-        class="proj-mgr__action"
-        class:proj-mgr__action--on={p.pinned}
-        title={p.pinned ? 'Unpin — remove the tab (project keeps its snippets)' : 'Pin as a tab'}
-        onclick={() => togglePin(p)}
-      >
-        {p.pinned ? 'Pinned' : 'Pin'}
-      </button>
-      <button
-        type="button"
-        class="proj-mgr__action"
-        title="Work in this project"
-        onclick={() => {
-          setActiveProject(p.id);
-          onClose();
-        }}
-      >
-        Open
-      </button>
-      <button
-        type="button"
         class="proj-mgr__action proj-mgr__action--danger"
-        title="Delete the project — its snippets move to Global, nothing is lost"
-        onclick={() => handleDelete(p)}
+        title="Forget this folder — the files on disk are untouched"
+        onclick={() => handleRemove(p)}
       >
-        {confirmingDeleteId === p.id ? 'Snippets move to Global — sure?' : 'Delete'}
+        {confirmingRemove === p.path ? 'Forget it? (files stay)' : 'Remove'}
       </button>
     </div>
-    {#if colorPickFor === p.id}
-      <div class="proj-mgr__swatches" role="radiogroup" aria-label="Project color">
-        {#each PALETTE_KEYS as key (key)}
-          <button
-            type="button"
-            role="radio"
-            aria-checked={p.color === key}
-            aria-label={key}
-            class="proj-mgr__swatch"
-            class:proj-mgr__swatch--current={p.color === key}
-            style="--swatch-color: {projectColorVar(key)}"
-            onclick={() => recolor(p, key)}
-          ></button>
-        {/each}
-      </div>
-    {/if}
+    <p class="proj-mgr__path" title={p.path}>{p.path}</p>
   {/each}
 
-  <div class="proj-mgr__row proj-mgr__row--new" style="--swatch-color: {projectColorVar(newColor)}">
-    <button
-      type="button"
-      class="proj-mgr__dot"
-      title="Pick a color for the new project"
-      aria-label="Pick a color for the new project"
-      onclick={() => (colorPickFor = colorPickFor === 'new' ? null : 'new')}
-    ></button>
-    <input
-      type="text"
-      class="proj-mgr__name"
-      bind:value={newName}
-      placeholder="New project…"
-      autocomplete="off"
-      spellcheck="false"
-      onkeydown={(e) => e.key === 'Enter' && create()}
-    />
-    <button type="button" class="proj-mgr__action" disabled={!newName.trim()} onclick={create}>
-      Create
-    </button>
-  </div>
-  {#if colorPickFor === 'new'}
-    <div class="proj-mgr__swatches" role="radiogroup" aria-label="New project color">
-      {#each PALETTE_KEYS as key (key)}
-        <button
-          type="button"
-          role="radio"
-          aria-checked={newColor === key}
-          aria-label={key}
-          class="proj-mgr__swatch"
-          class:proj-mgr__swatch--current={newColor === key}
-          style="--swatch-color: {projectColorVar(key)}"
-          onclick={() => {
-            newColor = key;
-            colorPickFor = null;
-          }}
-        ></button>
-      {/each}
-    </div>
-  {/if}
+  <button type="button" class="proj-mgr__add" disabled={busy} onclick={add}>
+    + Add a folder…
+  </button>
 
   {#if error}
     <p class="proj-mgr__error">{error}</p>
@@ -220,7 +164,7 @@
     top: 2.2rem;
     left: 0;
     z-index: 41;
-    width: min(24rem, 92vw);
+    width: min(28rem, 92vw);
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
@@ -233,100 +177,86 @@
   .proj-mgr__empty {
     font-size: 0.72rem;
     color: var(--text-muted);
-    margin: 0;
+    margin: 0 0 0.2rem;
+    line-height: 1.5;
+  }
+  .proj-mgr__empty code {
+    font-family: var(--font-mono);
   }
   .proj-mgr__row {
     display: flex;
     align-items: center;
     gap: 0.45rem;
   }
-  .proj-mgr__row--new {
-    margin-top: 0.2rem;
-    padding-top: 0.5rem;
-    border-top: 1px solid var(--border);
-  }
-  .proj-mgr__dot {
-    width: 0.9rem;
-    height: 0.9rem;
-    border-radius: 50%;
-    border: 1px solid color-mix(in srgb, var(--swatch-color) 55%, var(--border));
-    background: var(--swatch-color);
-    cursor: pointer;
-    flex-shrink: 0;
-    padding: 0;
-  }
   .proj-mgr__name {
     flex: 1;
     min-width: 0;
     font-family: inherit;
     font-size: 0.78rem;
-    padding: 0.25rem 0.45rem;
-    border: 1px solid transparent;
-    border-radius: 0.3rem;
-    background: transparent;
+    padding: 0.3rem 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: 0.35rem;
+    background: var(--bg);
     color: var(--text);
   }
-  .proj-mgr__name:hover {
-    border-color: var(--border);
-  }
-  .proj-mgr__name:focus {
+  .proj-mgr__name:focus-visible {
     outline: none;
-    border-color: var(--border-strong);
-    background: var(--bg);
+    border-color: color-mix(in srgb, var(--accent-snippet) 55%, var(--border));
+  }
+  /* The path is the identity, so it is always visible — a name alone cannot tell
+     two folders apart, and "which folder is this?" must never need a hover. */
+  .proj-mgr__path {
+    margin: 0 0 0.45rem;
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    color: var(--text-faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .proj-mgr__action {
     font-family: inherit;
-    font-size: 0.66rem;
-    padding: 0.2rem 0.5rem;
-    border: 1px solid transparent;
-    border-radius: 0.3rem;
+    font-size: 0.68rem;
+    padding: 0.28rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 0.35rem;
     background: transparent;
-    color: var(--text-faint);
+    color: var(--text-muted);
     cursor: pointer;
     white-space: nowrap;
     flex-shrink: 0;
   }
   .proj-mgr__action:hover {
-    color: var(--text);
     background: var(--bg-subtle);
-  }
-  .proj-mgr__action:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .proj-mgr__action--on {
-    color: var(--text-muted);
-    border-color: var(--border);
+    color: var(--text);
   }
   .proj-mgr__action--danger:hover {
     color: var(--accent-result-err);
-    background: color-mix(in srgb, var(--accent-result-err) 8%, transparent);
+    border-color: color-mix(in srgb, var(--accent-result-err) 45%, var(--border));
   }
-  .proj-mgr__swatches {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-    padding: 0.15rem 0 0.25rem 1.35rem;
-  }
-  .proj-mgr__swatch {
-    width: 1.05rem;
-    height: 1.05rem;
-    border-radius: 50%;
-    border: 1px solid color-mix(in srgb, var(--swatch-color) 55%, var(--border));
-    background: var(--swatch-color);
+  .proj-mgr__add {
+    align-self: flex-start;
+    margin-top: 0.2rem;
+    font-family: inherit;
+    font-size: 0.72rem;
+    padding: 0.35rem 0.6rem;
+    border: 1px dashed var(--border);
+    border-radius: 0.35rem;
+    background: transparent;
+    color: var(--text-muted);
     cursor: pointer;
-    padding: 0;
   }
-  .proj-mgr__swatch:hover {
-    transform: scale(1.12);
+  .proj-mgr__add:hover:not(:disabled) {
+    background: var(--bg-subtle);
+    color: var(--text);
   }
-  .proj-mgr__swatch--current {
-    outline: 2px solid var(--text);
-    outline-offset: 1px;
+  .proj-mgr__add:disabled {
+    opacity: 0.55;
+    cursor: default;
   }
   .proj-mgr__error {
+    margin: 0.3rem 0 0;
     font-size: 0.7rem;
     color: var(--accent-result-err);
-    margin: 0.2rem 0 0;
   }
 </style>
