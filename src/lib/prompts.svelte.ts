@@ -163,20 +163,19 @@ async function upsertProject(name: string, path: string): Promise<Project> {
 }
 
 /** Forget a project. **Never deletes files** — the user's prompts are their own;
- *  this drops the path from the roster and nothing else. If it was active, fall
- *  back to the first remaining project, or to the no-project empty state. */
+ *  this drops the path from the roster and nothing else.
+ *
+ *  Re-reads the roster rather than re-deriving what happened: removing the ACTIVE
+ *  project has to re-point `active` at something, and the backend already owns
+ *  that rule. Duplicating it here would put one rule on both sides of the seam,
+ *  where the two copies can only drift apart. */
 export async function removeProject(path: string): Promise<void> {
   await apiRemoveProject(path);
-  prompts.projects = prompts.projects.filter((p) => p.path !== path);
-  if (prompts.activeProjectPath !== path) return;
-  const next = prompts.projects[0]?.path ?? null;
-  if (next === null) {
-    prompts.activeProjectPath = null;
-    prompts.snippets = [];
-    prompts.hits = [];
-    return;
-  }
-  await setActiveProject(next);
+  const { projects, active } = await listProjects();
+  prompts.projects = projects;
+  prompts.activeProjectPath = active;
+  await refreshSnippets();
+  await runMatch();
 }
 
 // ── library ──────────────────────────────────────────────────────────────────
