@@ -22,15 +22,17 @@ import {
 } from './api';
 import {
   type Doc,
-  type SpanLink,
-  type Span,
+  type Caret,
+  type RawNode,
   emptyDoc,
-  applyEdit,
-  insertSnippetOverRange,
-  replaceSpan,
-  linkRange,
+  newCid,
+  fromRawNodes,
+  insertChip,
+  replaceChipContent,
+  retargetChip,
+  dissolveChip,
+  flatten,
   caretQuery,
-  spanStarts,
 } from './compose/doc';
 import { copyText } from './compose/variables';
 
@@ -64,12 +66,18 @@ export const prompts = $state({
   activeProjectPath: null as string | null,
   // compose surface
   doc: emptyDoc() as Doc,
-  caret: 0,
-  selStart: 0,
-  selEnd: 0,
-  /** Bumped when the doc changes from OUTSIDE the textarea (panel insert,
-   *  modal apply) — the compose box watches it to restore focus + caret. */
-  focusNonce: 0,
+  /** Where the caret sits, in MODEL terms (null = not in the box). */
+  caret: null as Caret | null,
+  /** The text of the node the caret is in — the live-match query reads it. */
+  caretText: '',
+  /** Bumped ONLY when the doc changes from outside the box (a panel insert, a
+   *  popup save/delete). The box repaints on this and nothing else: repainting on
+   *  `doc` itself would fire on every keystroke and destroy the user's caret. */
+  renderNonce: 0,
+  /** After an external insert, the chip the caret should land after — so the next
+   *  keystroke continues the sentence rather than landing where the browser
+   *  guessed. Consumed (nulled) by the box once placed. */
+  pendingCaretCid: null as string | null,
   /** Unified variable fill values, keyed by name (grammar rule 4: one name =
    *  one variable document-wide). Entries for names no longer in the doc are
    *  kept — retyping a name recalls its value; copy only reads live names. */
@@ -274,74 +282,88 @@ function errText(e: unknown): string {
 
 // ── compose surface ──────────────────────────────────────────────────────────
 
-/** Track the caret/selection (from the textarea) without triggering a match. */
-export function setSelection(start: number, end: number): void {
-  prompts.selStart = start;
-  prompts.selEnd = end;
-  prompts.caret = end;
-}
-
-/** One inline edit (any input event, translated by the compose box into a
- *  single replacement). Drives both the provenance state machine and the
- *  live matcher. */
-export function composeEdit(start: number, end: number, inserted: string): void {
-  prompts.doc = applyEdit(prompts.doc, start, end, inserted);
-  const caret = start + inserted.length;
-  setSelection(caret, caret);
-  prompts.matchQuery = caretQuery(prompts.doc.text, caret);
+/**
+ * The box's content changed. Rebuilt from what the DOM now holds rather than
+ * patched edit-by-edit, so typing, paste, cut, undo and IME all arrive the same
+ * way. Deliberately does NOT bump `renderNonce`: the DOM is already what the user
+ * sees, and repainting it would take their caret with it.
+ */
+export function composeSetDoc(raw: RawNode[]): void {
+  prompts.doc = fromRawNodes(raw, prompts.doc);
   scheduleMatch();
 }
 
-/** Insert a snippet's RAW body as a linked span, REPLACING the query line the
- *  user typed to find it (line start → caret) — the single insert path behind
- *  both triggers, mouse click and ↓-into-panel + Enter (contract §S2/S3). The
- *  query was scaffolding; leaving it in front of the body is litter. {var}
- *  tokens land verbatim and merge into the unified fill list (variables resolve
- *  at copy time). */
-export function composeInsertSnippet(snippet: Snippet): Doc {
-  const link: SpanLink = { snippetId: snippet.id, title: snippet.title, scope: snippet.scope };
-  const caret = prompts.caret;
-  const lineStart = prompts.doc.text.lastIndexOf('\n', caret - 1) + 1;
-  prompts.doc = insertSnippetOverRange(prompts.doc, lineStart, caret, snippet.body, link);
-  const end = lineStart + snippet.body.length;
-  setSelection(end, end);
+/** The caret moved. `text` is the text node it sits in — the live-match query is
+ *  the current line of it, up to the caret. */
+export function composeSetCaret(caret: Caret | null, text: string): void {
+  prompts.caret = caret;
+  prompts.caretText = text;
+  prompts.matchQuery = caret ? caretQuery(text, caret.offset) : '';
+  scheduleMatch();
+}
+
+/** The box has placed the caret after a freshly inserted chip. */
+export function clearPendingCaret(): void {
+  prompts.pendingCaretCid = null;
+}
+
+/**
+ * Insert a snippet as a chip, consuming the query line the user typed to find it.
+ * The single insert path behind both triggers (clicking a match, and ↓-into-panel
+ * then Enter).
+ *
+ * The chip carries the body; the box shows only the name and the variables. The
+ * body's `{var}` tokens merge into the one global fill list by name, and resolve
+ * at copy time.
+ */
+export function composeInsertSnippet(name: string, content: string): void {
+  const cid = newCid();
+  prompts.doc = insertChip(prompts.doc, prompts.caret ?? { node: 0, offset: 0 }, {
+    cid,
+    name,
+    content,
+  });
   prompts.matchQuery = ''; // the query line was consumed by the insert
   scheduleMatch(); // clears the now-stale suggestions
-  prompts.focusNonce++;
-  return prompts.doc;
+  prompts.pendingCaretCid = cid;
+  prompts.renderNonce++;
 }
 
-/** Replace one span's text + metadata (snippet-modal save refreshing the
- *  span's link metadata / provenance state — never the composed text). */
-export function composeReplaceSpan(index: number, newText: string, span: Omit<Span, 'length'>): void {
-  const start = spanStarts(prompts.doc)[index];
-  prompts.doc = replaceSpan(prompts.doc, index, newText, span);
-  setSelection(start + newText.length, start + newText.length);
-  prompts.focusNonce++;
+/** `Use once`: this chip, this prompt, nothing written to the library. The escape
+ *  hatch that makes "a chip is never editable in place" tolerable rather than a
+ *  cage — tweak a prompt without polluting the library. */
+export function composeUseOnce(cid: string, content: string): void {
+  prompts.doc = replaceChipContent(prompts.doc, cid, content);
+  prompts.renderNonce++;
 }
 
-/** After save-selection-as-snippet: the saved selection becomes a linked span
- *  pointing at the new snippet (linked-modified when the saved body was edited
- *  away from the selection before saving). */
-export function composeLinkRange(
-  start: number,
-  end: number,
-  link: SpanLink,
-  state: 'linked' | 'linked-modified' = 'linked'
-): void {
-  prompts.doc = linkRange(prompts.doc, start, end, link, state);
-  prompts.focusNonce++;
+/** The popup saved this chip under `name`. Same name → the file was updated and
+ *  the chip just reflects it; a new name → a new file, and the chip retargets to
+ *  the snippet it now actually is. One transform covers both, which is exactly why
+ *  "Save as new" no longer needs a button of its own. */
+export function composeSaveChip(cid: string, name: string, content: string): void {
+  prompts.doc = retargetChip(prompts.doc, cid, name, content);
+  prompts.renderNonce++;
 }
 
-/** One fill input changed (the unified variable list under the box). */
+/** The popup deleted this chip's snippet. The file is gone; the words stay, as
+ *  plain typed text. Deleting a library entry must not silently mutilate the
+ *  prompt someone is halfway through writing. */
+export function composeDissolveChip(cid: string): void {
+  prompts.doc = dissolveChip(prompts.doc, cid);
+  prompts.renderNonce++;
+}
+
+/** One fill input changed. Variables are global by name, so this one value serves
+ *  every occurrence — in the fill list under the box and in every chip's popup. */
 export function setFill(name: string, value: string): void {
   prompts.fills[name] = value;
 }
 
-/** The Copy Prompt deliverable: the doc's raw text through the copy pipeline
- *  (escapes resolved; per-variable XML dedup or substitute-in-place). */
+/** The Copy Prompt deliverable: the composed prompt (typed text + every chip's
+ *  BODY) through the copy pipeline. */
 export function copyOutput(): string {
-  return copyText(prompts.doc.text, prompts.fills, prompts.asVars);
+  return copyText(flatten(prompts.doc), prompts.fills, prompts.asVars);
 }
 
 /** Set one variable's as-variable mode (contract §Copy output). Absent = ON, so
@@ -353,19 +375,24 @@ export function setAsVar(name: string, on: boolean): void {
 
 // ── snippet store ──────────────────────────────────────────────────────────────
 
-/** Save (create or update) and sync the local list. Returns the stored snippet. */
-export async function saveSnippet(input: SnippetInput): Promise<Snippet> {
-  const saved = await apiSaveSnippet(input);
-  const i = prompts.snippets.findIndex((p) => p.id === saved.id);
+/**
+ * Save a snippet: `<name>.md` in the project folder. Same name updates, a new name
+ * creates — the filename IS the identity, which is the whole "Save vs Save as new"
+ * mechanism, collapsed into one button and disambiguated by the name field.
+ */
+export async function saveSnippet(project: string, name: string, content: string): Promise<Snippet> {
+  const saved = await apiSaveSnippet(project, name, content);
+  const i = prompts.snippets.findIndex((s) => s.name === saved.name);
   if (i >= 0) prompts.snippets[i] = saved;
   else prompts.snippets.push(saved);
   scheduleMatch(); // the library changed under the current query
   return saved;
 }
 
-export async function deleteSnippet(id: string): Promise<void> {
-  await apiDeleteSnippet(id);
-  const i = prompts.snippets.findIndex((p) => p.id === id);
-  if (i >= 0) prompts.snippets.splice(i, 1);
+/** Remove the file from the project. What happens to a chip pointing at it is the
+ *  compose surface's business (`composeDissolveChip`) — the words stay. */
+export async function deleteSnippet(project: string, name: string): Promise<void> {
+  await apiDeleteSnippet(project, name);
+  prompts.snippets = prompts.snippets.filter((s) => s.name !== name);
   scheduleMatch();
 }

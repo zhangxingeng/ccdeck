@@ -1,9 +1,15 @@
 /**
- * Smoke test for the Prompt Library's pure logic (issue #24):
- * the compose-box provenance state machine (compose/doc.ts), the variable
- * grammar + copy output (compose/variables.ts — the Rust/TS seam, shared
- * vectors encoded verbatim), and copy flattening.
+ * Smoke test for the Prompt Library's pure logic (issue #31, v0.13):
+ *   - the variable grammar + copy output (compose/variables.ts)
+ *   - the compose-box node model and the contenteditable round-trip (compose/doc.ts)
+ *
  * Run with: npx tsx tests/prompts_smoke.mjs   (from repo root)
+ *
+ * The grammar vectors below are the ONLY copy. `src-tauri/src/prompts/grammar.rs`
+ * is deleted — nothing in the backend parses variables any more — so there is no
+ * second implementation to keep in sync, and no cross-language table. It also
+ * means nothing else will catch a grammar mistake: these vectors are the whole
+ * safety net.
  */
 
 import { fileURLToPath } from 'node:url';
@@ -15,18 +21,23 @@ const root = join(__dir, '..');
 const {
   emptyDoc,
   docFromText,
-  insertSnippet,
-  insertSnippetOverRange,
-  applyEdit,
-  replaceSpan,
-  linkRange,
-  linkedSpanAt,
-  spanText,
+  newCid,
+  normalize,
   flatten,
+  chipAt,
+  chipVariables,
+  insertChip,
+  replaceChipContent,
+  retargetChip,
+  dissolveChip,
+  toRenderNodes,
+  fromRawNodes,
   caretQuery,
-  diffTexts,
+  ZWSP,
 } = await import(join(root, 'src/lib/compose/doc.ts'));
-const { parseVariables, copyText } = await import(join(root, 'src/lib/compose/variables.ts'));
+const { parseVariables, copyText, UNSET_VALUE } = await import(
+  join(root, 'src/lib/compose/variables.ts')
+);
 
 let failures = 0;
 function assert(cond, msg) {
@@ -41,364 +52,390 @@ function eq(actual, expected, msg) {
   assert(a === e, `${msg}\n    expected ${e}\n    got      ${a}`);
 }
 
-/** Invariants that must hold after every transform. */
-function checkInvariants(doc, msg) {
-  const total = doc.spans.reduce((n, s) => n + s.length, 0);
-  assert(total === doc.text.length, `${msg}: spans tile text (${total} != ${doc.text.length})`);
-  assert(
-    doc.spans.every((s) => s.length > 0),
-    `${msg}: no zero-length spans`
+const names = (text) => parseVariables(text).map((v) => v.name);
+const kinds = (doc) => doc.nodes.map((n) => n.kind);
+const chip = (name, content, cid = newCid()) => ({ cid, name, content });
+
+// ── the grammar: `{name}` and nothing else ───────────────────────────────────
+console.log('variable grammar');
+{
+  eq(names('{task}'), ['task'], '{task} — a variable');
+  eq(names('{x-1_Y}'), ['x-1_Y'], '{x-1_Y} — hyphen / underscore / digit / case are name chars');
+
+  // The removed default form degrades to PROSE, not to a variable that silently
+  // swallows its default. Loud beats silent: the user sees the stray text.
+  eq(names('{task:write tests}'), [], '{task:write tests} — the removed default form is prose');
+  eq(
+    copyText('do {task:write tests}!', {}, {}),
+    'do {task:write tests}!',
+    '{task:write tests} copies out verbatim — nothing swallowed'
   );
-  for (let i = 1; i < doc.spans.length; i++) {
-    assert(
-      !(doc.spans[i - 1].state === 'typed' && doc.spans[i].state === 'typed'),
-      `${msg}: adjacent typed spans merged`
-    );
+
+  eq(names('{my var}'), [], '{my var} — a space is not a name char');
+  eq(names('{:x}'), [], '{:x} — empty name is prose');
+  eq(names('{a.b}'), [], '{a.b} — a dot is not a name char');
+  eq(names('{"a": 1}'), [], '{"a": 1} — JSON in a prompt body is prose');
+  eq(names('{}'), [], '{} — empty braces are prose');
+
+  // Escapes.
+  eq(names('{{task}}'), [], '{{task}} — escaped, no variable');
+  eq(copyText('{{task}}', {}, {}), '{task}', '{{task}} copies out as literal {task}');
+  eq(names('{{{task}}}'), ['task'], '{{{task}}} — literal { + variable + literal }');
+  eq(
+    copyText('{{{task}}}', { task: 'X' }, { task: false }),
+    '{X}',
+    '{{{task}}} substitutes the inner variable, braces stay literal'
+  );
+
+  // Rule 4: one name = one variable, first-appearance order, deduped.
+  eq(names('{b} {a} {b}'), ['b', 'a'], 'dedupe, first-appearance order');
+  eq(
+    copyText('{x} and {x}', { x: 'A' }, { x: false }),
+    'A and A',
+    'one fill serves every occurrence'
+  );
+}
+
+// ── the grammar is UNIFORM: there is no Markdown awareness ───────────────────
+// It does not know what a fence or a backtick is. An earlier draft excluded code
+// from parsing; that was cut. "Variables work everywhere except inside backticks
+// and except inside fences" is a rule you must be TOLD — unguessable-without-the-
+// contract is the disease this round exists to cure. "It's a Python format
+// string" is a rule the user already knows. We do not invent protocols.
+console.log('no markdown awareness');
+{
+  // Backticks are ordinary characters.
+  eq(names('`{x}`'), ['x'], 'a backtick is just a character — `{x}` IS a variable');
+  eq(names('{a}`{b}`{c}'), ['a', 'b', 'c'], 'backticks do not fence anything off');
+  eq(
+    copyText('`{x}`', { x: 'V' }, { x: false }),
+    '`V`',
+    'a variable in an inline code span substitutes like any other'
+  );
+
+  // So are fences.
+  const fenced = 'before {a}\n```rust\nlet x = {b};\n```\nafter {c}';
+  eq(names(fenced), ['a', 'b', 'c'], 'a {name} inside a fence IS a variable');
+  eq(
+    copyText(fenced, { a: '1', b: '2', c: '3' }, { a: false, b: false, c: false }),
+    'before 1\n```rust\nlet x = 2;\n```\nafter 3',
+    'a fenced variable substitutes like any other'
+  );
+
+  // The cost, accepted knowingly — and LOUD, not silent: the chip renders the
+  // variable names it contains and the fill list lists them, so a stray `name`
+  // from a code sample is visible, and the user escapes it as {{name}} exactly as
+  // they would in Python. The UI surfacing parsed variables is what makes this
+  // safe.
+  eq(names('```\n{{name}}\n```'), [], 'a fenced {{name}} is an ESCAPE, not a variable');
+  eq(
+    copyText('```\n{{name}}\n```', {}, {}),
+    '```\n{name}\n```',
+    'a fenced {{name}} UNESCAPES to {name} — Python semantics, everywhere'
+  );
+
+  // ⚠ The one genuinely silent case, asserted rather than prevented (see the
+  // module header): a Rust format! escape in a code sample unescapes on copy,
+  // because under Python semantics `{{` MEANS a literal brace. To keep a literal
+  // `{{`, write `{{{{` — same as Python.
+  eq(
+    copyText('```rust\nformat!("{{}}", x)\n```', {}, {}),
+    '```rust\nformat!("{}", x)\n```',
+    'a Rust format! escape unescapes on copy — correct under Python semantics'
+  );
+  eq(
+    copyText('```rust\nformat!("{{{{}}}}", x)\n```', {}, {}),
+    '```rust\nformat!("{{}}", x)\n```',
+    'to KEEP a literal {{, write {{{{ — exactly as in Python'
+  );
+
+  // Rule 3 from the other side: everything Python could not read as a plain field
+  // stays literal on its own, with no carve-out doing the work.
+  for (const t of ['{a: 1}', '{ return x }', '{a.b}', '{my var}', '{:x}', '{"json": 1}', '{}']) {
+    eq(names(t), [], `not a Python field, so literal: ${t}`);
+    eq(copyText(t, {}, {}), t, `…and it copies out untouched: ${t}`);
   }
-  for (const s of doc.spans) {
-    assert(
-      (s.state === 'typed') === !s.link,
-      `${msg}: link present iff not typed`
-    );
+
+  // Variable-free documents reconstruct exactly — the scanner never loses a byte.
+  for (const t of ['', 'plain', '```\n```', '`', 'a`b', 'trailing\n']) {
+    eq(copyText(t, {}, {}), t, `byte-preserving: ${JSON.stringify(t)}`);
   }
 }
 
-const link = (id = 'p1') => ({
-  snippetId: id,
-  title: id,
-  scope: { kind: 'global' },
-});
-
-const states = (doc) => doc.spans.map((s) => s.state);
-
-// ── span model: insertion ────────────────────────────────────────────────────
-console.log('insertSnippet');
+// ── copy output: ON / OFF, and the unfilled sentinel in BOTH modes ───────────
+console.log('copy output');
 {
-  // Insert into empty doc.
-  let d = insertSnippet(emptyDoc(), 0, 'LINKED', link());
-  checkInvariants(d, 'insert into empty');
-  eq(states(d), ['linked'], 'empty doc: one linked span');
-  eq(flatten(d), 'LINKED', 'flatten == visible text');
-
-  // Insert at the middle of typed text: typed | linked | typed.
-  d = insertSnippet(docFromText('helloworld'), 5, 'LINKED', link());
-  checkInvariants(d, 'insert mid-typed');
-  eq(states(d), ['typed', 'linked', 'typed'], 'mid-typed split');
-  eq(flatten(d), 'helloLINKEDworld', 'mid-typed text');
-
-  // Insert at boundaries: no split.
-  d = insertSnippet(docFromText('abc'), 0, 'X', link());
-  eq(states(d), ['linked', 'typed'], 'insert at start');
-  d = insertSnippet(docFromText('abc'), 3, 'X', link());
-  eq(states(d), ['typed', 'linked'], 'insert at end');
-
-  // Inserting into the middle of a linked span splits it into two
-  // linked-modified halves (the original no longer appears intact).
-  d = insertSnippet(emptyDoc(), 0, 'AABB', link('outer'));
-  d = insertSnippet(d, 2, 'X', link('inner'));
-  checkInvariants(d, 'insert into linked');
-  eq(states(d), ['linked-modified', 'linked', 'linked-modified'], 'split linked -> modified halves');
-  eq(d.spans[1].link.snippetId, 'inner', 'inner span links the inserted snippet');
-}
-
-// ── span model: the inline-edit transition table ─────────────────────────────
-console.log('applyEdit transitions');
-{
-  // Typing inside a linked span -> absorbed, linked-modified.
-  let d = insertSnippet(docFromText('ab'), 1, 'LINK', link());
-  d = applyEdit(d, 3, 3, 'x'); // strictly inside the linked span [1,5)
-  checkInvariants(d, 'type inside linked');
-  eq(states(d), ['typed', 'linked-modified', 'typed'], 'interior typing modifies');
-  eq(flatten(d), 'aLIxNKb', 'interior typing text');
-
-  // Typing at a linked span's trailing edge -> typed text, span untouched.
-  d = insertSnippet(docFromText('ab'), 1, 'LINK', link());
-  d = applyEdit(d, 5, 5, 'x'); // boundary between LINK and 'b'
-  checkInvariants(d, 'type at edge');
-  eq(states(d), ['typed', 'linked', 'typed'], 'edge typing stays typed');
-  eq(flatten(d), 'aLINKxb', 'edge typing lands outside the span');
-
-  // Deleting inside a linked span -> linked-modified.
-  d = insertSnippet(docFromText(''), 0, 'LINKED', link());
-  d = applyEdit(d, 2, 4, '');
-  checkInvariants(d, 'delete inside linked');
-  eq(states(d), ['linked-modified'], 'interior deletion modifies');
-  eq(flatten(d), 'LIED', 'interior deletion text');
-
-  // Deleting a linked span exactly and fully -> span gone.
-  d = insertSnippet(docFromText('ab'), 1, 'LINK', link());
-  d = applyEdit(d, 1, 5, '');
-  checkInvariants(d, 'delete whole span');
-  eq(states(d), ['typed'], 'whole-span deletion removes it');
-  eq(flatten(d), 'ab', 'whole-span deletion text');
-
-  // Replacing a whole linked span with typing -> typed (you replaced it).
-  d = insertSnippet(docFromText('ab'), 1, 'LINK', link());
-  d = applyEdit(d, 1, 5, 'mine');
-  checkInvariants(d, 'replace whole span');
-  eq(states(d), ['typed'], 'whole-span replacement is typed');
-  eq(flatten(d), 'amineb', 'whole-span replacement text');
-
-  // A selection crossing a typed/linked boundary: linked part clipped ->
-  // linked-modified, inserted text is typed.
-  d = insertSnippet(docFromText('abcd'), 2, 'LINK', link()); // ab LINK cd
-  d = applyEdit(d, 1, 4, 'X'); // eats 'b' + 'LI'
-  checkInvariants(d, 'cross-boundary edit');
-  eq(states(d), ['typed', 'linked-modified', 'typed'], 'cross-boundary states');
-  eq(flatten(d), 'aXNKcd', 'cross-boundary text');
-
-  // Edits never mutate the input doc (pure transforms).
-  const before = insertSnippet(docFromText('ab'), 1, 'LINK', link());
-  const snapshot = JSON.stringify(before);
-  applyEdit(before, 2, 3, 'zz');
-  eq(JSON.stringify(before), snapshot, 'applyEdit does not mutate its input');
-}
-
-// ── span model: replaceSpan / linkRange / linkedSpanAt ───────────────────────
-console.log('replaceSpan / linkRange / linkedSpanAt');
-{
-  // Instance-mode Apply: replace the span's text, caller sets the state.
-  let d = insertSnippet(docFromText('ab'), 1, 'LINK', link());
-  d = replaceSpan(d, 1, 'EDITED', { state: 'linked-modified', link: link() });
-  checkInvariants(d, 'replaceSpan');
-  eq(flatten(d), 'aEDITEDb', 'replaceSpan text');
-  eq(spanText(d, 1), 'EDITED', 'replaceSpan spanText');
-  eq(states(d), ['typed', 'linked-modified', 'typed'], 'replaceSpan state');
-
-  // F4: a typed selection becomes a linked span; text unchanged.
-  d = docFromText('reusable stuff here');
-  d = linkRange(d, 0, 8, link('new-snippet'));
-  checkInvariants(d, 'linkRange');
-  eq(flatten(d), 'reusable stuff here', 'linkRange keeps text');
-  eq(states(d), ['linked', 'typed'], 'linkRange states');
-  eq(d.spans[0].link.snippetId, 'new-snippet', 'linkRange link identity');
-
-  // Caret affordance: interior wins; boundary caret still finds the span.
-  d = insertSnippet(docFromText('ab'), 1, 'LINK', link('the-snippet'));
-  eq(linkedSpanAt(d, 3)?.span.link.snippetId, 'the-snippet', 'caret interior');
-  eq(linkedSpanAt(d, 5)?.span.link.snippetId, 'the-snippet', 'caret at span end');
-  eq(linkedSpanAt(d, 1)?.span.link.snippetId, 'the-snippet', 'caret at span start');
-  eq(linkedSpanAt(d, 0), null, 'caret in typed text -> null');
-}
-
-// ── copy flattening + raw-document integration ──────────────────────────────
-console.log('copy flattening');
-{
-  // The doc holds RAW text — a snippet body's {var} tokens land verbatim as a
-  // linked span, unify with typed variables, and resolve only at copy.
-  let d = docFromText('intro {ticket} ');
-  d = insertSnippet(d, d.text.length, 'Review {ticket:ABC-123} now.', link());
-  d = applyEdit(d, d.text.length, d.text.length, ' outro');
-  checkInvariants(d, 'mixed doc');
-  eq(flatten(d), 'intro {ticket} Review {ticket:ABC-123} now. outro', 'flatten == raw visible text');
+  // ON (a name absent from asVars is ON — the safe default).
   eq(
-    parseVariables(flatten(d)),
-    [{ name: 'ticket' }],
-    'one unified variable across typed + linked spans (first occurrence has no default)'
+    copyText('Review {ticket} please.', { ticket: 'ABC-1' }, {}),
+    'Review <prompt_var name="ticket"/> please.\n\n' +
+      '<prompt_vars>\n<prompt_var name="ticket">ABC-1</prompt_var>\n</prompt_vars>',
+    'ON: occurrence becomes a reference, value hoisted into the block'
   );
   eq(
-    copyText(flatten(d), { ticket: 'JUROR-412' }, { ticket: false }),
-    'intro JUROR-412 Review JUROR-412 now. outro',
-    'copy substitutes one fill into every occurrence'
-  );
-}
-
-// ── span model: insertSnippetOverRange (the one insert path, both triggers) ──
-console.log('insertSnippetOverRange');
-{
-  // Replace the query line the user typed to find the snippet: from line start
-  // to the caret. Simulates ↓-into-panel + Enter (or a mouse click) at the end
-  // of a typed query line.
-  let d = docFromText('intro\nsenior review');
-  const caret = d.text.length; // caret at end
-  const lineStart = d.text.lastIndexOf('\n', caret - 1) + 1; // start of "senior review"
-  d = insertSnippetOverRange(d, lineStart, caret, 'You are a senior reviewer.', link('rev'));
-  checkInvariants(d, 'insert over query line');
-  eq(flatten(d), 'intro\nYou are a senior reviewer.', 'query line replaced, not appended');
-  eq(states(d), ['typed', 'linked'], 'inserted body is a linked span; prior lines stay typed');
-  eq(d.spans[1].link.snippetId, 'rev', 'linked span carries the snippet id');
-
-  // Empty query (caret at a bare line start) degenerates to a plain insert.
-  d = docFromText('lead ');
-  d = insertSnippetOverRange(d, d.text.length, d.text.length, 'BODY', link('b'));
-  checkInvariants(d, 'empty-range insert');
-  eq(flatten(d), 'lead BODY', 'empty range = insert at caret');
-  eq(states(d), ['typed', 'linked'], 'empty-range states');
-
-  // Pure transform — inputs are never mutated.
-  const before = docFromText('abc def');
-  const snap = JSON.stringify(before);
-  insertSnippetOverRange(before, 4, 7, 'X', link());
-  eq(JSON.stringify(before), snap, 'insertSnippetOverRange does not mutate its input');
-}
-
-// ── variable grammar: the SHARED VECTORS (contract §Variable grammar) ────────
-// Both sides (Rust + TS) assert all of these verbatim — the seam contract.
-console.log('variable grammar (shared vectors)');
-{
-  eq(parseVariables('{task}'), [{ name: 'task' }], 'vector: {task} — variable, no default');
-  eq(
-    parseVariables('{task:write tests}'),
-    [{ name: 'task', default: 'write tests' }],
-    'vector: {task:write tests} — variable with default'
-  );
-  eq(parseVariables('{task:}'), [{ name: 'task', default: '' }], 'vector: {task:} — empty default');
-  eq(
-    parseVariables('{x:a:b}'),
-    [{ name: 'x', default: 'a:b' }],
-    'vector: {x:a:b} — first colon splits'
-  );
-  eq(parseVariables('{{task}}'), [], 'vector: {{task}} — escaped, no variable');
-  eq(parseVariables('{"a": 1}'), [], 'vector: {"a": 1} — invalid name is literal');
-  eq(parseVariables('{my var}'), [], 'vector: {my var} — space is literal');
-  eq(parseVariables('{x-1_Y}'), [{ name: 'x-1_Y' }], 'vector: {x-1_Y} — hyphen/underscore/digit name');
-  eq(parseVariables('{:x}'), [], 'vector: {:x} — empty name is literal');
-  eq(
-    parseVariables('{{{task}}}'),
-    [{ name: 'task' }],
-    'vector: {{{task}}} — literal { + variable + literal }'
-  );
-  eq(
-    parseVariables('{x:a} {x:b}'),
-    [{ name: 'x', default: 'a' }],
-    'vector (rule 5): {x:a} {x:b} — one variable, first default wins'
-  );
-  eq(
-    parseVariables('{x} {x:b}'),
-    [{ name: 'x' }],
-    'vector (rule 5, plain read): {x} {x:b} — first occurrence wins even with NO default'
-  );
-  eq(
-    parseVariables('{a:{b}}'),
-    [{ name: 'b' }],
-    'vector: {a:{b}} — failed run consumes nothing; literal {a: + variable b + literal }'
-  );
-  eq(
-    copyText('{a:{b}}', { b: 'X' }, { b: false }),
-    '{a:X}',
-    'vector: {a:{b}} substitute mode — inner variable fills, outer braces stay literal'
-  );
-
-  // Rule 4: one name = one variable across the whole document.
-  eq(
-    parseVariables('do {task} then {other} then {task:late}'),
-    [{ name: 'task' }, { name: 'other' }],
-    'dedupe keeps first-appearance order; later default never upgrades the first'
-  );
-}
-
-// ── copy output (contract §Copy output) — per-variable as-var map ────────────
-// The signature is now `copyText(text, fills, asVars)` where a name ABSENT from
-// asVars is ON (the founder's safe default). So `{}` = all ON; `{ x: false }` =
-// x substituted in place, everything else ON.
-console.log('copy output (per-variable as-var)');
-{
-  // The contract's own example, verbatim: ON mode dedups into a vars block.
-  eq(
-    copyText('Review the PR for {ticket:ABC-123} and summarize.', {}, {}),
-    'Review the PR for <prompt_var name="ticket"/> and summarize.\n\n' +
-      '<prompt_vars>\n<prompt_var name="ticket">ABC-123</prompt_var>\n</prompt_vars>',
-    'ON (absent = ON): contract example — occurrence element + appended block with default'
-  );
-  eq(
-    copyText('do {x} and {x}', { x: 'A' }, {}),
-    'do <prompt_var name="x"/> and <prompt_var name="x"/>\n\n' +
+    copyText('{x} and {x}', { x: 'A' }, {}),
+    '<prompt_var name="x"/> and <prompt_var name="x"/>\n\n' +
       '<prompt_vars>\n<prompt_var name="x">A</prompt_var>\n</prompt_vars>',
-    'ON: repeated occurrences, one block entry, user fill wins'
+    'ON: repeated occurrences, one block entry'
+  );
+
+  // OFF: substitute in place, as plain text (never XML-escaped — it is prose the
+  // model reads, not markup it parses).
+  eq(copyText('do {task}!', { task: 'ship' }, { task: false }), 'do ship!', 'OFF: substitutes');
+  eq(
+    copyText('check {c}', { c: 'a < b && b > 0' }, { c: false }),
+    'check a < b && b > 0',
+    'OFF: substituted value is plain text, never escaped'
+  );
+
+  // Rule 5 — the sentinel, in BOTH modes. This is what makes a forgotten
+  // variable still produce a working prompt regardless of the toggle.
+  eq(
+    copyText('do {task}', {}, { task: false }),
+    `do ${UNSET_VALUE}`,
+    'OFF + unfilled → the sentinel substitutes in place'
   );
   eq(
-    copyText('need {x}', {}, { x: true }),
-    'need <prompt_var name="x"/>\n\n<prompt_vars>\n<prompt_var name="x"></prompt_var>\n</prompt_vars>',
-    'ON (explicit true): unfilled + no default = empty element (honest fill-me signal)'
+    copyText('do {task}', {}, {}),
+    `do <prompt_var name="task"/>\n\n<prompt_vars>\n<prompt_var name="task">${UNSET_VALUE}</prompt_var>\n</prompt_vars>`,
+    'ON + unfilled → the sentinel is the block value'
   );
-  eq(copyText('plain {{json}} body', {}, {}), 'plain {json} body', 'ON: no variables, no block, escapes resolved');
+  eq(
+    copyText('do {task}', { task: '' }, { task: false }),
+    `do ${UNSET_VALUE}`,
+    'an empty fill reads as untouched → the sentinel'
+  );
 
-  // Block values are XML-escaped (contract: the wrapper form exists for
-  // parseability — an unescaped value could inject phantom variables).
+  // The block is XML-escaped so a value cannot inject phantom variables.
   eq(
     copyText('need {x}', { x: '</prompt_var><prompt_var name="evil">pwned' }, {}),
     'need <prompt_var name="x"/>\n\n<prompt_vars>\n' +
       '<prompt_var name="x">&lt;/prompt_var&gt;&lt;prompt_var name="evil"&gt;pwned</prompt_var>\n' +
       '</prompt_vars>',
-    'ON: injection-shaped value is escaped, no phantom variable'
-  );
-  eq(
-    copyText('check {cond:a < b && b > 0}', {}, {}),
-    'check <prompt_var name="cond"/>\n\n<prompt_vars>\n' +
-      '<prompt_var name="cond">a &lt; b &amp;&amp; b &gt; 0</prompt_var>\n' +
-      '</prompt_vars>',
-    'ON: < > & in a default are escaped in the block'
+    'ON: an injection-shaped value is escaped — no phantom variable'
   );
 
-  // OFF (explicit false per name): substitute in place.
-  eq(copyText('do {task:write tests}!', {}, { task: false }), 'do write tests!', 'OFF: default substitutes');
-  eq(copyText('do {task:write tests}!', { task: 'ship' }, { task: false }), 'do ship!', 'OFF: fill beats default');
-  eq(copyText('keep {x}', {}, { x: false }), 'keep {x}', 'OFF: unfilled, no default — canonical literal stays visible');
-  eq(copyText('blank {task:}!', {}, { task: false }), 'blank !', 'OFF: {task:} fills as empty when unfilled');
-  eq(copyText('{x:a} {x:b}', {}, { x: false }), 'a a', 'OFF (rule 5): first default serves every occurrence');
-  eq(copyText('{{literal}} and {v:x}', {}, { v: false }), '{literal} and x', 'OFF: escapes resolve on copy');
+  // Mixed modes in one document; the block lists only the ON variables.
   eq(
-    copyText('check {cond:a < b && b > 0}', {}, { cond: false }),
-    'check a < b && b > 0',
-    'OFF: substitute-in-place is plain text — never XML-escaped'
+    copyText('Deploy {ticket} to {env}.', { ticket: 'ABC-1', env: 'prod' }, { env: false }),
+    'Deploy <prompt_var name="ticket"/> to prod.\n\n' +
+      '<prompt_vars>\n<prompt_var name="ticket">ABC-1</prompt_var>\n</prompt_vars>',
+    'MIXED: ON hoisted, OFF substituted, block lists only ON'
   );
+  eq(copyText('a {x} b {y}', { x: '1', y: '2' }, { x: false, y: false }), 'a 1 b 2', 'all OFF: no block');
   eq(copyText('', {}, {}), '', 'empty document copies empty');
 }
 
-// ── per-variable MIXED modes in one document (the round-B capability) ─────────
-console.log('copy output (mixed ON/OFF in one document)');
+// ── the node model ───────────────────────────────────────────────────────────
+console.log('node model');
 {
-  // One doc, three variables: ticket ON (hoisted), env OFF (substituted with a
-  // value), region OFF and unfilled (canonical literal stays). The block lists
-  // ONLY the ON variable, in first-appearance order.
-  eq(
-    copyText(
-      'Deploy {ticket:ABC-1} to {env:prod} in {region}.',
-      { env: 'staging' },
-      { env: false, region: false }
-    ),
-    'Deploy <prompt_var name="ticket"/> to staging in {region}.\n\n' +
-      '<prompt_vars>\n<prompt_var name="ticket">ABC-1</prompt_var>\n</prompt_vars>',
-    'MIXED: ON var hoisted to block; OFF var substituted; OFF unfilled var stays canonical {region}; block lists only ON'
-  );
+  // flatten() is the seam where rendered and contributed diverge: the box shows
+  // a chip's NAME, and flatten returns its BODY.
+  const d = normalize({
+    nodes: [
+      { kind: 'text', text: 'intro ' },
+      { kind: 'chip', ...chip('rust/review', 'Review {lang} code.') },
+      { kind: 'text', text: ' outro' },
+    ],
+  });
+  eq(flatten(d), 'intro Review {lang} code. outro', 'flatten emits chip CONTENT, not its name');
+  eq(toRenderNodes(d)[1], { kind: 'chip', cid: d.nodes[1].cid, name: 'rust/review', vars: ['lang'] },
+    'a chip renders as its name + variable names — never its body');
+  eq(names(flatten(d)), ['lang'], "a chip's variables reach the whole-prompt fill list");
 
-  // An ON variable's value is XML-escaped in the block while an OFF variable's
-  // value substitutes as plain text in the SAME document — escaping is a
-  // property of the block, not of the prompt.
-  eq(
-    copyText(
-      'safe {a} vs raw {b}',
-      { a: '1 < 2 & 3', b: '4 < 5 & 6' },
-      { b: false }
-    ),
-    'safe <prompt_var name="a"/> vs raw 4 < 5 & 6\n\n' +
-      '<prompt_vars>\n<prompt_var name="a">1 &lt; 2 &amp; 3</prompt_var>\n</prompt_vars>',
-    'MIXED: ON value escaped in block; OFF value plain in body; same document'
-  );
+  // normalize: no empty text nodes, no adjacent text nodes.
+  const messy = normalize({
+    nodes: [
+      { kind: 'text', text: '' },
+      { kind: 'text', text: 'a' },
+      { kind: 'text', text: 'b' },
+      { kind: 'chip', ...chip('s', 'S') },
+    ],
+  });
+  eq(kinds(messy), ['text', 'chip'], 'normalize drops empties and merges adjacent text');
+  eq(messy.nodes[0].text, 'ab', 'normalize merged the text');
 
-  // All-OFF: no block at all even though variables exist.
-  eq(
-    copyText('a {x} b {y}', { x: '1', y: '2' }, { x: false, y: false }),
-    'a 1 b 2',
-    'MIXED (all OFF): no <prompt_vars> block emitted'
+  // insertChip replaces the query line the user typed to summon the snippet.
+  let q = docFromText('intro\nsenior review');
+  q = insertChip(q, { node: 0, offset: 'intro\nsenior review'.length }, chip('rev', 'BODY'));
+  eq(kinds(q), ['text', 'chip'], 'the query line is consumed by the insert');
+  eq(flatten(q), 'intro\nBODY', 'query text is replaced, not left in front of the chip');
+
+  // Insert into an empty doc.
+  const e = insertChip(emptyDoc(), { node: 0, offset: 0 }, chip('s', 'S'));
+  eq(kinds(e), ['chip'], 'insert into an empty doc appends the chip');
+
+  // A caret can genuinely sit BETWEEN two adjacent chips, where the model holds
+  // no text node to split. The chip must land there, not at the end of the doc.
+  const between = insertChip(
+    normalize({
+      nodes: [
+        { kind: 'chip', ...chip('one', 'A') },
+        { kind: 'chip', ...chip('two', 'C') },
+      ],
+    }),
+    { node: 1, offset: 0 },
+    chip('mid', 'B')
   );
+  eq(flatten(between), 'ABC', 'a chip inserted between two chips lands between them');
+
+  // Past the end → appended.
+  const past = insertChip(docFromText('tail'), { node: 9, offset: 0 }, chip('s', '!'));
+  eq(flatten(past), 'tail!', 'a caret past the end appends');
+
+  // Use once / Save / Delete.
+  const cid = newCid();
+  let u = normalize({ nodes: [{ kind: 'chip', ...chip('a', 'ORIG', cid) }] });
+  u = replaceChipContent(u, cid, 'TWEAKED');
+  eq(flatten(u), 'TWEAKED', 'Use once rewrites this chip only');
+  eq(chipAt(u, cid).name, 'a', 'Use once leaves the name alone');
+
+  let r = retargetChip(u, cid, 'b', 'NEW');
+  eq([chipAt(r, cid).name, flatten(r)], ['b', 'NEW'], 'Save-under-a-new-name retargets the chip');
+
+  // Delete dissolves the chip into typed text: the file goes, the writing stays.
+  const del = dissolveChip(
+    normalize({ nodes: [{ kind: 'text', text: 'x ' }, { kind: 'chip', ...chip('a', 'BODY', cid) }] }),
+    cid
+  );
+  eq(kinds(del), ['text'], 'Delete leaves no chip behind');
+  eq(flatten(del), 'x BODY', "Delete keeps the chip's words in the prompt");
+
+  // Use once on one instance must not touch the other copy of the same snippet.
+  const c1 = newCid();
+  const c2 = newCid();
+  let two = normalize({
+    nodes: [
+      { kind: 'chip', ...chip('same', 'BODY', c1) },
+      { kind: 'text', text: ' / ' },
+      { kind: 'chip', ...chip('same', 'BODY', c2) },
+    ],
+  });
+  two = replaceChipContent(two, c1, 'ONLY-ME');
+  eq(flatten(two), 'ONLY-ME / BODY', 'Use once is per-instance, not per-snippet');
+
+  // chipVariables reads the body, deduped and in order.
+  eq(chipVariables({ kind: 'chip', ...chip('s', '{b} {a} {b}') }), ['b', 'a'], 'chip variables');
+
+  // Pure transforms: inputs are never mutated.
+  const before = normalize({ nodes: [{ kind: 'chip', ...chip('a', 'X', cid) }] });
+  const snap = JSON.stringify(before);
+  replaceChipContent(before, cid, 'Y');
+  dissolveChip(before, cid);
+  eq(JSON.stringify(before), snap, 'transforms do not mutate their input');
 }
 
-// ── editor plumbing: caretQuery + diffTexts ──────────────────────────────────
-console.log('caretQuery / diffTexts');
+// ── the contenteditable round-trip ───────────────────────────────────────────
+// doc → toRenderNodes → (DOM) → fromRawNodes → doc must be the IDENTITY. If it
+// is not, a prompt silently corrupts into something that still looks plausible in
+// the box and copies out wrong — the failure mode a code read rationalizes past.
+console.log('contenteditable round-trip');
 {
-  eq(caretQuery('hello\nreview this', 17), 'review this', 'query is the current line to caret');
-  eq(caretQuery('hello\nreview this', 5), 'hello', 'first line');
-  eq(caretQuery('abc', 0), '', 'caret at start -> empty');
+  /** Simulate the DOM: render, then read the children straight back. A chip
+   *  element yields its cid; text yields its characters. The renderer pads chips
+   *  with a ZWSP so the browser always has a caret position. */
+  const throughDom = (doc) => {
+    const raw = [];
+    const rendered = toRenderNodes(doc);
+    rendered.forEach((n, i) => {
+      if (n.kind === 'text') {
+        raw.push({ cid: null, text: n.text });
+        return;
+      }
+      // The renderer's ZWSP padding around a chip — must never survive read-back.
+      if (i === 0 || rendered[i - 1].kind === 'chip') raw.push({ cid: null, text: ZWSP });
+      raw.push({ cid: n.cid, text: `${n.name}` });
+      if (i === rendered.length - 1 || rendered[i + 1].kind === 'chip') {
+        raw.push({ cid: null, text: ZWSP });
+      }
+    });
+    return fromRawNodes(raw, doc);
+  };
 
-  eq(diffTexts('abc', 'abXc'), { start: 2, end: 2, inserted: 'X' }, 'diff insertion');
-  eq(diffTexts('abXc', 'abc'), { start: 2, end: 3, inserted: '' }, 'diff deletion');
-  eq(diffTexts('abc', 'aZc'), { start: 1, end: 2, inserted: 'Z' }, 'diff replacement');
-  eq(diffTexts('abc', 'abc'), null, 'diff equal -> null');
-  eq(diffTexts('', 'abc'), { start: 0, end: 0, inserted: 'abc' }, 'diff from empty');
-  // Ambiguous repeat: deterministic earliest attribution, text still correct.
-  const dd = diffTexts('aab', 'aaab');
-  eq('aab'.slice(0, dd.start) + dd.inserted + 'aab'.slice(dd.end), 'aaab', 'diff round-trips');
+  const roundTrips = (doc, msg) => eq(throughDom(doc).nodes, doc.nodes, `round-trip: ${msg}`);
+
+  const a = newCid();
+  const b = newCid();
+
+  roundTrips(emptyDoc(), 'empty doc');
+  roundTrips(docFromText('just text'), 'text only');
+  roundTrips(docFromText('trailing newline\n'), 'trailing newline survives');
+  roundTrips(normalize({ nodes: [{ kind: 'chip', ...chip('only', 'BODY', a) }] }), 'a chip alone');
+  roundTrips(
+    normalize({ nodes: [{ kind: 'chip', ...chip('first', 'B', a) }, { kind: 'text', text: ' tail' }] }),
+    'chip at position 0'
+  );
+  roundTrips(
+    normalize({ nodes: [{ kind: 'text', text: 'head ' }, { kind: 'chip', ...chip('last', 'B', a) }] }),
+    'chip at the very end'
+  );
+  roundTrips(
+    normalize({
+      nodes: [
+        { kind: 'chip', ...chip('one', 'B1', a) },
+        { kind: 'chip', ...chip('two', 'B2', b) },
+      ],
+    }),
+    'two ADJACENT chips, no text between'
+  );
+  roundTrips(normalize({ nodes: [{ kind: 'chip', ...chip('empty', '', a) }] }), 'a chip with EMPTY content');
+  roundTrips(
+    normalize({
+      nodes: [
+        { kind: 'text', text: 'a\n\nb ' },
+        { kind: 'chip', ...chip('mid', 'Review {lang}\n\n```\nlet x = {size};\n```', a) },
+        { kind: 'text', text: ' z' },
+      ],
+    }),
+    'a chip whose body carries newlines and a fenced block'
+  );
+
+  // The ZWSP is display scaffolding — it must never reach the model, and so can
+  // never reach a copied prompt.
+  const padded = fromRawNodes([{ cid: null, text: `${ZWSP}hi${ZWSP}` }], emptyDoc());
+  eq(flatten(padded), 'hi', 'ZWSP padding is stripped on the way back in');
+
+  // A chip copy/pasted inside the box arrives with a DUPLICATE cid. It must
+  // become its own instance — otherwise `Use once` on one would silently rewrite
+  // the other, which is the corruption class this redesign exists to kill,
+  // arriving through the clipboard.
+  const src = normalize({ nodes: [{ kind: 'chip', ...chip('dup', 'BODY', a) }] });
+  const pasted = fromRawNodes(
+    [
+      { cid: a, text: 'dup' },
+      { cid: a, text: 'dup' },
+    ],
+    src
+  );
+  eq(kinds(pasted), ['chip', 'chip'], 'a pasted chip survives as a second chip');
+  assert(pasted.nodes[0].cid !== pasted.nodes[1].cid, 'a pasted chip gets a FRESH cid');
+  eq(
+    [pasted.nodes[0].content, pasted.nodes[1].content],
+    ['BODY', 'BODY'],
+    'both copies keep the body — a copy is a copy'
+  );
+  const tweaked = replaceChipContent(pasted, pasted.nodes[0].cid, 'ONLY-ME');
+  eq(flatten(tweaked), 'ONLY-MEBODY', 'Use once on the pasted pair touches one instance only');
+
+  // Deleting a chip in the box (backspace over the atom) just drops it.
+  const dropped = fromRawNodes([{ cid: null, text: 'kept' }], src);
+  eq(kinds(dropped), ['text'], 'a backspaced chip is gone from the model');
+
+  // A chip element from outside the box has an unknown cid: dropped, never
+  // coerced into text — rendering its label would substitute the word
+  // "code_review" for the code-review prompt itself.
+  const foreign = fromRawNodes([{ cid: 'not-ours', text: 'code_review' }, { cid: null, text: 'x' }], src);
+  eq(kinds(foreign), ['text'], 'an unknown chip is dropped');
+  eq(flatten(foreign), 'x', "an unknown chip's LABEL never leaks into the prompt");
+}
+
+// ── caretQuery ───────────────────────────────────────────────────────────────
+console.log('caretQuery');
+{
+  eq(caretQuery('hello\nreview this', 17), 'review this', 'the current line, up to the caret');
+  eq(caretQuery('hello\nreview this', 5), 'hello', 'first line');
+  eq(caretQuery('abc', 0), '', 'caret at the start → empty');
+  eq(caretQuery(`${'x'.repeat(200)}`, 200).length, 120, 'a very long line is tail-capped');
 }
 
 if (failures > 0) {
