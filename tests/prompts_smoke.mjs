@@ -282,6 +282,24 @@ console.log('node model');
   const e = insertChip(emptyDoc(), { node: 0, offset: 0 }, chip('s', 'S'));
   eq(kinds(e), ['chip'], 'insert into an empty doc appends the chip');
 
+  // A caret can genuinely sit BETWEEN two adjacent chips, where the model holds
+  // no text node to split. The chip must land there, not at the end of the doc.
+  const between = insertChip(
+    normalize({
+      nodes: [
+        { kind: 'chip', ...chip('one', 'A') },
+        { kind: 'chip', ...chip('two', 'C') },
+      ],
+    }),
+    { node: 1, offset: 0 },
+    chip('mid', 'B')
+  );
+  eq(flatten(between), 'ABC', 'a chip inserted between two chips lands between them');
+
+  // Past the end → appended.
+  const past = insertChip(docFromText('tail'), { node: 9, offset: 0 }, chip('s', '!'));
+  eq(flatten(past), 'tail!', 'a caret past the end appends');
+
   // Use once / Save / Delete.
   const cid = newCid();
   let u = normalize({ nodes: [{ kind: 'chip', ...chip('a', 'ORIG', cid) }] });

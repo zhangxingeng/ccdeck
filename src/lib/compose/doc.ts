@@ -132,9 +132,17 @@ export function chipVariables(chip: ChipNode): string[] {
   return parseVariables(chip.content).map((v) => v.name);
 }
 
-/** Where a caret sits: inside text node `node`, at character `offset`. Chips are
- *  atomic, so a caret is never *inside* one — only before or after it, which is a
- *  position in an adjacent text node. */
+/**
+ * Where a caret sits.
+ *
+ * `node` indexes doc.nodes. If that node is TEXT, `offset` is the character
+ * offset within it. If it is a CHIP — or `node` is past the end — the caret is
+ * an insertion point *before* that index, with no text to split. Both cases are
+ * real: a caret genuinely can sit between two adjacent chips, where the model
+ * holds no text node at all.
+ *
+ * Chips are atomic, so a caret is never *inside* one.
+ */
 export interface Caret {
   node: number;
   offset: number;
@@ -150,13 +158,16 @@ export interface Caret {
  * then Enter.
  */
 export function insertChip(doc: Doc, caret: Caret, chip: Omit<ChipNode, 'kind'>): Doc {
-  const node = doc.nodes[caret.node];
+  const at = Math.max(0, Math.min(caret.node, doc.nodes.length));
+  const node = doc.nodes[at];
   const chipNode: ChipNode = { kind: 'chip', ...chip };
 
-  // No text node to insert into (empty doc, or a caret we could not resolve):
-  // append. Landing the chip at the end beats losing it.
+  // The caret sits between nodes (before a chip, or past the end): there is no
+  // query text to consume, so just land the chip there.
   if (!node || node.kind !== 'text') {
-    return normalize({ nodes: [...doc.nodes, chipNode] });
+    return normalize({
+      nodes: [...doc.nodes.slice(0, at), chipNode, ...doc.nodes.slice(at)],
+    });
   }
 
   const offset = Math.max(0, Math.min(caret.offset, node.text.length));
@@ -164,11 +175,11 @@ export function insertChip(doc: Doc, caret: Caret, chip: Omit<ChipNode, 'kind'>)
 
   return normalize({
     nodes: [
-      ...doc.nodes.slice(0, caret.node),
+      ...doc.nodes.slice(0, at),
       { kind: 'text', text: node.text.slice(0, lineStart) },
       chipNode,
       { kind: 'text', text: node.text.slice(offset) },
-      ...doc.nodes.slice(caret.node + 1),
+      ...doc.nodes.slice(at + 1),
     ],
   });
 }
