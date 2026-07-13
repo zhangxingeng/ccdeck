@@ -75,4 +75,4 @@ tar = "0.4"
 # tauri-plugin-updater already pulls zip 4.x, so this unifies to one compiled
 # copy instead of shipping two zip majors in the Windows binary.
 [target.'cfg(windows)'.dependencies]
-zip = { version = "4", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
