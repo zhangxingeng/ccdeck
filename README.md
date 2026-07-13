@@ -57,10 +57,7 @@ and paste it wherever you're working.
 You never have to touch the mouse: type to search, arrow to choose, Enter to insert, `Ctrl+S` to
 save, `Ctrl+C` to copy.
 
-<p align="center">
-  <img src="project_docs/screenshots/prompt-projects.png" alt="The project manager listing prompt folders, with open and remove actions" width="47%">
-  <img src="project_docs/screenshots/prompt-settings.png" alt="The Prompt Library panel" width="47%">
-</p>
+![The project manager listing prompt folders, with open and remove actions](project_docs/screenshots/prompt-projects.png)
 
 Search finds your snippets by spelling out of the box, instantly. It also finds them by *meaning* —
 so "fix a bug" turns up the snippet you titled `repro-first`. That second half runs on a small local
