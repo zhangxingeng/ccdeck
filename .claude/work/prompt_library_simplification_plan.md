@@ -287,7 +287,7 @@ than a moving one.
 
 ## New command surface
 
-Down from 11 commands to 7. All prompt-related.
+Down from 11 commands to 9. All prompt-related.
 
 | Command | Notes |
 |---|---|
