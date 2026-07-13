@@ -47,9 +47,6 @@
     terminal: '',
     launchCommand: '',
     updateCheckOnLaunch: true,
-    // Prompt Library hotkeys; owned by the Prompts view's Shortcuts section,
-    // carried here only so a pre-load save can't blank them.
-    hotkeys: {},
   });
   let original = $state('');
   let saveMsg = $state<string | null>(null);

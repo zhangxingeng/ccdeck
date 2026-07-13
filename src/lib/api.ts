@@ -225,7 +225,6 @@ let devAppConfig: AppConfig = {
   terminal: '',
   launchCommand: '',
   updateCheckOnLaunch: true,
-  hotkeys: {},
 };
 
 /** CC Deck's own App Config preferences (terminal choice, resume-launch command,

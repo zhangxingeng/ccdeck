@@ -10,7 +10,6 @@
 //! side needs these values at terminal-launch time, before any webview is
 //! involved.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -53,18 +52,6 @@ pub struct AppConfig {
     /// runs regardless of this toggle.
     #[serde(default = "default_true")]
     pub update_check_on_launch: bool,
-    /// Prompt Library hotkeys (contract § Hotkeys): command id → normalized
-    /// chord string, e.g. `"copyPrompt" -> "Mod+C"`, where `Mod` stands for
-    /// `Ctrl` on Windows/Linux and `Cmd` on macOS so one stored binding is
-    /// correct cross-platform and a config file is portable. An absent command
-    /// id falls back to its default — a fresh install and a pre-hotkeys config
-    /// are the same case, and neither needs a migration (the empty map is the
-    /// all-defaults state). `BTreeMap` for deterministic key ordering, so a
-    /// user who git-tracks `~/.ccdeck/config.json` gets diff-stable output.
-    /// Persisted through the existing `get_app_config`/`set_app_config` — no
-    /// new command surface. Only *command* hotkeys live here; spatial/context
-    /// keys (`↓`/`Enter`/`Esc`) are not rebindable and are not stored.
-    pub hotkeys: BTreeMap<String, String>,
 }
 
 impl Default for AppConfig {
@@ -73,7 +60,6 @@ impl Default for AppConfig {
             terminal: String::new(),
             launch_command: String::new(),
             update_check_on_launch: true,
-            hotkeys: BTreeMap::new(),
         }
     }
 }
@@ -331,28 +317,24 @@ mod tests {
     }
 
     #[test]
-    fn hotkeys_default_empty_and_round_trip() {
-        // Contract § Hotkeys: an absent `hotkeys` key deserializes to the empty
-        // map (the all-defaults state — a fresh install and a pre-hotkeys config
-        // are the same case, no migration). A populated map round-trips under
-        // the camelCase key its siblings use, and BTreeMap keeps the serialized
-        // key order deterministic so a git-tracked config file diffs cleanly.
-        let old: AppConfig = serde_json::from_str(r#"{"terminal":""}"#).unwrap();
-        assert!(old.hotkeys.is_empty(), "missing key must default to empty map");
-
-        let json =
-            r#"{"hotkeys":{"copyPrompt":"Mod+C","saveAs":"Mod+S"}}"#;
-        let config: AppConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.hotkeys.get("copyPrompt").map(String::as_str), Some("Mod+C"));
-        assert_eq!(config.hotkeys.get("saveAs").map(String::as_str), Some("Mod+S"));
-
-        let out = serde_json::to_string(&config).unwrap();
-        assert!(out.contains(r#""hotkeys":{"#), "camelCase key: {out}");
-        // BTreeMap orders keys lexicographically: "copyPrompt" before "saveAs".
-        assert!(
-            out.contains(r#""hotkeys":{"copyPrompt":"Mod+C","saveAs":"Mod+S"}"#),
-            "deterministic key order: {out}"
-        );
+    fn deserialize_ignores_removed_hotkeys_key() {
+        // Contract § Cuts removed hotkey REBINDING this round — the two commands
+        // (copyPrompt / saveAs) are fixed constants in the view now, so the
+        // stored override map has nothing left to override. The Prompt Library
+        // has shipped users (v0.12.0), so a config already on someone's disk
+        // still carries a `hotkeys` key: with no `deny_unknown_fields` it is
+        // simply ignored and the config loads cleanly, exactly like the retired
+        // `promptsAsVariable` and `terminalArgs` keys before it. Removing a key
+        // from the struct must never turn a released user's config into a load
+        // failure — proven here by parsing the fixture, not by reasoning about
+        // serde's usual behavior.
+        let with_stale =
+            r#"{"terminal":"konsole -e","hotkeys":{"copyPrompt":"Mod+C","saveAs":"Mod+S"}}"#;
+        let config: AppConfig = serde_json::from_str(with_stale).unwrap();
+        assert_eq!(config.terminal, "konsole -e");
+        // The serialized form no longer emits the field at all.
+        let json = serde_json::to_string(&AppConfig::default()).unwrap();
+        assert!(!json.contains("hotkeys"), "field is gone: {json}");
     }
 
     #[test]

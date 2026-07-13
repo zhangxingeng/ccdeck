@@ -8,30 +8,17 @@
  * components) so a draft prompt survives switching views — leaving Prompts
  * to check a session and coming back must not eat your composition.
  */
-import type {
-  Snippet,
-  MatchHit,
-  SnippetInput,
-  SnippetLoadError,
-  EmbedStatus,
-  EmbedProgress,
-  Project,
-  ProjectInput,
-} from './prompts/types';
+import type { Snippet, Project } from './prompts/types';
 import {
   listSnippets,
-  snippetLoadErrors,
   saveSnippet as apiSaveSnippet,
   deleteSnippet as apiDeleteSnippet,
   listProjects,
-  saveProject as apiSaveProject,
-  deleteProject as apiDeleteProject,
+  addProject as apiAddProject,
+  removeProject as apiRemoveProject,
+  setActiveProject as apiSetActiveProject,
   matchSnippets,
-  embedStatus,
-  embedDownload,
-  setEmbedEnabled,
-  getAppConfig,
-  setAppConfig,
+  touchSnippet as apiTouchSnippet,
 } from './api';
 import {
   type Doc,
@@ -46,36 +33,35 @@ import {
   spanStarts,
 } from './compose/doc';
 import { copyText } from './compose/variables';
-import {
-  resolveHotkeys,
-  resolveHotkeysReport,
-  HOTKEY_LABELS,
-  type HotkeyCommand,
-} from './prompts/hotkeys';
-import { deriveNotices, type Notice } from './prompts/notices';
-import { toasts } from './prompts/toasts.svelte';
 
 /** Light debounce so we don't hit the matcher on every literal keystroke. */
 const DEBOUNCE_MS = 110;
-/** Match panel size — small on purpose; it's a suggestion strip, not a browser. */
-const MATCH_LIMIT = 8;
+/** Safety cap on one match run, not a UX feature.
+ *
+ *  The panel is the LIBRARY now, not a suggestion strip: at rest it lists every
+ *  snippet in the active project, and typing filters that list *down*. So the
+ *  cap has to be far above any real library — a cap that actually bites would
+ *  make the panel quietly lie about what it contains ("this is everything")
+ *  while hiding snippets. If a library ever exceeds it, the panel says so
+ *  rather than truncating in silence. */
+export const MATCH_LIMIT = 500;
 
 export interface ResolvedHit {
   snippet: Snippet;
   score: number;
-  source: MatchHit['source'];
 }
 
 export const prompts = $state({
-  // library
+  // library — the snippets of the ACTIVE project (every *.md under its folder)
   snippets: [] as Snippet[],
   loadError: null as string | null,
-  /** Hand-edited snippet files that failed to parse on the last load pass —
-   *  shown as a dismissable notice so a typo never reads as a lost snippet. */
-  snippetLoadErrors: [] as SnippetLoadError[],
-  // project roster + active tab (null = the Global tab)
+  /** The project roster. A project is a name and a folder — nothing else. */
   projects: [] as Project[],
-  activeProjectId: null as string | null,
+  /** Absolute path of the active project, persisted by the backend and restored
+   *  on launch. `null` does NOT mean "global" — there is no global scope now, a
+   *  snippet lives in the folder it sits in. It means **no project is
+   *  configured yet**, which renders as the empty state that asks for a folder. */
+  activeProjectPath: null as string | null,
   // compose surface
   doc: emptyDoc() as Doc,
   caret: 0,
@@ -93,120 +79,32 @@ export const prompts = $state({
    *  in-place substitution of unexpected data can bloat the prompt). Session-
    *  only, never persisted to the snippet ([JC-9]). */
   asVars: {} as Record<string, boolean>,
-  /** Stored hotkey overrides (command id → chord), loaded from app config;
-   *  merged over the defaults by resolveHotkeys. Absent command = default. */
-  hotkeyOverrides: {} as Record<string, string>,
-  /** Non-fatal config persistence failure (hotkey rebind) — the in-session
-   *  binding still works; only restart survival is at risk. Never hidden. */
-  configError: null as string | null,
   // live matching
   matchQuery: '',
   hits: [] as ResolvedHit[],
   matching: false,
-  // embeddings (opt-in, behind the config popover)
-  embed: null as EmbedStatus | null,
-  embedProgress: null as EmbedProgress | null,
-  embedError: null as string | null,
 });
 
 let matchId = 0;
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-let configLoaded = false;
 
 // ── lifecycle ────────────────────────────────────────────────────────────────
 
-/** Load snippets, the project roster, embed status, and (once) the persisted
- *  hotkey overrides. Idempotent per session — re-entering the view refreshes
- *  the library but keeps the compose doc and fills. */
+/** Load the project roster + the active project's snippets, then run the first
+ *  match so the panel is already populated when the view paints. Idempotent per
+ *  session — re-entering refreshes the library but keeps the compose doc. */
 export async function initPrompts(): Promise<void> {
   try {
-    prompts.snippets = await listSnippets();
+    const { projects, active } = await listProjects();
+    prompts.projects = projects;
+    prompts.activeProjectPath = active;
     prompts.loadError = null;
   } catch (e) {
     prompts.loadError = e instanceof Error ? e.message : String(e);
+    return; // no roster ⇒ no project ⇒ nothing to list or match
   }
-  try {
-    prompts.snippetLoadErrors = await snippetLoadErrors();
-  } catch {
-    // Diagnostic surface only — if the command itself fails, the primary
-    // listSnippets error above already tells the user loading is broken;
-    // keep whatever list we last had rather than flapping the notice.
-  }
-  try {
-    prompts.projects = await listProjects();
-    if (
-      prompts.activeProjectId !== null &&
-      !prompts.projects.some((p) => p.id === prompts.activeProjectId)
-    ) {
-      prompts.activeProjectId = null; // the active project vanished — fall back to Global
-    }
-  } catch (e) {
-    // Tabs degrade to Global-only, but say why rather than rendering a
-    // mysteriously bare tab row.
-    prompts.loadError ??= e instanceof Error ? e.message : String(e);
-  }
-  refreshEmbedStatus();
-  if (!configLoaded) {
-    configLoaded = true;
-    try {
-      prompts.hotkeyOverrides = (await getAppConfig()).hotkeys;
-    } catch {
-      // Defaults stand (resolveHotkeys handles an empty map); a persist
-      // failure surfaces on rebind, not here.
-    }
-  }
-  // Data events (repairs / unreadable files / a reset hotkey) flash a 5s toast;
-  // the durable trace lives on in the gear's Notices (contract §S13). Runs on
-  // EVERY view entry, not just the first — a repair discovered on a later load
-  // is a new data event and must announce too — but toasts only what's new
-  // since the last announcement, so re-entering a view with the same unresolved
-  // events stays quiet.
-  announceDataEvents();
-}
-
-/** The durable data-event notices (contract §S13 / §Store robustness): loader-
- *  repaired snippets first (a one-click re-save fixes them), then unreadable
- *  files. Derived, not stored — the sources are the snippet list + load errors. */
-export function notices(): Notice[] {
-  // Invalid hotkey overrides (hand-edited config that fell back to a default)
-  // are a config data event — derived from the same overrides resolveHotkeys
-  // reads, so the trace stays consistent with what actually bound.
-  const invalidHotkeys = resolveHotkeysReport(prompts.hotkeyOverrides).invalid.map((e) => ({
-    command: e.command,
-    label: HOTKEY_LABELS[e.command],
-    chord: e.chord,
-    reason: e.reason,
-  }));
-  return deriveNotices(
-    prompts.snippets.filter((s) => s.recovered).map((s) => ({ id: s.id, title: s.title })),
-    prompts.snippetLoadErrors,
-    invalidHotkeys
-  );
-}
-
-/** Notice ids already announced this session — so a data event toasts once, when
- *  it first appears, and re-entering the view with the same unresolved events
- *  stays quiet. Keyed by the stable notice id (snippet id / file path / hotkey
- *  command), the same key the Notices list and badge use. */
-const announcedNoticeIds = new Set<string>();
-
-/** Flash a single 5s toast summarizing the data events that are NEW since the
- *  last announcement (contract §S13's transient half). The toast is the
- *  transient announce; the gear badge + Notices section is the record that
- *  outlives it. Announcing per-new-event (not once per session) is why a repair
- *  surfaced on a later view entry still toasts. */
-function announceDataEvents(): void {
-  const fresh = notices().filter((n) => !announcedNoticeIds.has(n.id));
-  if (fresh.length === 0) return;
-  for (const n of fresh) announcedNoticeIds.add(n.id);
-  const repaired = fresh.filter((n) => n.kind === 'repaired').length;
-  const unreadable = fresh.filter((n) => n.kind === 'unreadable').length;
-  const config = fresh.filter((n) => n.kind === 'config').length;
-  const parts: string[] = [];
-  if (repaired) parts.push(`${repaired} snippet${repaired === 1 ? '' : 's'} auto-repaired`);
-  if (unreadable) parts.push(`${unreadable} file${unreadable === 1 ? '' : 's'} couldn't be read`);
-  if (config) parts.push(`${config} shortcut${config === 1 ? '' : 's'} reset to default`);
-  toasts.push(`${parts.join(' · ')} — see the gear for details.`);
+  await refreshSnippets();
+  await runMatch(); // at rest this is the whole library, recency-first
 }
 
 /** Stop timers when leaving the view (the doc itself is kept — see header). */
@@ -216,43 +114,100 @@ export function disposePrompts(): void {
   matchId++; // ignore any in-flight match
 }
 
-// ── projects / tabs ──────────────────────────────────────────────────────────
+// ── projects ─────────────────────────────────────────────────────────────────
 
-/** Switch the active tab (null = Global). Drives the match pool, the save
- *  scope for new snippets, and the view tint. */
-export function setActiveProject(id: string | null): void {
-  prompts.activeProjectId = id;
-  scheduleMatch();
-}
-
-/** The active tab's project record (null on the Global tab). Reactive when
- *  read inside a $derived. */
+/** The active project's record, or null when none is configured yet. Reactive
+ *  when read inside a $derived. */
 export function activeProject(): Project | null {
-  return prompts.projects.find((p) => p.id === prompts.activeProjectId) ?? null;
+  return prompts.projects.find((p) => p.path === prompts.activeProjectPath) ?? null;
 }
 
-/** Create or update a project and sync the roster. Returns the stored record. */
-export async function saveProject(input: ProjectInput): Promise<Project> {
-  const saved = await apiSaveProject(input);
-  const i = prompts.projects.findIndex((p) => p.id === saved.id);
+/** Switch projects: persist the choice (the backend restores it on launch),
+ *  then reload the library and the panel — a project IS its folder, so its
+ *  snippets are a different set of files entirely. */
+export async function setActiveProject(path: string): Promise<void> {
+  prompts.activeProjectPath = path;
+  try {
+    await apiSetActiveProject(path);
+  } catch (e) {
+    // The in-session switch already happened and is what the user sees; only
+    // restore-on-next-launch is at risk. Say so rather than silently reverting
+    // the tab they just clicked.
+    prompts.loadError = `Couldn't remember the active project: ${errText(e)}`;
+  }
+  await refreshSnippets();
+  await runMatch();
+}
+
+/** Register a folder as a project and switch to it — you added it to work in it. */
+export async function addProject(name: string, path: string): Promise<Project> {
+  const saved = await upsertProject(name, path);
+  await setActiveProject(saved.path);
+  return saved;
+}
+
+/** Rename a project. The PATH is the identity, so a rename is just re-registering
+ *  the same folder under a new name — and unlike `addProject` it must not steal
+ *  the active tab, since renaming a folder you are not working in is not a
+ *  request to switch to it. */
+export async function renameProject(name: string, path: string): Promise<Project> {
+  return upsertProject(name, path);
+}
+
+async function upsertProject(name: string, path: string): Promise<Project> {
+  const saved = await apiAddProject(name, path);
+  const i = prompts.projects.findIndex((p) => p.path === saved.path);
   if (i >= 0) prompts.projects[i] = saved;
   else prompts.projects.push(saved);
   return saved;
 }
 
-/** Delete a project. Its snippets rescope to GLOBAL (contract semantics — the
- *  writing never vanishes), so the snippet list is re-fetched; an active tab
- *  pointing at it falls back to Global. */
-export async function deleteProject(id: string): Promise<void> {
-  await apiDeleteProject(id);
-  prompts.projects = prompts.projects.filter((p) => p.id !== id);
-  if (prompts.activeProjectId === id) prompts.activeProjectId = null;
+/** Forget a project. **Never deletes files** — the user's prompts are their own;
+ *  this drops the path from the roster and nothing else.
+ *
+ *  Re-reads the roster rather than re-deriving what happened: removing the ACTIVE
+ *  project has to re-point `active` at something, and the backend already owns
+ *  that rule. Duplicating it here would put one rule on both sides of the seam,
+ *  where the two copies can only drift apart. */
+export async function removeProject(path: string): Promise<void> {
+  await apiRemoveProject(path);
+  const { projects, active } = await listProjects();
+  prompts.projects = projects;
+  prompts.activeProjectPath = active;
+  await refreshSnippets();
+  await runMatch();
+}
+
+// ── library ──────────────────────────────────────────────────────────────────
+
+/** Re-read every `*.md` under the active project's folder. */
+export async function refreshSnippets(): Promise<void> {
+  const project = prompts.activeProjectPath;
+  if (project === null) {
+    prompts.snippets = [];
+    return;
+  }
   try {
-    prompts.snippets = await listSnippets();
+    prompts.snippets = await listSnippets(project);
+    prompts.loadError = null;
   } catch (e) {
     prompts.loadError = e instanceof Error ? e.message : String(e);
   }
-  scheduleMatch();
+}
+
+/** Record that a snippet was used. This is the ONLY input to the at-rest sort,
+ *  and it is app-local (never a sidecar in the project folder) — a `last_used`
+ *  write into a git-tracked prompt file would dirty the tree on every insert. */
+export async function touchSnippet(name: string): Promise<void> {
+  const project = prompts.activeProjectPath;
+  if (project === null) return;
+  try {
+    await apiTouchSnippet(project, name);
+  } catch {
+    // Usage tracking only orders the at-rest list. Losing one touch costs a
+    // slightly stale sort, never a lost snippet — not worth interrupting an
+    // insert the user already got.
+  }
 }
 
 // ── live matching ────────────────────────────────────────────────────────────
@@ -262,26 +217,38 @@ function scheduleMatch(): void {
   debounceTimer = setTimeout(runMatch, DEBOUNCE_MS);
 }
 
+/** The list FILTERS DOWN, it does not build up.
+ *
+ *  An empty query is not "no results" — it is "no filter", and the answer to it
+ *  is the whole library, most-recently-used first (the backend owns that sort;
+ *  it holds the usage map). Typing narrows that list by match score. The old
+ *  behavior bailed out on an empty query in BOTH layers, so the user was shown
+ *  an empty panel and had to type to make anything appear at all — backwards,
+ *  and the single thing the founder hit every day.
+ *
+ *  No "recent or relevant?" toggle exists because the question answers itself:
+ *  with no query there is no score to sort by, so recency is the only meaningful
+ *  order; with a query, the score is. */
 async function runMatch(): Promise<void> {
   if (debounceTimer) {
     clearTimeout(debounceTimer);
     debounceTimer = null;
   }
   const id = ++matchId;
-  const query = prompts.matchQuery;
-  if (!query.trim()) {
+  const project = prompts.activeProjectPath;
+  if (project === null) {
     prompts.hits = [];
     prompts.matching = false;
     return;
   }
   prompts.matching = true;
   try {
-    const hits = await matchSnippets(query, prompts.activeProjectId, MATCH_LIMIT);
+    const hits = await matchSnippets(project, prompts.matchQuery, MATCH_LIMIT);
     if (id !== matchId) return; // superseded
-    const byId = new Map(prompts.snippets.map((p) => [p.id, p]));
+    const byName = new Map(prompts.snippets.map((s) => [s.name, s]));
     prompts.hits = hits.flatMap((h) => {
-      const snippet = byId.get(h.id);
-      return snippet ? [{ snippet, score: h.score, source: h.source }] : [];
+      const snippet = byName.get(h.name);
+      return snippet ? [{ snippet, score: h.score }] : [];
     });
     prompts.matching = false;
   } catch (e) {
@@ -289,9 +256,9 @@ async function runMatch(): Promise<void> {
     prompts.matching = false;
     prompts.hits = [];
     // The one failure we expect here is a transient backend/IPC error — Tauri's
-    // Result<_, String> rejects with a *string*. The match panel is a
-    // suggestion strip, not a save path, so that degrades quietly to "no
-    // suggestions" (store errors surface on the save path, which is guarded).
+    // Result<_, String> rejects with a *string*. Matching is a read path, not a
+    // save path, so that degrades quietly (store errors surface on save, which
+    // is guarded).
     if (typeof e === 'string') return;
     // Anything else is a programming error wearing a "No matching snippets."
     // costume — a user reads that as "nothing matched," not "matching is
@@ -299,6 +266,10 @@ async function runMatch(): Promise<void> {
     console.error('Prompt match failed unexpectedly:', e);
     throw e;
   }
+}
+
+function errText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 // ── compose surface ──────────────────────────────────────────────────────────
@@ -380,42 +351,6 @@ export function setAsVar(name: string, on: boolean): void {
   prompts.asVars[name] = on;
 }
 
-/** The effective hotkey map — stored overrides merged over the defaults, each
- *  normalized. Read inside a $derived to stay reactive to a rebind. */
-export function resolvedHotkeys(): Record<HotkeyCommand, string> {
-  return resolveHotkeys(prompts.hotkeyOverrides);
-}
-
-/** Rebind a command to `chord` and persist (app config, read-modify-write so
- *  unrelated fields survive). The caller rejects conflicts before calling —
- *  this just records and persists. A failed persist keeps the in-session
- *  binding and surfaces on `configError`; losing it on restart must not be
- *  silent. */
-export async function setHotkey(command: HotkeyCommand, chord: string): Promise<void> {
-  prompts.hotkeyOverrides = { ...prompts.hotkeyOverrides, [command]: chord };
-  await persistHotkeys();
-}
-
-/** Reset a command to its default (drop the override) and persist. */
-export async function resetHotkey(command: HotkeyCommand): Promise<void> {
-  const next = { ...prompts.hotkeyOverrides };
-  delete next[command];
-  prompts.hotkeyOverrides = next;
-  await persistHotkeys();
-}
-
-async function persistHotkeys(): Promise<void> {
-  prompts.configError = null;
-  try {
-    const cfg = await getAppConfig();
-    await setAppConfig({ ...cfg, hotkeys: prompts.hotkeyOverrides });
-  } catch (e) {
-    prompts.configError = `Couldn't save the shortcut: ${
-      e instanceof Error ? e.message : String(e)
-    }`;
-  }
-}
-
 // ── snippet store ──────────────────────────────────────────────────────────────
 
 /** Save (create or update) and sync the local list. Returns the stored snippet. */
@@ -433,41 +368,4 @@ export async function deleteSnippet(id: string): Promise<void> {
   const i = prompts.snippets.findIndex((p) => p.id === id);
   if (i >= 0) prompts.snippets.splice(i, 1);
   scheduleMatch();
-}
-
-// ── embeddings (opt-in, behind the config popover) ───────────────────────────
-
-export async function refreshEmbedStatus(): Promise<void> {
-  try {
-    prompts.embed = await embedStatus();
-    prompts.embedError = null;
-  } catch (e) {
-    prompts.embedError = e instanceof Error ? e.message : String(e);
-  }
-}
-
-export async function startEmbedDownload(): Promise<void> {
-  prompts.embedError = null;
-  prompts.embedProgress = { stage: 'runtime', done: 0, total: 0 };
-  if (prompts.embed) prompts.embed = { ...prompts.embed, state: 'downloading' };
-  try {
-    await embedDownload((p) => {
-      prompts.embedProgress = p;
-    });
-  } catch (e) {
-    prompts.embedError = e instanceof Error ? e.message : String(e);
-  } finally {
-    prompts.embedProgress = null;
-    await refreshEmbedStatus();
-  }
-}
-
-export async function toggleEmbedEnabled(enabled: boolean): Promise<void> {
-  try {
-    await setEmbedEnabled(enabled);
-  } catch (e) {
-    prompts.embedError = e instanceof Error ? e.message : String(e);
-  }
-  await refreshEmbedStatus();
-  scheduleMatch(); // engine change can reorder the current suggestions
 }

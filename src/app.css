@@ -40,22 +40,6 @@
   --accent-snippet: #0ea5e9;
   --accent-template: #d97706;
 
-  /* Prompt Library project palette (contract §Project model): a project
-     stores a palette KEY ("blue"), never a hex — these tokens own the hue
-     per theme, so dark-mode contrast stays retunable here and stored data
-     can never pick an unreadable color. Components never branch on a key:
-     the active project's hue flows through ONE --project-color custom
-     property set at the view wrapper; every fill is a color-mix over it. */
-  --project-red: #e5484d;
-  --project-orange: #f08c00;
-  --project-yellow: #dfa900;
-  --project-green: #2fb356;
-  --project-teal: #17a2b8;
-  --project-blue: #3b82f6;
-  --project-purple: #9d5cd0;
-  --project-pink: #e64980;
-  --project-graphite: #6c757d;
-
   /* Compose-surface text selection: highlighter yellow — a bright marker
      over dark ink in BOTH themes (a real highlighter doesn't invert), so
      ::selection pairs --highlight with --highlight-foreground instead of
@@ -84,19 +68,6 @@
   --text: #e2e8f0;
   --text-muted: #94a3b8;
   --text-faint: #64748b;
-
-  /* Brighter project hues for dark: a low-percent translucent tint that
-     reads on white vanishes on a dark card unless the base carries more
-     light. Same identity, retuned lightness. */
-  --project-red: #f2555a;
-  --project-orange: #ffa94d;
-  --project-yellow: #ffd43b;
-  --project-green: #51cf66;
-  --project-teal: #3bc9db;
-  --project-blue: #74a6f8;
-  --project-purple: #b98ae0;
-  --project-pink: #f783ac;
-  --project-graphite: #9aa4ad;
 
   --highlight: #ffd60a;
   --highlight-foreground: #1e293b;

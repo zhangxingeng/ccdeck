@@ -1,14 +1,22 @@
 <script lang="ts">
   /**
-   * Live match panel (F2): the debounced store feeds ranked hits for what's
-   * being typed. One insert path, two triggers (contract §S2/S3): click a hit,
-   * OR step in from the box with ↓ (parent calls `focusFirst`) then `Enter`.
-   * `↑`/`↓` move the highlight; `Esc` returns focus to the box without
-   * inserting. The panel is a suggestion strip, not a browser — nav stays
-   * minimal.
+   * The library panel. At rest it lists EVERY snippet in the active project,
+   * most-recently-used first; typing in the compose box filters that list down
+   * by match score. It does not build up from empty — see `runMatch`.
+   *
+   * Rows show the snippet's NAME and nothing else. The name is a path now
+   * (`rust/code_review`), so it already carries the folder grouping that
+   * replaced tags/categories — and since the panel lists the whole library at
+   * rest, a body preview per row would make it unscannable rather than
+   * informative. The founder's own reasoning applies: "I actually rarely read
+   * it. If I really want to read it, it means I want to edit it."
+   *
+   * One insert path, two triggers (contract §S2/S3): click a row, OR step in
+   * from the box with ↓ (parent calls `focusFirst`) then `Enter`. `↑`/`↓` move
+   * the highlight; `Esc` returns focus to the box without inserting.
    */
   import type { Snippet } from '$lib/prompts/types';
-  import { prompts } from '$lib/prompts.svelte';
+  import { prompts, MATCH_LIMIT } from '$lib/prompts.svelte';
 
   let {
     onInsert,
@@ -64,15 +72,15 @@
     }
   }
 
-  function snippet(body: string): string {
-    const flat = body.replace(/\s+/g, ' ').trim();
-    return flat.length > 90 ? flat.slice(0, 90) + '…' : flat;
-  }
+  /** Only true if the safety cap actually bit. The panel claims to be the whole
+   *  library, so on the day that stops being true it must say so out loud — a
+   *  silent truncation would make it lie. */
+  const truncated = $derived(prompts.hits.length >= MATCH_LIMIT);
 </script>
 
-<div class="match-panel" bind:this={listEl} onkeydown={handleKeydown} role="listbox" tabindex="-1" aria-label="Matching snippets">
+<div class="match-panel" bind:this={listEl} onkeydown={handleKeydown} role="listbox" tabindex="-1" aria-label="Snippets">
   {#if prompts.hits.length}
-    {#each prompts.hits as hit (hit.snippet.id)}
+    {#each prompts.hits as hit (hit.snippet.name)}
       <button
         type="button"
         class="match-hit"
@@ -81,26 +89,27 @@
         onclick={() => onInsert(hit.snippet)}
         title="Insert at cursor"
       >
-        <span class="match-hit__head">
-          <span class="match-hit__title">{hit.snippet.title}</span>
-          <span class="match-hit__scope">{hit.snippet.scope.kind === 'global' ? 'global' : 'project'}</span>
-          {#if hit.snippet.placeholders.length}
-            <span class="match-hit__ph" title="Has variables — fill them in the list under the compose box">
-              {'{'}…{'}'}
-            </span>
-          {/if}
-        </span>
-        <span class="match-hit__snippet">{snippet(hit.snippet.body)}</span>
+        <span class="match-hit__name">{hit.snippet.name}</span>
       </button>
     {/each}
+    {#if truncated}
+      <div class="match-panel__empty">
+        Showing the first {MATCH_LIMIT} — narrow the list by typing.
+      </div>
+    {/if}
+  {:else if prompts.activeProjectPath === null}
+    <div class="match-panel__empty">
+      No prompt folder yet. Add one with <strong>⋯</strong> above — pick any directory and every
+      <code>.md</code> file in it becomes a snippet.
+    </div>
   {:else if prompts.matchQuery.trim()}
     <div class="match-panel__empty">
       {prompts.matching ? 'Matching…' : 'No matching snippets.'}
     </div>
   {:else}
     <div class="match-panel__empty">
-      Start typing in the compose box — snippets whose title, keywords, or body match what you write
-      show up here. Click one to drop it in at the cursor.
+      No snippets in this folder yet. Write a prompt below and save it, or drop a <code>.md</code> file
+      into the folder.
     </div>
   {/if}
 </div>
@@ -112,15 +121,13 @@
     gap: 0.35rem;
   }
   .match-hit {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
+    display: block;
     text-align: left;
     font-family: inherit;
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: 0.45rem;
-    padding: 0.5rem 0.65rem;
+    padding: 0.4rem 0.65rem;
     cursor: pointer;
     color: var(--text);
   }
@@ -130,35 +137,12 @@
     background: color-mix(in srgb, var(--accent-snippet) 7%, var(--bg-card));
     outline: none;
   }
-  .match-hit__head {
-    display: flex;
-    align-items: baseline;
-    gap: 0.45rem;
-    min-width: 0;
-  }
-  .match-hit__title {
-    font-size: 0.78rem;
-    font-weight: 600;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .match-hit__scope {
-    font-size: 0.6rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-faint);
-    flex-shrink: 0;
-  }
-  .match-hit__ph {
-    font-size: 0.62rem;
+  /* The name is a path (`rust/code_review`) — mono keeps the slash legible and
+     the folder prefix scannable down a long list. */
+  .match-hit__name {
+    display: block;
     font-family: var(--font-mono);
-    color: var(--accent-template);
-    flex-shrink: 0;
-  }
-  .match-hit__snippet {
-    font-size: 0.7rem;
-    color: var(--text-muted);
+    font-size: 0.72rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -168,5 +152,9 @@
     color: var(--text-faint);
     padding: 0.4rem 0.2rem;
     line-height: 1.5;
+  }
+  .match-panel__empty code {
+    font-family: var(--font-mono);
+    font-size: 0.95em;
   }
 </style>
