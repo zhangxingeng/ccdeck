@@ -53,10 +53,6 @@ pub struct AppConfig {
     /// runs regardless of this toggle.
     #[serde(default = "default_true")]
     pub update_check_on_launch: bool,
-    /// Prompt Library semantic match toggle (issue #24). Defaults to `false`:
-    /// embeddings are strictly opt-in — "ready + downloaded + enabled" is
-    /// what turns hybrid matching on.
-    pub embed_enabled: bool,
     /// Prompt Library hotkeys (contract § Hotkeys): command id → normalized
     /// chord string, e.g. `"copyPrompt" -> "Mod+C"`, where `Mod` stands for
     /// `Ctrl` on Windows/Linux and `Cmd` on macOS so one stored binding is
@@ -77,7 +73,6 @@ impl Default for AppConfig {
             terminal: String::new(),
             launch_command: String::new(),
             update_check_on_launch: true,
-            embed_enabled: false,
             hotkeys: BTreeMap::new(),
         }
     }
@@ -229,19 +224,6 @@ pub fn save(config: &AppConfig) -> Result<(), String> {
     std::fs::write(&path, pretty).map_err(|e| e.to_string())
 }
 
-/// The Prompt Library's read of the semantic-match toggle.
-pub fn load_embed_enabled() -> bool {
-    load().embed_enabled
-}
-
-/// Persist just the semantic-match toggle (read-modify-write so the user's
-/// other preferences are never clobbered by the prompts view).
-pub fn save_embed_enabled(enabled: bool) -> Result<(), String> {
-    let mut config = load();
-    config.embed_enabled = enabled;
-    save(&config)
-}
-
 /// Return the current app config for the UI.
 #[tauri::command]
 pub fn get_app_config() -> AppConfig {
@@ -313,13 +295,13 @@ mod tests {
     }
 
     #[test]
-    fn embed_enabled_defaults_false_and_round_trips() {
-        // Opt-in contract (issue #24): a config written before the field
-        // existed must load as disabled; an explicit true must survive.
-        let old: AppConfig = serde_json::from_str(r#"{"terminal":""}"#).unwrap();
-        assert!(!old.embed_enabled, "pre-existing configs must not opt in");
-        let on: AppConfig = serde_json::from_str(r#"{"embedEnabled":true}"#).unwrap();
-        assert!(on.embed_enabled);
+    fn a_config_holding_the_retired_embed_toggle_still_loads() {
+        // The semantic-match toggle is gone (0.13: embedding is automatic and
+        // silent). A config file written by an older install still carries
+        // `embedEnabled` — it must be ignored, not rejected, or the app would
+        // fail to read its own settings after the upgrade.
+        let old: AppConfig = serde_json::from_str(r#"{"embedEnabled":true}"#).unwrap();
+        assert!(old.update_check_on_launch, "the rest of the config still loads");
     }
 
     #[test]

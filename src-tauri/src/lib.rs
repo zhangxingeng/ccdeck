@@ -1125,33 +1125,40 @@ pub fn run() {
             providers::set_provider_key,
             providers::provider_key_status,
             providers::provider_probe_keychain,
+            prompts::state::list_projects,
+            prompts::state::add_project,
+            prompts::state::remove_project,
+            prompts::state::set_active_project,
             prompts::state::list_snippets,
             prompts::state::save_snippet,
             prompts::state::delete_snippet,
-            prompts::state::snippet_load_errors,
-            prompts::state::list_projects,
-            prompts::state::save_project,
-            prompts::state::delete_project,
             prompts::state::match_snippets,
-            prompts::state::embed_status,
-            prompts::state::embed_download,
-            prompts::state::set_embed_enabled,
+            prompts::state::touch_snippet,
         ]);
 
+    let search_enabled = search_state.is_ok();
     match search_state {
-        Ok(state) => {
-            builder = builder.manage(state).setup(|app| {
-                // Build/refresh the index in the background so launch isn't blocked.
-                let handle = app.handle().clone();
-                std::thread::spawn(move || {
-                    let state = handle.state::<search::state::SearchState>();
-                    state.indexer().run_index();
-                });
-                Ok(())
-            });
-        }
+        Ok(state) => builder = builder.manage(state),
         Err(e) => eprintln!("[search] disabled ({e}); browse/edit still work"),
     }
+
+    builder = builder.setup(move |app| {
+        if search_enabled {
+            // Build/refresh the index in the background so launch isn't blocked.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let state = handle.state::<search::state::SearchState>();
+                state.indexer().run_index();
+            });
+        }
+        // Prompt Library: fetch the embedding model and index the active project
+        // in the background, silently. Semantic match is an improvement to
+        // ranking, never a prerequisite — lexical match works instantly and
+        // unconditionally, so this blocks nothing and a failure is logged rather
+        // than surfaced. There is no toggle and no progress UI by design.
+        prompts::state::spawn_background_index(&app.state::<prompts::state::PromptsState>());
+        Ok(())
+    });
 
     builder
         .run(tauri::generate_context!())

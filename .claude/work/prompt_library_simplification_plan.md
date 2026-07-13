@@ -117,6 +117,13 @@ order. Keeping it here rather than in the snippet file is what keeps the git tre
 
 **Grammar simplifies to `{name}`. That is the whole grammar.**
 
+**One implementation, in TypeScript only.** `src-tauri/src/prompts/grammar.rs` is **deleted**, not
+simplified. After the cut, nothing in Rust parses variables — `placeholders[]` was its only consumer.
+Keeping a second implementation of a subtle rule with zero product callers is a liability that buys
+nothing, and deleting it makes the two-language divergence *structurally impossible* rather than
+test-guarded. `content` is an opaque string to the backend. The chip derives its variable list in the
+frontend. There is no shared cross-language vector table because there is nothing to share.
+
 - `name` is `[A-Za-z0-9_-]+`.
 - `{{` and `}}` remain the literal-brace escapes.
 - **The `{name:default}` form is removed.** Every variable is a string — an LLM only consumes
@@ -159,6 +166,10 @@ the entire false-positive class. The cost is that a variable *inside* a code exa
 impossible — judged rare enough to accept, and `{{`/`}}` remains available as the manual escape
 everywhere else.
 
+**A code fence is fully verbatim — escapes included.** `{{` does **not** unescape inside a fence.
+Otherwise a Rust `format!("{{}}")` in a code sample is silently rewritten on copy, which presents to
+the user as "the app mangled my prompt" with no way to guess why. Verbatim means verbatim.
+
 ---
 
 ## The compose surface
@@ -195,7 +206,7 @@ Three actions, each unambiguous:
 |---|---|
 | **Save** | Writes `<name>.md` to the project. Same name → updates. New name → new snippet. |
 | **Use once** | Applies the edited content to *this chip in this prompt only*. Nothing is written to the library. This is the escape hatch that replaces inline editing — the founder's "temporary / customized ones". |
-| **Delete** | Removes the file from the project. |
+| **Delete** | Removes the file from the project, and **converts the chip to plain typed text**. Deleting a library file must not gut the prompt the user is halfway through writing — the link goes, the words stay. |
 
 `Use once` is what makes the never-edit-inline rule tolerable: the user *can* tweak a prompt without
 polluting the library, they just do it in the one predictable place.
@@ -265,7 +276,7 @@ Down from 11 commands to 7. All prompt-related.
 
 | Command | Notes |
 |---|---|
-| `list_projects() -> Project[]` | |
+| `list_projects() -> {projects: Project[], active: string \| null}` | The `active` path is the launch-restore reader. **`active: null` is not a "global" scope — it means no project is configured yet** (first launch), and renders as an empty state prompting for a folder. Under folder-as-project there *is* no global scope: a snippet lives in the folder it sits in. **The Global tab dies.** Keeping it would be the old design wearing new labels. |
 | `add_project(name, path) -> Project` | |
 | `remove_project(path)` | **Forgets the path. Never deletes files.** |
 | `set_active_project(path)` | Persisted; restored on launch. |
@@ -287,7 +298,7 @@ investigate → implement+commit → update-issue. **Lead owns integration; team
 
 | Lane | Owns | Surface |
 |---|---|---|
-| **A — Store** | The two model changes, backend | `src-tauri/src/prompts/*`, `datadir.rs`. Rewrite `store.rs` + `projects.rs` for Markdown/folder; simplify `grammar.rs`; delete `repair.rs`; strip embed commands to background; new command surface in `state.rs` + `lib.rs` registration. |
+| **A — Store** | The two model changes, backend, **and the Rust↔TS seam** | `src-tauri/src/prompts/*`, `datadir.rs`, **plus `src/lib/api.ts` and `src/lib/prompts/types.ts`**. Rewrite `store.rs` + `projects.rs` for Markdown/folder; **delete `grammar.rs`** and `repair.rs`; strip embed commands to background; new command surface in `state.rs` + `lib.rs`. *Lane A crosses into TS deliberately: `api.ts`/`types.ts` are the contract seam, and a mismatch there is invisible to both `pnpm check` and `cargo test`. One author writes both sides so the bug class stops existing. B and C consume `types.ts`; neither edits it.* |
 | **B — Compose** | Chips, popup, variables | `ComposeBox.svelte`, `SnippetModal.svelte`, `VariableFillList.svelte`, `compose/doc.ts`, `compose/variables.ts`. |
 | **C — Shell & cuts** | Projects, search, deletions | `PromptsView.svelte`, `ProjectTabs.svelte`, `ProjectManagerPopover.svelte`, `MatchPanel.svelte`, `ConfigPopover.svelte`. Deletes `EmbeddingsSection`, `ShortcutsSection`, `hotkeys.ts`, `NoticesSection`, `notices.ts`, `palette.ts`. |
 | **D — Docs** | The two contracts | `project_docs/prompts-design.md`, `project_docs/prompts-ux.md`, amended from this file. Runs concurrently. |
@@ -305,14 +316,26 @@ guessing**.
 from the checked-out feature branch. This has bitten the project twice. Each teammate verifies its
 base commit first and resets with `git checkout -B <lane> prompt-simplify` if it is wrong.
 
-**Merge gate, per lane, before it lands on `prompt-simplify`:**
+**There is no whole-project `pnpm check` gate per lane — it is unsatisfiable, and asking for it was a
+planning error.** The moment `Snippet` becomes `{name, content}`, each frontend lane's worktree fails
+to compile on the *other* lane's untouched code. Neither B nor C can pass a whole-project check
+alone, and demanding it would only teach them to paper over the other's region.
+
+**Per-lane signal** (fast, local, not the gate):
 
 ```
-pnpm check && cargo test --lib --manifest-path src-tauri/Cargo.toml && pnpm run test:smoke
+cargo test --lib --manifest-path src-tauri/Cargo.toml && pnpm run test:smoke
 ```
+plus `pnpm check` clean **in the files that lane owns**, plus that lane's own new tests. Residual
+`pnpm check` errors confined to another lane's region are expected, must be **reported explicitly**,
+and are the lead's to reconcile.
 
-Then the lead verifies once on the integrated branch and **drives the actual app** — static green
+**The authoritative gate** is the lead running the full `check_cmd` on the *merged* branch — only the
+integrated tree proves the lanes compose — and then **driving the actual app**, because static green
 passes a merge the app cannot run.
+
+**Merge order:** A first. It owns the seam (`api.ts`, `types.ts`), so it is the foundation B and C
+rebase onto.
 
 ---
 

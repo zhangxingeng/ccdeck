@@ -1,77 +1,66 @@
-//! Managed state, hybrid fusion, and the Tauri commands for the Prompt
-//! Library. Command surface per the contract: `list_snippets` / `save_snippet` /
-//! `delete_snippet` / `snippet_load_errors` / `list_projects` / `save_project` /
-//! `delete_project` / `match_snippets` / `embed_status` / `embed_download` /
-//! `set_embed_enabled` — all async, `Result<T, String>`, snake_case.
+//! Managed state, hybrid fusion, and the Tauri commands for the Prompt Library.
 //!
-//! Callers never know which engine ran: `match_snippets` fuses lexical and
-//! (when ready + enabled) semantic scores internally and only tags each hit's
-//! `source` for observability.
+//! The command surface (0.13 contract), all async, `Result<T, String>`,
+//! snake_case: `list_projects` / `add_project` / `remove_project` /
+//! `set_active_project` / `list_snippets` / `save_snippet` / `delete_snippet` /
+//! `match_snippets` / `touch_snippet`.
+//!
+//! Embedding has **no command surface**. The model downloads and indexes itself
+//! in the background on first launch and never asks: lexical match is
+//! unconditional and instant, so a download that is slow, failed, or impossible
+//! on this platform degrades to lexical-only with nothing for the user to see,
+//! decide, or retry. Callers never know which engine ran.
 
-use std::collections::HashSet;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use fastembed::TextEmbedding;
 use serde::Serialize;
-use tauri::ipc::Channel;
-use tauri::State;
 
-use super::embed::{self, DownloadProgress};
+use super::appstate::{self, Project, ProjectList};
+use super::embed;
 use super::lexical;
-use super::projects::{self, Project, ProjectInput};
-use super::store::{self, Snippet, SnippetInput, Scope};
+use super::store::{self, Snippet};
 
 /// If one query embedding takes longer than this, the machine is too slow for
 /// per-keystroke inference (the UI debounce budget) — degrade to lexical-only
-/// for subsequent queries instead of blocking the panel, until the user
-/// toggles semantic match off/on (which also reloads the model).
+/// for the rest of the session instead of blocking the panel.
 const INFERENCE_BUDGET_MS: u128 = 250;
 
 /// How many stale snippets one match call will embed before answering. Keeps a
-/// huge hand-imported corpus from freezing a single keystroke — the cache
-/// warms over a few queries; the bulk pass runs at download time anyway.
+/// large library from freezing a single keystroke — the cache warms over a few
+/// queries; the bulk pass runs in the background at launch anyway.
 const EMBED_TOPUP_PER_QUERY: usize = 32;
 
 /// Lexical weight in the normalized-score blend (semantic gets the rest).
 /// Lexical leads: on a curated corpus the user's own words beat inferred
-/// similarity more often than not; semantic exists to catch phrasings the
-/// keywords missed.
+/// similarity more often than not; semantic exists to catch the phrasings the
+/// name and the content missed.
 const LEX_BLEND: f32 = 0.6;
 
-/// A semantic-only candidate below this cosine is noise, not a hit — without
-/// a floor, low-similarity vectors pad the panel with head-scratchers.
+/// A semantic-only candidate below this cosine is noise, not a hit — without a
+/// floor, low-similarity vectors pad the panel with head-scratchers.
 const SEM_MIN_COSINE: f32 = 0.35;
 
+/// One match result. A snippet's `name` is its identity, so that is all a hit
+/// needs to carry.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct MatchHit {
-    pub id: String,
+    pub name: String,
     pub score: f32,
-    pub source: String, // "lexical" | "semantic" | "hybrid"
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct EmbedStatus {
-    pub state: String, // "off" | "not_downloaded" | "downloading" | "ready" | "error"
-    pub model_id: String,
-    pub model_size_mb: u32,
-    /// Disclosed alongside the model size so the pre-download requirements
-    /// note covers the TOTAL download (Gate-1 ruling), not just the model.
-    pub runtime_size_mb: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-/// Runtime-only embedding state. Everything durable lives elsewhere (files on
-/// disk, the appconfig toggle) — so this needs no persistence and commands
-/// resolve the data root per call, matching the app's existing style.
+/// Runtime-only embedding state — nothing here is persisted, because there is
+/// nothing left for the user to configure.
 #[derive(Default)]
 pub struct PromptsInner {
     embedder: Mutex<Option<TextEmbedding>>,
+    /// Set while the background download runs: semantic match sits it out rather
+    /// than racing it.
     downloading: AtomicBool,
-    /// Last embedder failure, surfaced via embed_status; cleared on toggle.
-    embed_error: Mutex<Option<String>>,
     /// Set when inference blew the budget — sticky lexical-only degradation.
     slow: AtomicBool,
 }
@@ -86,118 +75,102 @@ impl PromptsState {
     }
 }
 
-fn set_error(inner: &PromptsInner, msg: String) {
-    if let Ok(mut e) = inner.embed_error.lock() {
-        *e = Some(msg);
+impl Default for PromptsState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-// ---------------------------------------------------------------------------
-// Store commands
-// ---------------------------------------------------------------------------
-
-/// The roster's project ids, for dangling-scope validation. `None` when the
-/// roster itself can't be read — snippet loading then suspends id validation
-/// instead of falsely degrading every project snippet; the roster failure is
-/// surfaced loudly by `list_projects`, not here.
-fn roster_ids() -> Option<HashSet<String>> {
-    let root = crate::datadir::data_root().ok()?;
-    let projects = projects::load_projects(&root).ok()?;
-    Some(projects.into_iter().map(|p| p.id).collect())
-}
-
-#[tauri::command]
-pub async fn list_snippets() -> Result<Vec<Snippet>, String> {
-    store::load_snippets(&store::prompts_dir()?, roster_ids().as_ref())
-}
-
-#[tauri::command]
-pub async fn save_snippet(snippet: SnippetInput) -> Result<Snippet, String> {
-    store::save_snippet(snippet)
-}
-
-#[tauri::command]
-pub async fn delete_snippet(id: String) -> Result<(), String> {
-    store::delete_snippet_at(&store::prompts_dir()?, &id)
-}
-
-/// Files the loader had to skip or degrade (broken JSON, shadowed duplicate
-/// id, legacy scope) — plus the roster-repair notice (contract § Store
-/// robustness: a projects.json repair that SUCCEEDS may have dropped
-/// truncated records, so it surfaces here as the same amber warning). Shown
-/// next to the library so a hand-edit typo never reads as a silently
-/// vanished snippet. Runs its own fresh scan, so it always reflects the
-/// current on-disk state.
-#[tauri::command]
-pub async fn snippet_load_errors() -> Result<Vec<store::LoadError>, String> {
-    let (_, mut errors) = store::scan_snippets(&store::prompts_dir()?, roster_ids().as_ref())?;
-    errors.extend(projects::roster_repair_notice(&crate::datadir::data_root()?));
-    Ok(errors)
+fn root() -> Result<PathBuf, String> {
+    crate::datadir::data_root()
 }
 
 // ---------------------------------------------------------------------------
-// Project roster commands
+// Projects
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn list_projects() -> Result<Vec<Project>, String> {
-    projects::load_projects(&crate::datadir::data_root()?)
+pub async fn list_projects() -> Result<ProjectList, String> {
+    appstate::list_projects(&root()?)
 }
 
 #[tauri::command]
-pub async fn save_project(project: ProjectInput) -> Result<Project, String> {
-    projects::save_project_at(&crate::datadir::data_root()?, project, store::unix_now())
+pub async fn add_project(name: String, path: String) -> Result<Project, String> {
+    appstate::add_project(&root()?, &name, Path::new(&path))
 }
 
-/// Delete a roster entry, rescoping its snippets to global FIRST (contract:
-/// nothing a user wrote ever vanishes as a side effect). Rescope-then-remove
-/// ordering: a crash in between leaves a still-listed project with global
-/// snippets — harmless and re-deletable — never snippets pointing at a ghost.
+/// Forget a project. **Never deletes files** — the user's prompts are their own.
 #[tauri::command]
-pub async fn delete_project(id: String) -> Result<(), String> {
-    store::rescope_project_snippets(&store::prompts_dir()?, &id)?;
-    projects::delete_project_at(&crate::datadir::data_root()?, &id)
+pub async fn remove_project(path: String) -> Result<(), String> {
+    appstate::remove_project(&root()?, Path::new(&path))
+}
+
+#[tauri::command]
+pub async fn set_active_project(path: String) -> Result<(), String> {
+    appstate::set_active_project(&root()?, Path::new(&path))
+}
+
+// ---------------------------------------------------------------------------
+// Snippets
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn list_snippets(project: String) -> Result<Vec<Snippet>, String> {
+    store::scan_snippets(Path::new(&project))
+}
+
+#[tauri::command]
+pub async fn save_snippet(
+    project: String,
+    name: String,
+    content: String,
+) -> Result<Snippet, String> {
+    store::save_snippet(Path::new(&project), &name, &content)
+}
+
+#[tauri::command]
+pub async fn delete_snippet(project: String, name: String) -> Result<(), String> {
+    let project = PathBuf::from(project);
+    store::delete_snippet(&project, &name)?;
+    // The file is gone, so its usage entry is dead weight. Best-effort: a failure
+    // here leaves a stale key in app state — never a resurrected snippet.
+    if let Err(e) = appstate::forget_snippet(&root()?, &project, &name) {
+        eprintln!("[prompts] could not forget usage for {name}: {e}");
+    }
+    Ok(())
+}
+
+/// Record that a snippet was used — this is what orders the at-rest list. It
+/// writes to app-local state, never into the project folder, which is git-tracked.
+#[tauri::command]
+pub async fn touch_snippet(project: String, name: String) -> Result<(), String> {
+    appstate::touch_snippet(&root()?, Path::new(&project), &name)
 }
 
 // ---------------------------------------------------------------------------
 // Matching
 // ---------------------------------------------------------------------------
 
-/// Pool rule (contract): global snippets + snippets scoped to `project_id`
-/// (`None` = global only).
-fn in_pool(snippet: &Snippet, project_id: Option<&str>) -> bool {
-    match &snippet.scope {
-        Scope::Global => true,
-        Scope::Project { project_id: p } => project_id == Some(p.as_str()),
-    }
-}
-
-/// Normalized-score fusion. Contract constraint enforced structurally: hits
-/// flagged `exact` sort above every non-exact hit no matter what either
-/// engine scored — an exact title/keyword hit can never be buried.
-fn fuse(
-    lex: Vec<(String, f32, bool)>,
-    sem: Vec<(String, f32)>,
-    limit: usize,
-) -> Vec<MatchHit> {
+/// Normalized-score fusion. The one hard constraint is enforced structurally: a
+/// hit flagged `exact` sorts above every non-exact hit no matter what either
+/// engine scored, so an exact name match can never be buried.
+fn fuse(lex: Vec<(String, f32, bool)>, sem: Vec<(String, f32)>, limit: usize) -> Vec<MatchHit> {
     let lex_max = lex.iter().map(|(_, s, _)| *s).fold(0.0f32, f32::max).max(f32::EPSILON);
     let mut hits: Vec<(MatchHit, bool)> = Vec::new();
-    for (id, score, exact) in &lex {
-        let sem_score = sem
-            .iter()
-            .find(|(sid, _)| sid == id)
-            .map(|(_, c)| c.clamp(0.0, 1.0))
-            .unwrap_or(0.0);
-        let source = if sem_score > 0.0 { "hybrid" } else { "lexical" };
+    for (name, score, exact) in &lex {
+        let sem_score =
+            sem.iter().find(|(n, _)| n == name).map(|(_, c)| c.clamp(0.0, 1.0)).unwrap_or(0.0);
         let fused = LEX_BLEND * (score / lex_max) + (1.0 - LEX_BLEND) * sem_score;
-        hits.push((MatchHit { id: id.clone(), score: fused, source: source.to_string() }, *exact));
+        hits.push((MatchHit { name: name.clone(), score: fused }, *exact));
     }
-    for (id, cosine) in &sem {
-        if lex.iter().any(|(lid, _, _)| lid == id) || *cosine < SEM_MIN_COSINE {
+    for (name, cosine) in &sem {
+        if lex.iter().any(|(n, _, _)| n == name) || *cosine < SEM_MIN_COSINE {
             continue;
         }
-        let fused = (1.0 - LEX_BLEND) * cosine.clamp(0.0, 1.0);
-        hits.push((MatchHit { id: id.clone(), score: fused, source: "semantic".to_string() }, false));
+        hits.push((
+            MatchHit { name: name.clone(), score: (1.0 - LEX_BLEND) * cosine.clamp(0.0, 1.0) },
+            false,
+        ));
     }
     hits.sort_by(|(a, a_exact), (b, b_exact)| {
         b_exact
@@ -207,12 +180,36 @@ fn fuse(
     hits.into_iter().map(|(h, _)| h).take(limit).collect()
 }
 
-/// The semantic side of one match call: lazy-load the embedder, top up the
-/// cache, embed the query (budget-guarded), cosine-scan. Any Err degrades the
-/// call to lexical-only; the error is remembered for embed_status.
+/// The at-rest order, for an empty query: most recently used first, then the
+/// never-used ones alphabetically.
+///
+/// An empty query used to return nothing — the user had to type to make their own
+/// library appear, which is backwards. The list filters *down*, not up. No toggle
+/// is needed to pick between "recent" and "relevant": with no query there is no
+/// score to rank by, so recency is the only meaningful order; with a query, the
+/// score is. The question answers itself.
+fn at_rest_order(snippets: Vec<Snippet>, usage: &BTreeMap<String, u64>) -> Vec<MatchHit> {
+    let mut ordered: Vec<(Option<u64>, String)> =
+        snippets.into_iter().map(|s| (usage.get(&s.name).copied(), s.name)).collect();
+    ordered.sort_by(|(a_used, a_name), (b_used, b_name)| {
+        match (a_used, b_used) {
+            (Some(a), Some(b)) => b.cmp(a), // most recently used first
+            (Some(_), None) => std::cmp::Ordering::Less, // used beats never-used
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+        .then(a_name.cmp(b_name)) // alphabetical among the never-used, and a stable tiebreak
+    });
+    ordered.into_iter().map(|(_, name)| MatchHit { name, score: 0.0 }).collect()
+}
+
+/// The semantic side of one match call: lazy-load the embedder, top up this
+/// project's cache, embed the query (budget-guarded), cosine-scan. Any `Err`
+/// degrades the call to lexical-only.
 fn semantic_scores(
     inner: &PromptsInner,
-    root: &std::path::Path,
+    root: &Path,
+    project: &str,
     query: &str,
     pool: &[Snippet],
 ) -> Result<Vec<(String, f32)>, String> {
@@ -223,7 +220,7 @@ fn semantic_scores(
     let embedder = guard.as_mut().expect("just loaded");
 
     let conn = embed::open_cache(root)?;
-    embed::ensure_embeddings(&conn, embedder, pool, EMBED_TOPUP_PER_QUERY)?;
+    embed::ensure_embeddings(&conn, embedder, project, pool, EMBED_TOPUP_PER_QUERY)?;
 
     let started = Instant::now();
     let query_vec = embedder
@@ -234,55 +231,57 @@ fn semantic_scores(
         .ok_or("empty embedding")?;
     if started.elapsed().as_millis() > INFERENCE_BUDGET_MS {
         inner.slow.store(true, Ordering::SeqCst);
-        set_error(
-            inner,
-            format!(
-                "query embedding took {}ms (budget {INFERENCE_BUDGET_MS}ms); staying lexical-only on this machine — toggle semantic match off and on to retry",
-                started.elapsed().as_millis()
-            ),
+        eprintln!(
+            "[prompts] query embedding took {}ms (budget {INFERENCE_BUDGET_MS}ms); staying lexical-only on this machine",
+            started.elapsed().as_millis()
         );
     }
 
-    let pool_ids: std::collections::HashSet<&str> = pool.iter().map(|p| p.id.as_str()).collect();
-    Ok(embed::cached_vectors(&conn)?
+    let live: std::collections::HashSet<&str> = pool.iter().map(|s| s.name.as_str()).collect();
+    Ok(embed::cached_vectors(&conn, project)?
         .into_iter()
-        .filter(|(id, _)| pool_ids.contains(id.as_str()))
-        .map(|(id, v)| (id, embed::cosine(&query_vec, &v)))
+        .filter(|(name, _)| live.contains(name.as_str()))
+        .map(|(name, v)| (name, embed::cosine(&query_vec, &v)))
         .collect())
 }
 
 #[tauri::command]
 pub async fn match_snippets(
-    state: State<'_, PromptsState>,
+    state: tauri::State<'_, PromptsState>,
+    project: String,
     query: String,
-    project_id: Option<String>,
     limit: usize,
 ) -> Result<Vec<MatchHit>, String> {
     let inner = state.inner.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let snippets = store::load_snippets(&store::prompts_dir()?, roster_ids().as_ref())?;
-        let pool: Vec<Snippet> =
-            snippets.into_iter().filter(|p| in_pool(p, project_id.as_deref())).collect();
+        let root = root()?;
+        let project_path = PathBuf::from(&project);
+        let pool = store::scan_snippets(&project_path)?;
+
+        if query.trim().is_empty() {
+            let usage = appstate::usage_for(&root, &project_path)?;
+            return Ok(at_rest_order(pool, &usage).into_iter().take(limit).collect());
+        }
 
         let lex: Vec<(String, f32, bool)> = pool
             .iter()
-            .filter_map(|p| lexical::score_snippet(&query, p).map(|s| (p.id.clone(), s.score, s.exact)))
+            .filter_map(|s| {
+                lexical::score_snippet(&query, s).map(|r| (s.name.clone(), r.score, r.exact))
+            })
             .collect();
 
-        let root = crate::datadir::data_root()?;
-        let semantic_on = appconfig::load_embed_enabled()
-            && embed::platform_supported()
+        let semantic_on = embed::platform_supported()
             && embed::artifacts_present(&root)
             && !inner.slow.load(Ordering::SeqCst)
             && !inner.downloading.load(Ordering::SeqCst);
-        let sem = if semantic_on && !query.trim().is_empty() {
-            match semantic_scores(&inner, &root, &query, &pool) {
+        let sem = if semantic_on {
+            match semantic_scores(&inner, &root, &project, &query, &pool) {
                 Ok(s) => s,
                 Err(e) => {
-                    // Graceful degradation, but never silent: remembered for
-                    // embed_status and logged, not swallowed into "no results".
+                    // Degrade gracefully, but never silently: logged, not swallowed
+                    // into "no results". The user gets a working lexical panel; the
+                    // reason lands in the log.
                     eprintln!("[prompts] semantic match unavailable: {e}");
-                    set_error(&inner, e);
                     Vec::new()
                 }
             }
@@ -297,122 +296,55 @@ pub async fn match_snippets(
 }
 
 // ---------------------------------------------------------------------------
-// Embedding lifecycle commands
+// Background embedding — no user-facing surface at all
 // ---------------------------------------------------------------------------
 
-use crate::appconfig;
-
-#[tauri::command]
-pub async fn embed_status(state: State<'_, PromptsState>) -> Result<EmbedStatus, String> {
-    let inner = &state.inner;
-    let status = |state: &str, error: Option<String>| EmbedStatus {
-        state: state.to_string(),
-        model_id: embed::MODEL_ID.to_string(),
-        model_size_mb: embed::model_size_mb(),
-        runtime_size_mb: embed::runtime_size_mb(),
-        error,
-    };
-    if inner.downloading.load(Ordering::SeqCst) {
-        return Ok(status("downloading", None));
-    }
-    if !embed::platform_supported() {
-        return Ok(status(
-            "error",
-            Some("Semantic match is not available on this platform (no ONNX Runtime build for it)".to_string()),
-        ));
-    }
-    if !appconfig::load_embed_enabled() {
-        return Ok(status("off", None));
-    }
-    // Error outranks not_downloaded: after a failed download the frontend
-    // re-fetches this status expecting the failure message, not a silent
-    // reset to the download button (contract addendum: the Result + this
-    // status are the terminal signal, there is no error channel event).
-    if let Some(e) = inner.embed_error.lock().ok().and_then(|e| e.clone()) {
-        return Ok(status("error", Some(e)));
-    }
-    let root = crate::datadir::data_root()?;
-    if !embed::artifacts_present(&root) {
-        return Ok(status("not_downloaded", None));
-    }
-    Ok(status("ready", None))
-}
-
-#[tauri::command]
-pub async fn embed_download(
-    state: State<'_, PromptsState>,
-    on_progress: Channel<DownloadProgress>,
-) -> Result<(), String> {
+/// Download the model and index the active project in the background, silently.
+///
+/// Two conditions define this, and they are the whole design:
+/// - **it never blocks startup or any user action** — it runs on a blocking task
+///   nothing waits for, and lexical match works unconditionally throughout;
+/// - **it fails silently to lexical** — no toast, no notice, no retry nagging. A
+///   failure is logged and the app carries on fully working, because semantic
+///   match improves ranking and is never a prerequisite for it.
+pub fn spawn_background_index(state: &PromptsState) {
     let inner = state.inner.clone();
-    if inner.downloading.swap(true, Ordering::SeqCst) {
-        return Err("A download is already in progress".to_string());
-    }
-    let worker_inner = inner.clone();
-    let joined = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        let inner = worker_inner;
-        let root = crate::datadir::data_root()?;
-        embed::download_artifacts(&root, &|p| {
-            let _ = on_progress.send(p);
-        })?;
-        // The "index" stage (contract): embed the existing library while the
-        // user is already watching the popover, streaming snippet-count
-        // progress — so "Download & index" is literally what one click does
-        // and the first real query is instant. Resumable convention matches
-        // the byte stages: already-cached snippets count as done.
-        let mut embedder = embed::load_embedder(&root)?;
-        // Scope validation is irrelevant for embedding (bodies only) — no
-        // roster read needed.
-        let snippets = store::load_snippets(&store::prompts_dir()?, None)?;
-        let conn = embed::open_cache(&root)?;
-        let total = snippets.len() as u64;
-        loop {
-            let stale =
-                embed::ensure_embeddings(&conn, &mut embedder, &snippets, EMBED_TOPUP_PER_QUERY)?;
-            let _ = on_progress.send(DownloadProgress {
-                stage: "index".to_string(),
-                done: total - stale as u64,
-                total,
-            });
-            if stale == 0 {
-                break;
-            }
+    tauri::async_runtime::spawn_blocking(move || {
+        if !embed::platform_supported() {
+            return; // no ONNX Runtime build here; lexical-only, and that is fine
         }
-        if let Ok(mut guard) = inner.embedder.lock() {
-            *guard = Some(embedder);
+        inner.downloading.store(true, Ordering::SeqCst);
+        let outcome = background_index(&inner);
+        // Reset whatever happened, including a panic unwinding past here — a
+        // stuck `downloading` flag would wedge semantic match off until restart.
+        inner.downloading.store(false, Ordering::SeqCst);
+        if let Err(e) = outcome {
+            eprintln!(
+                "[prompts] background semantic index unavailable ({e}); matching stays lexical"
+            );
         }
-        if let Ok(mut e) = inner.embed_error.lock() {
-            *e = None;
-        }
-        inner.slow.store(false, Ordering::SeqCst);
-        Ok(())
-    })
-    .await;
-    // Reset AFTER the await, whatever happened inside: a panicking closure
-    // never reaches an in-closure reset and would wedge embed_status at
-    // "downloading" until app restart (audit L1). A JoinError (panic) lands
-    // in the same error path as a plain failure.
-    inner.downloading.store(false, Ordering::SeqCst);
-    let outcome = joined.map_err(|e| e.to_string()).and_then(|r| r);
-    if let Err(e) = &outcome {
-        set_error(&inner, e.clone());
-    }
-    outcome
+    });
 }
 
-#[tauri::command]
-pub async fn set_embed_enabled(state: State<'_, PromptsState>, enabled: bool) -> Result<(), String> {
-    appconfig::save_embed_enabled(enabled)?;
-    // Toggling is also the user's "retry" affordance: clear the sticky
-    // slow/error state, and free the model's RAM when switching off.
-    let inner = &state.inner;
-    inner.slow.store(false, Ordering::SeqCst);
-    if let Ok(mut e) = inner.embed_error.lock() {
-        *e = None;
+fn background_index(inner: &PromptsInner) -> Result<(), String> {
+    let root = root()?;
+    if !embed::artifacts_present(&root) {
+        // No progress channel: nobody is watching, by design.
+        embed::download_artifacts(&root, &|_| {})?;
     }
-    if !enabled {
-        if let Ok(mut guard) = inner.embedder.lock() {
-            *guard = None;
-        }
+    let Some(project) = appstate::active_project(&root)? else {
+        return Ok(()); // no project registered yet — nothing to index
+    };
+    let snippets = store::scan_snippets(&project)?;
+    let mut embedder = embed::load_embedder(&root)?;
+    let conn = embed::open_cache(&root)?;
+    let key = project.display().to_string();
+    // Loop until nothing is stale: each `ensure_embeddings` pass is capped, so a
+    // huge library cannot monopolize a single call.
+    while embed::ensure_embeddings(&conn, &mut embedder, &key, &snippets, EMBED_TOPUP_PER_QUERY)? > 0
+    {}
+    if let Ok(mut guard) = inner.embedder.lock() {
+        *guard = Some(embedder);
     }
     Ok(())
 }
@@ -420,70 +352,61 @@ pub async fn set_embed_enabled(state: State<'_, PromptsState>, enabled: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Map;
 
-    fn snippet(id: &str, scope: Scope) -> Snippet {
-        Snippet {
-            id: id.into(),
-            title: id.into(),
-            body: String::new(),
-            keywords: vec![],
-            tags: vec![],
-            category: None,
-            scope,
-            placeholders: vec![],
-            created_at: 0,
-            updated_at: 0,
-            versions: vec![],
-            recovered: false,
-            extra: Map::new(),
-        }
+    fn snippet(name: &str) -> Snippet {
+        Snippet { name: name.into(), content: String::new() }
     }
 
-    // --- pool rule ---
+    // --- the at-rest order (empty query) ---
 
     #[test]
-    fn pool_is_global_plus_matching_project() {
-        let g = snippet("g", Scope::Global);
-        let mine = snippet("m", Scope::Project { project_id: "proj-uuid".into() });
-        let other = snippet("o", Scope::Project { project_id: "other-uuid".into() });
+    fn empty_query_returns_everything_most_recently_used_first() {
+        // The defect this fixes: an empty query returned nothing, so the user had
+        // to type to make their own library appear.
+        let snippets = vec![snippet("old"), snippet("fresh"), snippet("never")];
+        let usage = BTreeMap::from([("old".to_string(), 100), ("fresh".to_string(), 200)]);
 
-        assert!(in_pool(&g, Some("proj-uuid")));
-        assert!(in_pool(&mine, Some("proj-uuid")));
-        assert!(!in_pool(&other, Some("proj-uuid")));
+        let names: Vec<String> =
+            at_rest_order(snippets, &usage).into_iter().map(|h| h.name).collect();
+        assert_eq!(names, ["fresh", "old", "never"], "recent first, never-used last");
+    }
 
-        assert!(in_pool(&g, None), "null project_id = global only");
-        assert!(!in_pool(&mine, None));
+    #[test]
+    fn never_used_snippets_sort_alphabetically_after_the_used_ones() {
+        let snippets = vec![snippet("zebra"), snippet("apple"), snippet("used")];
+        let usage = BTreeMap::from([("used".to_string(), 1)]);
+        let names: Vec<String> =
+            at_rest_order(snippets, &usage).into_iter().map(|h| h.name).collect();
+        assert_eq!(names, ["used", "apple", "zebra"]);
+    }
+
+    #[test]
+    fn at_rest_order_is_total_even_with_no_usage_at_all() {
+        // A fresh install: nothing has ever been used, and the list must still be
+        // everything, in a stable order — not empty.
+        let names: Vec<String> = at_rest_order(vec![snippet("b"), snippet("a")], &BTreeMap::new())
+            .into_iter()
+            .map(|h| h.name)
+            .collect();
+        assert_eq!(names, ["a", "b"]);
     }
 
     // --- fusion invariants ---
 
     #[test]
-    fn exact_hit_is_never_buried_by_semantic_scores() {
-        // The contract's one hard fusion constraint: a middling exact hit
-        // must outrank even a perfect-cosine semantic hit.
+    fn an_exact_hit_is_never_buried_by_a_semantic_score() {
+        // The one hard fusion constraint: a middling exact hit must outrank even a
+        // perfect-cosine semantic hit.
         let lex = vec![("exact".to_string(), 0.4, true), ("fuzzy".to_string(), 5.0, false)];
         let sem = vec![("semantic".to_string(), 1.0)];
-        let hits = fuse(lex, sem, 10);
-        assert_eq!(hits[0].id, "exact");
-    }
-
-    #[test]
-    fn sources_are_tagged_by_contributing_engine() {
-        let lex = vec![("both".to_string(), 1.0, false), ("lex-only".to_string(), 0.9, false)];
-        let sem = vec![("both".to_string(), 0.9), ("sem-only".to_string(), 0.9)];
-        let hits = fuse(lex, sem, 10);
-        let source = |id: &str| hits.iter().find(|h| h.id == id).unwrap().source.clone();
-        assert_eq!(source("both"), "hybrid");
-        assert_eq!(source("lex-only"), "lexical");
-        assert_eq!(source("sem-only"), "semantic");
+        assert_eq!(fuse(lex, sem, 10)[0].name, "exact");
     }
 
     #[test]
     fn low_cosine_semantic_only_candidates_are_dropped() {
         let hits = fuse(vec![], vec![("noise".to_string(), 0.2), ("real".to_string(), 0.8)], 10);
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].id, "real");
+        assert_eq!(hits[0].name, "real");
     }
 
     #[test]
@@ -493,19 +416,14 @@ mod tests {
             ("high".to_string(), 3.0, false),
             ("mid".to_string(), 1.0, false),
         ];
-        let hits = fuse(lex, vec![], 2);
-        assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].id, "high");
-        assert_eq!(hits[1].id, "mid");
-        assert!(hits.iter().all(|h| h.source == "lexical"));
+        let names: Vec<String> = fuse(lex, vec![], 2).into_iter().map(|h| h.name).collect();
+        assert_eq!(names, ["high", "mid"]);
     }
 
     #[test]
     fn semantic_contribution_reorders_equal_lexical_scores() {
         let lex = vec![("plain".to_string(), 1.0, false), ("boosted".to_string(), 1.0, false)];
         let sem = vec![("boosted".to_string(), 0.9)];
-        let hits = fuse(lex, sem, 10);
-        assert_eq!(hits[0].id, "boosted");
-        assert_eq!(hits[0].source, "hybrid");
+        assert_eq!(fuse(lex, sem, 10)[0].name, "boosted");
     }
 }

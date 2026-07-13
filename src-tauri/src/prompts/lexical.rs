@@ -1,61 +1,58 @@
-//! The always-on lexical matcher: fzf-style fuzzy subsequence scoring with
-//! field weighting (title > keywords/tags > body). Deliberately NOT
-//! BM25/tantivy — term-frequency statistics earn their keep on large noisy
-//! corpora (chat search); over a few hundred curated snippets, subsequence
-//! match + field weights is better-fitting and dependency-free (contract).
+//! The always-on lexical matcher: fzf-style fuzzy subsequence scoring, weighted
+//! name over content. Deliberately NOT BM25/tantivy — term-frequency statistics
+//! earn their keep on large noisy corpora (chat search); over a few hundred
+//! curated snippets, subsequence match + field weights is better-fitting and
+//! dependency-free.
+//!
+//! There are only two fields to weight now. Keywords, tags and category are cut:
+//! search matches what the user actually wrote — the name and the prompt itself
+//! — and grouping is done by putting a file in a folder.
 
 use super::store::Snippet;
 
-const W_TITLE: f32 = 3.0;
-const W_KEYWORD: f32 = 2.0;
-const W_BODY: f32 = 1.0;
+/// The name is a deliberate, hand-chosen label; the content is prose that
+/// happens to contain the query. The name is the stronger signal by far.
+const W_NAME: f32 = 3.0;
+const W_CONTENT: f32 = 1.0;
 
-/// A snippet's lexical result. `exact` marks a full-query title/keyword/tag hit
-/// — the fusion layer gives these a hard rank floor (contract: an exact hit
-/// is never buried by a middling semantic score).
+/// A snippet's lexical result. `exact` marks a full-query name hit — the fusion
+/// layer gives these a hard rank floor, so an exact name match can never be
+/// buried by a middling semantic score.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LexScore {
     pub score: f32,
     pub exact: bool,
 }
 
-/// Score `query` against one snippet. `None` = no match. Multi-token queries
-/// use AND semantics (every whitespace token must hit somewhere), scored as
-/// the mean of per-token best-field scores so longer queries aren't inflated.
+/// Score `query` against one snippet. `None` = no match. Multi-token queries use
+/// AND semantics (every whitespace token must hit somewhere), scored as the mean
+/// of per-token best-field scores so longer queries aren't inflated.
+///
+/// An empty query scores nothing here — but it no longer means "show nothing".
+/// The caller answers an empty query from the usage order instead: with no query
+/// there is no score to rank by, so recency is the only meaningful order.
 pub fn score_snippet(query: &str, snippet: &Snippet) -> Option<LexScore> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
         return None;
     }
-    let title = snippet.title.to_lowercase();
-    let keywords: Vec<String> = snippet
-        .keywords
-        .iter()
-        .chain(snippet.tags.iter())
-        .map(|k| k.to_lowercase())
-        .collect();
-    let body = snippet.body.to_lowercase();
+    let name = snippet.name.to_lowercase();
+    let content = snippet.content.to_lowercase();
 
     let mut total = 0.0;
     for token in q.split_whitespace() {
-        let title_s = subseq_score(token, &title) * W_TITLE;
-        let kw_s = keywords
-            .iter()
-            .map(|k| subseq_score(token, k))
-            .fold(0.0f32, f32::max)
-            * W_KEYWORD;
-        // Body: substring only. Subsequence over long prose scatter-matches
-        // almost anything, turning the body weight into noise.
-        let body_s = substring_score(token, &body) * W_BODY;
-        let best = title_s.max(kw_s).max(body_s);
+        let name_s = subseq_score(token, &name) * W_NAME;
+        // Content: substring only. Subsequence over long prose scatter-matches
+        // almost anything, turning the content weight into noise.
+        let content_s = substring_score(token, &content) * W_CONTENT;
+        let best = name_s.max(content_s);
         if best <= 0.0 {
             return None; // AND semantics: a token with no home kills the match
         }
         total += best;
     }
     let token_count = q.split_whitespace().count() as f32;
-    let exact = title == q || keywords.iter().any(|k| k == &q);
-    Some(LexScore { score: total / token_count, exact })
+    Some(LexScore { score: total / token_count, exact: name == q })
 }
 
 /// Substring-tier score: 0 if absent; 1.0 base when present, boosted for
@@ -117,54 +114,40 @@ fn subseq_score(needle: &str, hay: &str) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prompts::store::Scope;
 
-    fn snippet(title: &str, keywords: &[&str], body: &str) -> Snippet {
-        Snippet {
-            id: "t".into(),
-            title: title.into(),
-            body: body.into(),
-            keywords: keywords.iter().map(|s| s.to_string()).collect(),
-            tags: vec![],
-            category: None,
-            scope: Scope::Global,
-            placeholders: vec![],
-            created_at: 0,
-            updated_at: 0,
-            versions: vec![],
-            recovered: false,
-            extra: serde_json::Map::new(),
-        }
+    fn snippet(name: &str, content: &str) -> Snippet {
+        Snippet { name: name.into(), content: content.into() }
     }
 
     #[test]
-    fn title_match_outranks_body_match() {
-        let in_title = snippet("review checklist", &[], "unrelated");
-        let in_body = snippet("unrelated", &[], "review checklist");
-        let t = score_snippet("review", &in_title).unwrap();
-        let b = score_snippet("review", &in_body).unwrap();
-        assert!(t.score > b.score, "title weight must dominate: {} vs {}", t.score, b.score);
+    fn name_match_outranks_content_match() {
+        let in_name = snippet("review checklist", "unrelated");
+        let in_content = snippet("unrelated", "review checklist");
+        let n = score_snippet("review", &in_name).unwrap();
+        let c = score_snippet("review", &in_content).unwrap();
+        assert!(n.score > c.score, "name weight must dominate: {} vs {}", n.score, c.score);
     }
 
     #[test]
-    fn keyword_match_outranks_body_match() {
-        let in_kw = snippet("unrelated", &["review"], "nothing");
-        let in_body = snippet("unrelated", &[], "review here");
-        assert!(score_snippet("review", &in_kw).unwrap().score > score_snippet("review", &in_body).unwrap().score);
-    }
-
-    #[test]
-    fn exact_title_and_keyword_hits_are_flagged() {
-        let p = snippet("senior-reviewer", &["role"], "body");
+    fn exact_name_hits_are_flagged() {
+        let p = snippet("senior-reviewer", "body");
         assert!(score_snippet("senior-reviewer", &p).unwrap().exact);
         assert!(score_snippet("SENIOR-REVIEWER", &p).unwrap().exact, "case-insensitive");
-        assert!(score_snippet("role", &p).unwrap().exact, "keyword equality is exact too");
-        assert!(!score_snippet("senior", &p).unwrap().exact, "prefix is a match, not an exact hit");
+        assert!(!score_snippet("senior", &p).unwrap().exact, "a prefix is a match, not an exact hit");
+    }
+
+    #[test]
+    fn a_subfolder_path_is_searchable_because_it_is_part_of_the_name() {
+        // Folders replaced tags/category, so the folder must be matchable — this
+        // is what makes "grouping by mkdir" actually usable.
+        let p = snippet("rust/borrow_checker", "explain lifetimes");
+        assert!(score_snippet("rust", &p).is_some());
+        assert!(score_snippet("rust borrow", &p).is_some());
     }
 
     #[test]
     fn subsequence_finds_but_ranks_below_substring() {
-        let p = snippet("senior-reviewer", &[], "");
+        let p = snippet("senior-reviewer", "");
         let scattered = score_snippet("snrev", &p).unwrap();
         let substring = score_snippet("senior", &p).unwrap();
         assert!(scattered.score > 0.0, "subsequence must still match");
@@ -173,25 +156,27 @@ mod tests {
 
     #[test]
     fn and_semantics_all_tokens_must_match() {
-        let p = snippet("senior reviewer", &[], "checks the PR");
+        let p = snippet("senior reviewer", "checks the PR");
         assert!(score_snippet("senior pr", &p).is_some(), "tokens may hit different fields");
         assert!(score_snippet("senior zebra", &p).is_none(), "one dead token kills the match");
     }
 
     #[test]
-    fn empty_query_matches_nothing() {
-        let p = snippet("anything", &[], "b");
+    fn empty_query_scores_nothing_here() {
+        // Not "shows nothing" — `match_snippets` answers an empty query from the
+        // usage order instead. This function simply has nothing to rank by.
+        let p = snippet("anything", "b");
         assert!(score_snippet("", &p).is_none());
         assert!(score_snippet("   ", &p).is_none());
     }
 
     #[test]
-    fn body_requires_substring_not_subsequence() {
-        let p = snippet("x", &[], "the quick brown fox jumps");
+    fn content_requires_substring_not_subsequence() {
+        let p = snippet("x", "the quick brown fox jumps");
         assert!(score_snippet("quick", &p).is_some());
         assert!(
             score_snippet("tqbfj", &p).is_none(),
-            "scatter-matching prose would make body weight pure noise"
+            "scatter-matching prose would make the content weight pure noise"
         );
     }
 }

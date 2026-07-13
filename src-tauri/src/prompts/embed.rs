@@ -52,15 +52,12 @@ const MODEL_FILES: &[(&str, &str, u64)] = &[
 ];
 
 /// Total bytes of the "model" download stage.
+///
+/// The `model_size_mb` / `runtime_size_mb` disclosure helpers that used to sit
+/// here are gone with the download UI they fed: the download is background-only
+/// now, so there is no one to disclose a size to.
 fn model_total_bytes() -> u64 {
     MODEL_FILES.iter().map(|(_, _, size)| size).sum()
-}
-
-/// Model download size for up-front disclosure — decimal MB, derived from the
-/// pinned byte sizes so it can never drift from them, and the same unit as
-/// [`runtime_size_mb`] (audit N1: the two are shown side by side to the user).
-pub fn model_size_mb() -> u32 {
-    (model_total_bytes() / 1_000_000) as u32
 }
 
 /// Pinned ONNX Runtime release (ort 2.0.0-rc.12 is designed for 1.24.x).
@@ -124,11 +121,6 @@ pub struct DownloadProgress {
 /// Is semantic matching even possible on this build's platform?
 pub fn platform_supported() -> bool {
     ORT_ARTIFACT.is_some()
-}
-
-/// Archive download size for up-front disclosure (0 on unsupported platforms).
-pub fn runtime_size_mb() -> u32 {
-    ORT_ARTIFACT.as_ref().map(|a| (a.download_bytes / 1_000_000) as u32).unwrap_or(0)
 }
 
 fn models_dir(root: &Path) -> PathBuf {
@@ -333,33 +325,36 @@ pub fn load_embedder(root: &Path) -> Result<TextEmbedding, String> {
 // prompts/ at any time — deliberately outside the hand-editable prompts dir.
 // ---------------------------------------------------------------------------
 
-/// The text a snippet is embedded from. Title carries strong signal; keywords
-/// add the user's own vocabulary; body carries the substance.
+/// The text a snippet is embedded from: its name (a hand-chosen label, strong
+/// signal) and its content (the substance).
 pub fn embedding_text(snippet: &Snippet) -> String {
-    format!("{}\n{}\n{}", snippet.title, snippet.keywords.join(" "), snippet.body)
+    format!("{}\n{}", snippet.name, snippet.content)
 }
 
-pub fn body_hash(snippet: &Snippet) -> String {
+pub fn content_hash(snippet: &Snippet) -> String {
     sha256_hex(embedding_text(snippet).as_bytes())
 }
 
+/// A snippet's cache identity is now `(project, name)` — there is no uuid to key
+/// on, and a bare name is not unique across projects.
 pub fn open_cache(root: &Path) -> Result<Connection, String> {
     let dir = root.join("cache");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let conn = Connection::open(dir.join("embeddings.sqlite")).map_err(|e| e.to_string())?;
-    // The `piece_id` column keeps its legacy name deliberately: the snippet
-    // rename stops at the storage boundary. Renaming it would need a schema
-    // migration under the founder's existing cache file (CREATE TABLE IF NOT
-    // EXISTS won't alter an existing table, so a `SELECT snippet_id` would
-    // then error on it) for zero user-visible gain — this cache is derived and
-    // internal. It maps 1:1 to `Snippet::id`.
+    // The legacy table was keyed by snippet uuid — an identity that no longer
+    // exists, so every row in it is unreachable. Dropping it is safe and correct:
+    // this cache is derived data, rebuildable from the .md files at any time.
+    // (`CREATE TABLE IF NOT EXISTS` cannot alter the old table's shape, so the
+    // new schema needs its own name regardless.)
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS embeddings (
-            piece_id  TEXT NOT NULL,
-            model_id  TEXT NOT NULL,
-            body_hash TEXT NOT NULL,
-            vector    BLOB NOT NULL,
-            PRIMARY KEY (piece_id, model_id)
+        "DROP TABLE IF EXISTS embeddings;
+         CREATE TABLE IF NOT EXISTS snippet_embeddings (
+            project      TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            model_id     TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            vector       BLOB NOT NULL,
+            PRIMARY KEY (project, name, model_id)
         );",
     )
     .map_err(|e| e.to_string())?;
@@ -374,45 +369,50 @@ fn blob_to_vector(b: &[u8]) -> Vec<f32> {
     b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 
-/// Bring the cache up to date for `snippets`: embed missing/stale entries (at
-/// most `limit` per call, so a huge hand-imported corpus warms up over a few
-/// queries instead of blocking one) and drop rows for deleted snippets.
-/// Returns how many snippets are still stale after this pass.
+/// Bring the cache up to date for **one project's** snippets: embed the
+/// missing/stale ones (at most `limit` per call, so a huge corpus warms up over
+/// a few queries instead of blocking one) and drop rows for snippets that no
+/// longer exist. Returns how many are still stale after this pass.
+///
+/// Every statement is scoped to `project`, and that scoping is load-bearing, not
+/// tidiness: the cleanup deletes cached rows that are absent from `snippets`, so
+/// an unscoped delete would wipe every *other* project's vectors on every query
+/// against this one. The corruption would be invisible — semantic match would
+/// just silently degrade to "slow sometimes" as each project re-embedded the
+/// library the last query threw away.
 pub fn ensure_embeddings(
     conn: &Connection,
     embedder: &mut TextEmbedding,
+    project: &str,
     snippets: &[Snippet],
     limit: usize,
 ) -> Result<usize, String> {
     let cached: Vec<(String, String)> = {
         let mut stmt = conn
-            .prepare("SELECT piece_id, body_hash FROM embeddings WHERE model_id = ?1")
+            .prepare(
+                "SELECT name, content_hash FROM snippet_embeddings WHERE project = ?1 AND model_id = ?2",
+            )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map([MODEL_ID], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .query_map((project, MODEL_ID), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
             .map_err(|e| e.to_string())?;
         rows.filter_map(|r| r.ok()).collect()
     };
-    // Drop rows for snippets that no longer exist.
-    let live: std::collections::HashSet<&str> = snippets.iter().map(|p| p.id.as_str()).collect();
-    for (piece_id, _) in cached.iter().filter(|(id, _)| !live.contains(id.as_str())) {
-        conn.execute("DELETE FROM embeddings WHERE piece_id = ?1 AND model_id = ?2", (piece_id, MODEL_ID))
-            .map_err(|e| e.to_string())?;
-    }
-    let is_fresh = |p: &&Snippet| {
-        cached
-            .iter()
-            .any(|(id, hash)| id == &p.id && hash == &body_hash(p))
-    };
-    let stale: Vec<&Snippet> = snippets.iter().filter(|p| !is_fresh(p)).collect();
+    let live: Vec<&str> = snippets.iter().map(|s| s.name.as_str()).collect();
+    prune_cache(conn, project, &live)?;
+    let is_fresh =
+        |s: &&Snippet| cached.iter().any(|(n, hash)| n == &s.name && hash == &content_hash(s));
+    let stale: Vec<&Snippet> = snippets.iter().filter(|s| !is_fresh(s)).collect();
     let batch: Vec<&Snippet> = stale.iter().take(limit).copied().collect();
     if !batch.is_empty() {
-        let texts: Vec<String> = batch.iter().map(|p| embedding_text(p)).collect();
+        let texts: Vec<String> = batch.iter().map(|s| embedding_text(s)).collect();
         let vectors = embedder.embed(texts, None).map_err(|e| e.to_string())?;
         for (snippet, vector) in batch.iter().zip(vectors) {
             conn.execute(
-                "INSERT OR REPLACE INTO embeddings (piece_id, model_id, body_hash, vector) VALUES (?1, ?2, ?3, ?4)",
-                (&snippet.id, MODEL_ID, body_hash(snippet), vector_to_blob(&vector)),
+                "INSERT OR REPLACE INTO snippet_embeddings (project, name, model_id, content_hash, vector) VALUES (?1, ?2, ?3, ?4, ?5)",
+                (project, &snippet.name, MODEL_ID, content_hash(snippet), vector_to_blob(&vector)),
             )
             .map_err(|e| e.to_string())?;
         }
@@ -420,16 +420,44 @@ pub fn ensure_embeddings(
     Ok(stale.len().saturating_sub(batch.len()))
 }
 
-/// All cached vectors for the current model — the in-memory pool the linear
-/// cosine scan runs over (microseconds at ≤10k snippets; no vector DB by design).
-pub fn cached_vectors(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>, String> {
+/// Drop this project's cached rows for snippets that no longer exist.
+///
+/// Split out from [`ensure_embeddings`] so the project scoping can be tested
+/// without a 67MB model in the loop — this is the statement where an omitted
+/// `project = ?1` would silently delete every other project's vectors.
+fn prune_cache(conn: &Connection, project: &str, live: &[&str]) -> Result<(), String> {
+    let cached: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT name FROM snippet_embeddings WHERE project = ?1 AND model_id = ?2")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map((project, MODEL_ID), |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    for name in cached.iter().filter(|name| !live.contains(&name.as_str())) {
+        conn.execute(
+            "DELETE FROM snippet_embeddings WHERE project = ?1 AND name = ?2 AND model_id = ?3",
+            (project, name, MODEL_ID),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// One project's cached vectors for the current model, keyed by snippet name —
+/// the in-memory pool the linear cosine scan runs over (microseconds at ≤10k
+/// snippets; no vector DB by design).
+pub fn cached_vectors(conn: &Connection, project: &str) -> Result<Vec<(String, Vec<f32>)>, String> {
     let mut stmt = conn
-        .prepare("SELECT piece_id, vector FROM embeddings WHERE model_id = ?1")
+        .prepare("SELECT name, vector FROM snippet_embeddings WHERE project = ?1 AND model_id = ?2")
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([MODEL_ID], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))
+        .query_map((project, MODEL_ID), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })
         .map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(|r| r.ok()).map(|(id, blob)| (id, blob_to_vector(&blob))).collect())
+    Ok(rows.filter_map(|r| r.ok()).map(|(name, blob)| (name, blob_to_vector(&blob))).collect())
 }
 
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -451,6 +479,57 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cache with two projects, each holding a snippet — including one that
+    /// shares a name across both, which is legal now that names are only unique
+    /// within a project.
+    fn seeded_cache() -> (PathBuf, Connection) {
+        let root = std::env::temp_dir().join(format!("ccdeck-embed-cache-{}", uuid::Uuid::new_v4()));
+        let conn = open_cache(&root).unwrap();
+        for (project, name) in
+            [("/a", "keep"), ("/a", "shared"), ("/a", "stale"), ("/b", "shared"), ("/b", "other")]
+        {
+            conn.execute(
+                "INSERT INTO snippet_embeddings (project, name, model_id, content_hash, vector) VALUES (?1, ?2, ?3, 'h', ?4)",
+                (project, name, MODEL_ID, vector_to_blob(&[1.0f32, 0.0])),
+            )
+            .unwrap();
+        }
+        (root, conn)
+    }
+
+    #[test]
+    fn pruning_one_project_never_touches_another_project_vectors() {
+        // The bug this guards: an unscoped DELETE would wipe every other
+        // project's cache on every query, and the damage would be invisible —
+        // semantic match would just present as "slow sometimes" forever as each
+        // project re-embedded the library the last query threw away.
+        let (root, conn) = seeded_cache();
+
+        prune_cache(&conn, "/a", &["keep", "shared"]).unwrap();
+
+        let a: Vec<String> = cached_vectors(&conn, "/a").unwrap().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(a, vec!["keep".to_string(), "shared".to_string()], "/a drops only its own stale row");
+
+        let mut b: Vec<String> =
+            cached_vectors(&conn, "/b").unwrap().into_iter().map(|(n, _)| n).collect();
+        b.sort();
+        assert_eq!(
+            b,
+            vec!["other".to_string(), "shared".to_string()],
+            "/b must be untouched — including its snippet that shares a name with one in /a"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn cached_vectors_are_scoped_to_one_project() {
+        let (root, conn) = seeded_cache();
+        assert_eq!(cached_vectors(&conn, "/a").unwrap().len(), 3);
+        assert_eq!(cached_vectors(&conn, "/b").unwrap().len(), 2);
+        assert!(cached_vectors(&conn, "/unknown").unwrap().is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn sha256_matches_known_vector() {
