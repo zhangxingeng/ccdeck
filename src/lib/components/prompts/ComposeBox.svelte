@@ -470,7 +470,9 @@
     color: var(--text-faint);
     pointer-events: none;
   }
-  .compose__box ::selection {
+  /* The text inside the box is not Svelte-owned (chips are built by hand), so the
+     selection style has to be reached globally — scoped to the box. */
+  .compose__box :global(::selection) {
     background: var(--highlight);
     color: var(--highlight-foreground);
   }
