@@ -50,12 +50,19 @@ export interface TextNode {
  *
  * `cid` identifies this chip INSTANCE, not the snippet: the same snippet can be
  * inserted twice, and `Use once` on one copy must not touch the other.
+ *
+ * `dirty` marks a chip that has diverged from the library file its name still
+ * points at — set by a session-only `Save` (round 2's renamed `Use once`),
+ * cleared by `Update` (the disk-write path) and by a fresh insert. Absent or
+ * `false` means "still identical to the saved file." Never written to disk —
+ * it describes a draft's relationship to the file, not the file itself.
  */
 export interface ChipNode {
   kind: 'chip';
   cid: string;
   name: string;
   content: string;
+  dirty?: boolean;
 }
 
 export type Node = TextNode | ChipNode;
@@ -184,19 +191,26 @@ export function insertChip(doc: Doc, caret: Caret, chip: Omit<ChipNode, 'kind'>)
   });
 }
 
-/** Replace a chip's body — `Use once` (this prompt only, nothing written to the
- *  library) and the popup's Save (which also wrote the file). */
-export function replaceChipContent(doc: Doc, cid: string, content: string): Doc {
+/** Replace a chip's body — the popup's session-only `Save` (this prompt only,
+ *  nothing written to the library). Marks the chip `dirty` by default: this is
+ *  precisely the transform that diverges a chip from its saved file, so the one
+ *  real caller wants `dirty: true` — a caller with a different need can pass
+ *  `false` explicitly rather than the function guessing wrong for everyone. */
+export function replaceChipContent(doc: Doc, cid: string, content: string, dirty = true): Doc {
   return normalize({
-    nodes: doc.nodes.map((n) => (n.kind === 'chip' && n.cid === cid ? { ...n, content } : n)),
+    nodes: doc.nodes.map((n) => (n.kind === 'chip' && n.cid === cid ? { ...n, content, dirty } : n)),
   });
 }
 
-/** Retarget a chip at a different snippet — the popup's Save under a NEW name,
- *  which created a new file. The chip now reflects the snippet it actually is. */
+/** Retarget a chip at a different snippet — the popup's Update, which writes
+ *  the file (same name updates it, a new name creates one). The chip now
+ *  reflects the snippet it actually is, and — having just been written to disk
+ *  — is no longer diverged from it: Update always clears `dirty`. */
 export function retargetChip(doc: Doc, cid: string, name: string, content: string): Doc {
   return normalize({
-    nodes: doc.nodes.map((n) => (n.kind === 'chip' && n.cid === cid ? { ...n, name, content } : n)),
+    nodes: doc.nodes.map((n) =>
+      n.kind === 'chip' && n.cid === cid ? { ...n, name, content, dirty: false } : n
+    ),
   });
 }
 
@@ -236,13 +250,19 @@ export function dissolveChip(doc: Doc, cid: string): Doc {
  *  Body text in the box is clutter serving no reader. */
 export type RenderNode =
   | { kind: 'text'; text: string }
-  | { kind: 'chip'; cid: string; name: string; vars: string[] };
+  | { kind: 'chip'; cid: string; name: string; vars: string[]; dirty: boolean };
 
 export function toRenderNodes(doc: Doc): RenderNode[] {
   return doc.nodes.map((n) =>
     n.kind === 'text'
       ? { kind: 'text' as const, text: n.text }
-      : { kind: 'chip' as const, cid: n.cid, name: n.name, vars: chipVariables(n) }
+      : {
+          kind: 'chip' as const,
+          cid: n.cid,
+          name: n.name,
+          vars: chipVariables(n),
+          dirty: n.dirty === true,
+        }
   );
 }
 

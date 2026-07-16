@@ -29,9 +29,15 @@
  *      pretending they differ would be a fiction the UI maintains and the output
  *      discards.
  *   5. An unfilled variable resolves to the literal sentinel
- *      `variable not set, ask user for it` — in BOTH copy modes. A forgotten
- *      variable therefore still produces a working prompt: the model asks, rather
- *      than silently receiving a blank or a stray `{placeholder}`.
+ *      `variable not set, ask user for it`. A forgotten variable therefore still
+ *      produces a working prompt: the model asks, rather than silently
+ *      receiving a blank or a stray `{placeholder}`.
+ *   6. Every variable is always hoisted on copy: `{name}` becomes
+ *      `<prompt_var name="name"/>` in place, and one `<prompt_vars>` block,
+ *      appended at the end, carries each distinct name's value once. Round 1
+ *      had a per-variable as-variable toggle; round 2 cut it — a control nobody
+ *      flipped is the archetype of the forgotten feature this whole redesign
+ *      exists to delete. See `copyText` below.
  *
  * ── There is no Markdown awareness. Do not add any. ──────────────────────────
  *
@@ -62,7 +68,7 @@
  * quiet surprise for an unguessable rule, which is the worse trade.
  */
 
-/** What an unfilled variable becomes on copy, in both modes (rule 5). */
+/** What an unfilled variable becomes on copy (rule 5). */
 export const UNSET_VALUE = 'variable not set, ask user for it';
 
 /** One distinct variable: a name, and nothing else. Every variable is a string,
@@ -153,41 +159,26 @@ function escapeXml(value: string): string {
 /**
  * The Copy Prompt output.
  *
- * As-variable is a PER-VARIABLE choice (`asVars`, keyed by name); a name absent
- * from the map is ON. ON is the safe default: emitting a variable as a reference
- * never breaks a prompt, while substituting unexpected data in place can
- * silently bloat it — so the user opts OUT per variable. One document may mix
- * modes freely.
+ * Round 2 cut the per-variable as-variable toggle (a control nobody flipped —
+ * the archetype of the forgotten feature this whole redesign exists to
+ * delete). Every variable is now always hoisted: every occurrence becomes
+ * `<prompt_var name="x"/>`, and one `<prompt_vars>` block, appended at the end,
+ * carries each distinct name's value once, in first-appearance order,
+ * XML-escaped.
  *
- * - ON  → every occurrence becomes `<prompt_var name="x"/>`, and one appended
- *         `<prompt_vars>` block carries the value once. Block values are
- *         XML-escaped. The block lists only the ON variables, in first-
- *         appearance order.
- * - OFF → every occurrence becomes the value verbatim, as plain text — never
- *         XML-escaped: it is prose the model reads, not markup it parses.
- *
- * An unfilled variable resolves to UNSET_VALUE in BOTH modes (rule 5). That is
- * what makes a forgotten variable degrade into a working prompt rather than a
- * blank or a stray literal, regardless of how the toggle happens to be set.
+ * An unfilled variable resolves to UNSET_VALUE (rule 5) — a forgotten variable
+ * still produces a working prompt, the model just asks.
  */
-export function copyText(
-  text: string,
-  fills: Record<string, string>,
-  asVars: Record<string, boolean>
-): string {
-  // A name absent from `asVars` is ON — the safe default (see doc comment).
-  const isOn = (name: string): boolean => asVars[name] !== false;
-
+export function copyText(text: string, fills: Record<string, string>): string {
   const out: string[] = [];
   for (const t of scan(text)) {
     if (t.kind === 'literal') out.push(t.text);
-    else if (isOn(t.name)) out.push(`<prompt_var name="${t.name}"/>`);
-    else out.push(resolve(t.name, fills));
+    else out.push(`<prompt_var name="${t.name}"/>`);
   }
 
-  const onVars = parseVariables(text).filter((v) => isOn(v.name));
-  if (onVars.length) {
-    const entries = onVars.map(
+  const vars = parseVariables(text);
+  if (vars.length) {
+    const entries = vars.map(
       (v) => `<prompt_var name="${v.name}">${escapeXml(resolve(v.name, fills))}</prompt_var>`
     );
     out.push(`\n\n<prompt_vars>\n${entries.join('\n')}\n</prompt_vars>`);

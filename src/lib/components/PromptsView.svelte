@@ -20,10 +20,12 @@
     copyOutput,
     touchSnippet,
   } from '$lib/prompts.svelte';
-  import { chipAt } from '$lib/compose/doc';
+  import { chipAt, flatten } from '$lib/compose/doc';
+  import { parseVariables } from '$lib/compose/variables';
   import { copyToClipboard } from '$lib/copy';
   import { toasts } from '$lib/prompts/toasts.svelte';
   import ComposeBox from './prompts/ComposeBox.svelte';
+  import VariableFillList from './prompts/VariableFillList.svelte';
   import MatchPanel from './prompts/MatchPanel.svelte';
   import SnippetModal, { type SnippetModalContext } from './prompts/SnippetModal.svelte';
   import ProjectTabs from './prompts/ProjectTabs.svelte';
@@ -44,6 +46,11 @@
   /** True while a modal or popover owns the keyboard — the view-scoped hotkeys
    *  disarm so a modal keystroke never triggers a command. */
   const keyboardCaptured = $derived(modalContext !== null || projectMenuOpen);
+
+  /** Whether the fill-list column has anything to show — gates the column
+   *  itself (not just its rows), so an empty prompt doesn't reserve a blank
+   *  right-hand strip. */
+  const hasVariables = $derived(parseVariables(flatten(prompts.doc)).length > 0);
 
   onMount(() => {
     initPrompts();
@@ -199,6 +206,13 @@
         onStepIntoPanel={() => matchPanel?.focusFirst() ?? false}
       />
     </section>
+
+    {#if hasVariables}
+      <aside class="prompts-view__fills">
+        <span class="prompts-view__fills-title">Variables</span>
+        <VariableFillList />
+      </aside>
+    {/if}
   </div>
 </div>
 
@@ -302,6 +316,21 @@
     position: relative; /* anchors the placeholder popover */
   }
 
+  .prompts-view__fills {
+    width: 15.5rem;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    overflow-y: auto;
+  }
+  .prompts-view__fills-title {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-faint);
+  }
+
   /* Toast stack: newest at the bottom, above everything, click to dismiss. */
   .prompts-toasts {
     position: fixed;
@@ -330,5 +359,6 @@
   @media (max-width: 640px) {
     .prompts-view__cols { flex-direction: column; }
     .prompts-view__panel { width: 100%; }
+    .prompts-view__fills { width: 100%; }
   }
 </style>

@@ -39,7 +39,7 @@
     type RawNode,
     type RenderNode,
   } from '$lib/compose/doc';
-  import VariableFillList from './VariableFillList.svelte';
+  import { copyText } from '$lib/compose/variables';
 
   interface Props {
     /** Clicking a chip — the one and only way to edit a snippet. */
@@ -54,11 +54,6 @@
   let { onOpenChip, onCopy, onStepIntoPanel }: Props = $props();
 
   let boxEl: HTMLDivElement | undefined = $state(undefined);
-  /** Bumped on every selection change. Currently write-only — it fed the now-cut
-   *  "Save as snippet" label's selection-aware recompute. Left in place (with the
-   *  selectionchange listener below) for Lane F's copy-event fix, which needs the
-   *  same "is there a live selection" signal for its own selection-aware Ctrl+C. */
-  let selectionNonce = $state(0);
 
   const hasContent = $derived(prompts.doc.nodes.length > 0);
 
@@ -95,6 +90,36 @@
     return out.replaceAll(ZWSP, '');
   }
 
+  /**
+   * A native copy from inside the box — `oncopy` — must not hand out the DOM's
+   * rendered text, for the same reason `selectionText()` exists: a chip's DOM
+   * text is its LABEL, so a naive copy would paste the literal words
+   * `rust/code_review` instead of the code-review prompt.
+   *
+   * This supersedes round 1's selection-aware Ctrl+C rule (`nativeSelectionActive`
+   * in PromptsView.svelte) ONLY inside the box: that rule still stands for not
+   * hijacking a copy out of a variable-fill input, which lives outside this
+   * element entirely. Inside the box, a selection copy is now ours to answer,
+   * because the rendered text is wrong here.
+   *
+   * Select-all + copy must produce exactly what the Copy button produces —
+   * `selectionText()` over the full box already flattens to the same string as
+   * `flatten(prompts.doc)`, so running it through the same `copyText` pipeline
+   * makes that fall out for free, with no separate "is this everything?" branch.
+   *
+   * A PARTIAL selection is an open question in the contract, left to feel:
+   * this resolves variables through the same pipeline as the Copy button
+   * (chips flattened, `{var}` tokens hoisted) rather than leaving `{var}`
+   * literal, on the theory that "copy from the box" should mean one thing.
+   */
+  function handleCopyEvent(e: ClipboardEvent): void {
+    const text = selectionText();
+    if (!text) return; // nothing selected — let the no-op default proceed
+    e.preventDefault();
+    e.clipboardData?.setData('text/plain', copyText(text, prompts.fills));
+  }
+
+
   /** Esc out of the match panel puts the caret back in the box. */
   export function focus(): void {
     boxEl?.focus();
@@ -113,12 +138,22 @@
     el.dataset.cid = n.cid;
     el.setAttribute('role', 'button');
     el.setAttribute('tabindex', '0');
-    el.title = `Edit ${n.name}`;
+    el.title = n.dirty ? `Edit ${n.name} (draft — edited this session, not saved)` : `Edit ${n.name}`;
 
     const name = document.createElement('span');
     name.className = 'chip__name';
     name.textContent = n.name;
     el.append(name);
+
+    // Diverged from the saved file via a session-only Save, never written to
+    // disk (contract §5/Clarifications). Restrained on purpose, like
+    // .chip__var — visible, not loud.
+    if (n.dirty) {
+      const dirty = document.createElement('span');
+      dirty.className = 'chip__dirty';
+      dirty.setAttribute('aria-label', 'Draft: edited this session, not saved to the library');
+      el.append(dirty);
+    }
 
     for (const v of n.vars) {
       const badge = document.createElement('span');
@@ -126,6 +161,21 @@
       badge.textContent = v;
       el.append(badge);
     }
+
+    // Hover reveals the chip's full body — same rule as the library panel. A
+    // chip stays a name at rest; hovering shows what it will actually
+    // contribute. CSS-only (:hover toggles display) so no extra reactive state
+    // is needed for something this is not: the body is baked in at render
+    // time, which is exactly when it can change (an external insert or a
+    // popup save — the only two things that touch a chip's content).
+    const body = chipAt(prompts.doc, n.cid)?.content ?? '';
+    if (body) {
+      const preview = document.createElement('span');
+      preview.className = 'chip__preview';
+      preview.textContent = body;
+      el.append(preview);
+    }
+
     return el;
   }
 
@@ -375,7 +425,6 @@
       const anchor = document.getSelection()?.anchorNode ?? null;
       if (!boxEl || !anchor || !boxEl.contains(anchor)) return;
       syncCaret();
-      selectionNonce++; // the save-as label depends on whether a selection exists
     }
     document.addEventListener('selectionchange', onSelectionChange);
     return () => document.removeEventListener('selectionchange', onSelectionChange);
@@ -398,20 +447,24 @@
       onkeydown={handleBoxKeydown}
       onpaste={handlePaste}
       onclick={handleClick}
+      oncopy={handleCopyEvent}
     ></div>
 
-    <div class="compose__actions">
-      {#if hasContent}
-        <!-- "Save as snippet" lived here in round 1 and is cut (round 2 §1): the
-             library's `+` button is now the only way to create one. Lane F
-             relocates this to a top-right icon — left in place here so this
-             lane's deletion doesn't collide with that move. -->
-        <button type="button" class="btn btn--primary btn--sm" onclick={onCopy}>Copy prompt</button>
-      {/if}
-    </div>
-  </div>
+    {#if hasContent}
+      <!-- Top-right icon, semi-transparent — the affordance every code block on
+           the web already has. -->
+      <button
+        type="button"
+        class="compose__copy"
+        onclick={onCopy}
+        title="Copy prompt"
+        aria-label="Copy prompt"
+      >
+        ⧉
+      </button>
+    {/if}
 
-  <VariableFillList />
+  </div>
 </div>
 
 <style>
@@ -465,6 +518,7 @@
      contenteditable), so they carry no scoping class and are reached with :global
      from the scoped box. */
   .compose__box :global(.chip) {
+    position: relative; /* anchors .chip__preview */
     display: inline-flex;
     align-items: center;
     gap: 0.3rem;
@@ -500,18 +554,72 @@
     color: color-mix(in srgb, var(--accent-template) 80%, var(--text));
   }
 
-  .compose__actions {
+  /* A chip diverged from its saved file via a session-only Save — restrained on
+     purpose, like .chip__var: visible at rest, not loud. */
+  .compose__box :global(.chip__dirty) {
+    width: 0.4rem;
+    height: 0.4rem;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--accent-result-err) 70%, var(--accent-template));
+    flex-shrink: 0;
+  }
+
+  /* Hover reveals the chip's full body — same rule as the library panel. The
+     chip stays a name at rest; :hover is enough, no JS state needed for
+     something this purely visual. */
+  .compose__box :global(.chip__preview) {
+    display: none;
     position: absolute;
-    left: 0.75rem;
-    right: 0.75rem;
-    bottom: 0.75rem;
+    top: calc(100% + 0.35rem);
+    left: 0;
+    z-index: 20;
+    width: max-content;
+    max-width: 24rem;
+    max-height: 16rem;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    line-height: 1.5;
+    font-weight: 400;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
+    background: var(--bg-card);
+    color: var(--text);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+    cursor: auto;
+  }
+  .compose__box :global(.chip:hover .chip__preview),
+  .compose__box :global(.chip:focus-visible .chip__preview) {
+    display: block;
+  }
+
+  /* Semi-transparent icon, top-right — the affordance every code block on the
+     web already has. Full opacity on hover/focus. */
+  .compose__copy {
+    position: absolute;
+    top: 0.6rem;
+    right: 0.6rem;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 0.6rem;
-    pointer-events: none;
+    justify-content: center;
+    width: 1.8rem;
+    height: 1.8rem;
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
+    background: var(--bg-card);
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    line-height: 1;
+    opacity: 0.55;
+    cursor: pointer;
   }
-  .compose__actions > :global(*) {
-    pointer-events: auto;
+  .compose__copy:hover,
+  .compose__copy:focus-visible {
+    opacity: 1;
+    color: var(--text);
+    border-color: color-mix(in srgb, var(--accent-snippet) 55%, var(--border));
+    outline: none;
   }
 </style>
