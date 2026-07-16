@@ -137,44 +137,6 @@ export interface BackupVersion {
 }
 
 // ---------------------------------------------------------------------------
-// Claude Code settings (mirrors src-tauri/src/settings.rs)
-// ---------------------------------------------------------------------------
-
-/** Precedence high -> low: local wins over project wins over user. */
-export type SettingsTier = 'local' | 'project' | 'user';
-
-/** One settings file tier as read from disk. */
-export interface SettingsTierData {
-  tier: SettingsTier;
-  path: string;
-  exists: boolean;
-  raw: string;
-  parsed: Record<string, unknown> | null;
-  parseError: string | null;
-}
-
-/** One tier's value for a key set in more than one tier. */
-export interface SettingsConflictValue {
-  tier: SettingsTier;
-  value: unknown;
-}
-
-/** A key set with differing values across tiers — the "what's set where" signal. */
-export interface SettingsConflict {
-  key: string;
-  tierValues: SettingsConflictValue[];
-  winner: SettingsTier;
-}
-
-/** Full picture returned by read_claude_settings: every tier + merge + conflicts. */
-export interface ClaudeSettings {
-  tiers: SettingsTierData[];
-  effective: Record<string, unknown>;
-  conflicts: SettingsConflict[];
-  projectCwd: string | null;
-}
-
-// ---------------------------------------------------------------------------
 // CC Deck's own app preferences (mirrors src-tauri/src/appconfig.rs)
 // ---------------------------------------------------------------------------
 

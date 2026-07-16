@@ -18,9 +18,6 @@ mod datadir;
 // Prompt Library (issue #24): snippet store + hybrid match engine + commands.
 mod prompts;
 
-// Claude Code's own settings.json (schema-driven read/merge/conflict/write across tiers).
-mod settings;
-
 // Named provider profiles (issue #21): keychain-backed API keys + ANTHROPIC_*
 // env injection for resuming against an alternate Anthropic-compatible provider.
 mod providers;
@@ -1115,8 +1112,6 @@ pub fn run() {
             search::state::search,
             search::state::refresh_index,
             search::state::index_status,
-            settings::read_claude_settings,
-            settings::write_claude_settings,
             appconfig::get_app_config,
             appconfig::set_app_config,
             providers::list_provider_profiles,

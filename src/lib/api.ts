@@ -10,8 +10,6 @@ import type {
   SearchHit,
   SearchSummary,
   IndexStatus,
-  ClaudeSettings,
-  SettingsTier,
   AppConfig,
   ProviderProfile,
   KeyBackend,
@@ -124,97 +122,6 @@ export async function listBackups(sessionPath: string): Promise<BackupVersion[]>
 export async function restoreBackup(backupPath: string): Promise<string> {
   if (!isTauri()) return mockSession;
   return call<string>('restore_backup', { backupPath });
-}
-
-// ---------------------------------------------------------------------------
-// Claude Code settings (schema-driven editor)
-// ---------------------------------------------------------------------------
-
-/** Browser-dev mock store, keyed by `${tier}:${projectCwd ?? ''}` — seeded with a
- *  deliberate `model` conflict between user and project tiers so the conflict
- *  hint is exercisable offline. */
-const devSettingsStore: Record<string, Record<string, unknown>> = {
-  'user:': { model: 'claude-opus-4-8', theme: 'dark' },
-  'project:/dev/mock/demo-project': { model: 'claude-sonnet-5', outputStyle: 'Explanatory' },
-  'local:/dev/mock/demo-project': { includeCoAuthoredBy: false },
-};
-
-function devTierPath(tier: SettingsTier, projectCwd: string | null): string {
-  if (tier === 'user') return '/dev/mock/.claude/settings.json';
-  const file = tier === 'local' ? 'settings.local.json' : 'settings.json';
-  return `${projectCwd ?? '/dev/mock/demo-project'}/.claude/${file}`;
-}
-
-function devReadClaudeSettings(projectCwd: string | null): ClaudeSettings {
-  const tierNames: SettingsTier[] = projectCwd ? ['local', 'project', 'user'] : ['user'];
-  const tiers = tierNames.map((tier) => {
-    const key = `${tier}:${projectCwd ?? ''}`;
-    const parsed = devSettingsStore[key] ?? null;
-    return {
-      tier,
-      path: devTierPath(tier, projectCwd),
-      exists: parsed !== null,
-      raw: parsed ? JSON.stringify(parsed, null, 2) : '',
-      parsed,
-      parseError: null,
-    };
-  });
-
-  const effective: Record<string, unknown> = {};
-  const conflicts: ClaudeSettings['conflicts'] = [];
-  const keys = new Set<string>();
-  for (const t of tiers) if (t.parsed) for (const k of Object.keys(t.parsed)) keys.add(k);
-  for (const key of keys) {
-    const present = tiers.filter((t) => t.parsed && key in t.parsed);
-    if (present.length === 0) continue;
-    effective[key] = present[0].parsed![key];
-    const distinct = present.some((t) => JSON.stringify(t.parsed![key]) !== JSON.stringify(present[0].parsed![key]));
-    if (present.length >= 2 && distinct) {
-      conflicts.push({
-        key,
-        tierValues: present.map((t) => ({ tier: t.tier, value: t.parsed![key] })),
-        winner: present[0].tier,
-      });
-    }
-  }
-
-  return { tiers, effective, conflicts, projectCwd };
-}
-
-/** Read Claude Code settings across all applicable tiers for an optional project.
- *  With no `projectCwd`, only the user/global tier is read. */
-export async function readClaudeSettings(projectCwd: string | null): Promise<ClaudeSettings> {
-  if (!isTauri()) return devReadClaudeSettings(projectCwd);
-  return call<ClaudeSettings>('read_claude_settings', { projectCwd });
-}
-
-/** Write exactly one tier's settings file. Never merges.
- *
- *  `baseVersion` is the exact `raw` text last read for this tier (a
- *  `SettingsTierData.raw` from `readClaudeSettings`, `''` if the tier didn't
- *  exist yet) — the backend's optimistic read-modify-write guard. If the file
- *  changed on disk since then (e.g. the `claude` CLI wrote it concurrently),
- *  the write is refused with a `CONFLICT: ...`-prefixed error instead of
- *  silently overwriting the external change; callers should catch that and
- *  prompt the user to reload rather than retry as-is. */
-export async function writeClaudeSettings(
-  tier: SettingsTier,
-  projectCwd: string | null,
-  value: Record<string, unknown>,
-  baseVersion: string
-): Promise<void> {
-  if (!isTauri()) {
-    devSettingsStore[`${tier}:${projectCwd ?? ''}`] = value;
-    return;
-  }
-  await call<null>('write_claude_settings', { tier, projectCwd, value, baseVersion });
-}
-
-/** True if an error thrown by `writeClaudeSettings` is the optimistic
- *  read-modify-write conflict (settings changed on disk since last read). */
-export function isSettingsConflict(e: unknown): boolean {
-  const msg = e instanceof Error ? e.message : String(e);
-  return msg.startsWith('CONFLICT');
 }
 
 // ---------------------------------------------------------------------------

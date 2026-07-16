@@ -24,7 +24,6 @@
   import SessionView from '$lib/components/SessionView.svelte';
   import SessionEditor from '$lib/components/SessionEditor.svelte';
   import AppConfigView from '$lib/components/AppConfigView.svelte';
-  import SettingsSearchView from '$lib/components/SettingsSearchView.svelte';
   import PromptsView from '$lib/components/PromptsView.svelte';
 
   // Inline app.css for the standalone HTML export.
@@ -33,10 +32,7 @@
   // ── app state ─────────────────────────────────────────────────────────────
   // 'browse' is the home view — it merges what used to be separate Browse and
   // Search pages/views into one (see BrowseView.svelte).
-  let view = $state<'browse' | 'viewer' | 'appconfig' | 'settings' | 'prompts'>('browse');
-  // Settings view scope: null = user/global; otherwise a specific project's real cwd.
-  let settingsProjectCwd = $state<string | null>(null);
-  let settingsProjectLabel = $state('');
+  let view = $state<'browse' | 'viewer' | 'appconfig' | 'prompts'>('browse');
   let current = $state<Session | null>(null);
   let loading = $state(false);
   let loadError = $state<string | null>(null);
@@ -163,15 +159,6 @@
   // alive across view switches, so this is a plain view swap.
   function goPrompts(): void {
     view = 'prompts';
-    loadError = null;
-  }
-
-  // Open Settings (Claude Code's own settings.json): cwd=null for user/global;
-  // a real project cwd scopes it to that project's Local/Workspace/User tiers.
-  function goSettings(cwd: string | null, label = ''): void {
-    settingsProjectCwd = cwd;
-    settingsProjectLabel = label;
-    view = 'settings';
     loadError = null;
   }
 
@@ -324,13 +311,10 @@ ${contentHtml}
       <button class="btn btn--ghost btn--sm" onclick={goPrompts} type="button">
         ✎ Prompts
       </button>
-      <button class="btn btn--ghost btn--sm" onclick={() => goSettings(null)} type="button">
-        ⚙ Settings
-      </button>
       <button class="btn btn--ghost btn--sm" onclick={goAppConfig} type="button">
         ⚙ App Config
       </button>
-    {:else if view === 'appconfig' || view === 'settings' || view === 'prompts'}
+    {:else if view === 'appconfig' || view === 'prompts'}
       <button class="btn btn--ghost btn--sm" onclick={backToBrowse} type="button">
         ← Back
       </button>
@@ -385,13 +369,11 @@ ${contentHtml}
   {:else if loading}
     <div class="empty-state">Loading session...</div>
   {:else if view === 'browse'}
-    <BrowseView onOpen={openSession} onJump={openHit} onOpenSettings={goSettings} />
+    <BrowseView onOpen={openSession} onJump={openHit} />
   {:else if view === 'prompts'}
     <PromptsView />
   {:else if view === 'appconfig'}
     <AppConfigView onClose={backToBrowse} />
-  {:else if view === 'settings'}
-    <SettingsSearchView projectCwd={settingsProjectCwd} projectLabel={settingsProjectLabel} onClose={backToBrowse} />
   {:else if view === 'viewer' && current}
     <SessionEditor
       path={current.meta.sourcePath}
