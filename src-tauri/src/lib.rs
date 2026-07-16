@@ -495,7 +495,16 @@ async fn enrich_sessions(
                 break;
             }
 
-            let content = fs::read_to_string(&file_path).unwrap_or_default();
+            // A file that exists but can't be read (invalid UTF-8, a transient
+            // I/O error) must NOT be treated as empty here: `unwrap_or_default`
+            // would hand an empty string to the scan, and a stale + untitled
+            // empty scan is cleanup-eligible — so an unreadable but real session
+            // file would be silently DELETED below. Skip it instead; it stays an
+            // un-enriched stub, which is the safe outcome. A genuinely empty
+            // 0-byte file still reads as `Ok("")` and remains eligible.
+            let Ok(content) = fs::read_to_string(&file_path) else {
+                continue;
+            };
             let stats = scan_session_lines(&content);
             let path = file_path.to_string_lossy().into_owned();
 
@@ -644,9 +653,7 @@ fn list_backups_at(projects: &Path, backups_root: &Path, session_path: &str) -> 
             }
             // Parse vNNN-<timestamp>.jsonl
             let stem = fname.strip_suffix(".jsonl")?;
-            let mut parts = stem.splitn(2, '-');
-            let version_str = parts.next()?;
-            let ts_str = parts.next()?;
+            let (version_str, ts_str) = stem.split_once('-')?;
             let version: u32 = version_str.strip_prefix('v')?.parse().ok()?;
             let timestamp: u64 = ts_str.parse().ok()?;
             let size = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
@@ -660,7 +667,7 @@ fn list_backups_at(projects: &Path, backups_root: &Path, session_path: &str) -> 
         .collect();
 
     // Newest first
-    versions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    versions.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
 
     Ok(versions)
 }
