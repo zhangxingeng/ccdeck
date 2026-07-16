@@ -65,7 +65,7 @@ ureq = "3"
 # sha256 verification of every downloaded artifact BEFORE it is used or loaded
 # — the runtime dylib especially is native code; a checksum mismatch deletes
 # the file and reports error state, never loads.
-sha2 = "0.10"
+sha2 = "0.11"
 # Unpack the official Microsoft onnxruntime release archives (.tgz) to extract
 # just the shared library.
 flate2 = "1"
