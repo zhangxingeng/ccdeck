@@ -773,6 +773,32 @@ The **`prompt-import` skill was retired** (deleted, with its `.claude/skills/` s
 ported: it existed to translate prose into the old JSON schema, and importing a Markdown prompt into
 a folder of Markdown prompts is `cp`.
 
+## Phase 18 — Progressive browse loading: stat-only first paint + streamed enrichment (v0.14 core-refocus, issue #37)
+
+The founder's chat history grew large enough that the app **suffocated at startup**. Ground truth:
+`list_sessions` read *every* session file in full and JSON-parsed every line to compute per-session
+stats, and `cleanup_empty_sessions` — which the browse view called *immediately before*
+`list_sessions` — independently repeated the identical full-corpus walk + read. Two synchronous
+O(total-bytes) passes blocked first paint. The product goal: **the user always sees something**.
+
+- **`list_sessions` is now a stat-only tier** (`SessionStub`: id, path, project_raw, mtime, size) —
+  one directory walk + one `stat` per file, **no content reads** — so the browse list paints
+  instantly in mtime (recency) order. See [`ARCHITECTURE.md`](../ARCHITECTURE.md) for the full contract.
+- **A new streaming `enrich_sessions(enrichId, Channel<SessionEnrichment>)`** delivers the
+  content-derived fields (turn counts, models, timestamps, `custom_title`, preview) lazily, walking
+  files **newest-first** so visible cards fill in first. Same Tauri-Channel + generation-guarded
+  `spawn_blocking` pattern as `search`. The frontend paints stubs, then patches each card in place
+  (coalesced one reassignment per frame). Browse is windowed at 100 cards ("Load more").
+- **The duplicated walker is unified and cleanup folded in.** `cleanup_empty_sessions` is **removed**;
+  its purge now rides the enrichment walk (one read per file does both), and a `cleaned` payload tells
+  the frontend to drop the stub. `is_cleanup_eligible` and its **15-minute recency guard are preserved
+  verbatim** (they keep a live CLI's freshly-opened session from being deleted).
+- **Behavior change worth naming (shipped users).** Old cleanup was a synchronous full purge on every
+  launch — guaranteed complete *because it blocked*. It is now a background full-purge per browse
+  *mount*: it completes unless the app is closed mid-walk (navigating away does **not** cancel it).
+  This is strictly better than the freeze it replaces, but the completeness guarantee is now "per
+  session, best-effort" rather than "per launch, synchronous." Accepted deliberately for this round.
+
 ## Verification performed (historical — Phase 7 snapshot, 2026-07-05)
 
 Counts and file names below reflect the tree as of the CC Deck rebrand (Phase 7); later phases
