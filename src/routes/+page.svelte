@@ -144,9 +144,9 @@
     loadSession(hit.sessionPath, hit.project, hit.uuid);
   }
 
-  // Open App Config — a single global-scope page (launch command / terminal /
-  // update toggle are app-level preferences, not per-project), so there's no
-  // cwd/label to thread through.
+  // Open App Config — a single global-scope page (the update-check toggle is an
+  // app-level preference, not per-project), so there's no cwd/label to thread
+  // through.
   function goAppConfig(): void {
     view = 'appconfig';
     loadError = null;
@@ -189,7 +189,7 @@
       return;
     }
     // Not on browse yet — flag it so whichever path lands us back on browse
-    // (dirty-guarded exit from the viewer, or a plain App Config/Settings close)
+    // (dirty-guarded exit from the viewer, or a plain App Config close)
     // focuses the search input once it actually mounts.
     focusSearchPending = true;
     if (view === 'viewer') handleBack();

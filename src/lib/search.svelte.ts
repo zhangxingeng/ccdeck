@@ -10,7 +10,7 @@ import type {
   IndexStatus,
   SessionMeta,
 } from './types';
-import { searchSessions, indexStatus, refreshIndex, listSessions, homeDir } from './api';
+import { searchSessions, indexStatus, refreshIndex } from './api';
 import { projectLabel } from './parser';
 
 /** page size for "Load more" pagination — backend stops scanning at this many hits. */
@@ -145,11 +145,11 @@ export function setDateRange(fromISO: string, toISO: string): void {
 
 /** (Re)build the project-filter chip options from a session list.
  *
- *  Called once from `initSearch` with tier-1 stubs — where `cwd` is still empty,
- *  so labels fall back to decoding `project_raw`, which is lossy for paths
- *  containing literal `-`/`_` — and then again by BrowseView each time streamed
- *  enrichment patches land, so the lossy labels self-heal into real-cwd labels
- *  within a frame or two of first paint. */
+ *  Pushed by BrowseView from its enrichment `$effect`: first with tier-1 stubs
+ *  — where `cwd` is still empty, so labels fall back to decoding `project_raw`,
+ *  which is lossy for paths containing literal `-`/`_` — and then again each
+ *  time streamed enrichment patches land, so the lossy labels self-heal into
+ *  real-cwd labels within a frame or two of first paint. */
 export function setProjectOptions(sessions: SessionMeta[], home: string | null): void {
   const counts = new Map<string, number>();
   for (const s of sessions) {
@@ -163,18 +163,20 @@ export function setProjectOptions(sessions: SessionMeta[], home: string | null):
 
 // ── lifecycle ────────────────────────────────────────────────────────────────
 
-/** Load the project list, kick a sweep, and start polling index status.
+/** Kick an index sweep and start polling index status.
  *  `currentSessionPath` (if the search was opened from an open session) enables
- *  the "this session only" filter. */
+ *  the "this session only" filter.
+ *
+ *  Note: this does NOT fetch the session list to build project-chip options.
+ *  On the browse path BrowseView owns that list already and pushes options via
+ *  `setProjectOptions` from its enrichment `$effect` (which also self-heals the
+ *  lossy stub labels) — a fetch here would just duplicate that IPC per mount.
+ *  The in-chat find panel (the other caller) renders no project chips at all,
+ *  so it needs no options. Any future caller that shows chips must push its own
+ *  via `setProjectOptions`. */
 export async function initSearch(currentSessionPath?: string): Promise<void> {
   search.currentSessionPath = currentSessionPath ?? null;
   if (!search.currentSessionPath) search.sessionOnly = false;
-  try {
-    const [sessions, home] = await Promise.all([listSessions(), homeDir()]);
-    setProjectOptions(sessions, home);
-  } catch {
-    // non-fatal; project filter just stays empty
-  }
 
   // Catch external changes (CLI appends, edits outside the app) when opening.
   refreshIndex().catch(() => {});

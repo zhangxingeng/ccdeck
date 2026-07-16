@@ -26,12 +26,12 @@
     toggleProject,
     clearProjects,
     setDateRange,
-    scheduleSearch,
     loadMore,
     initSearch,
     disposeSearch,
     setProjectOptions,
   } from '$lib/search.svelte';
+  import { highlight, hitKey, sourceBadge } from '$lib/searchHighlight';
 
   let {
     onOpen,
@@ -306,9 +306,6 @@
     return out;
   });
 
-  function hitKey(h: SearchHit): string {
-    return `${h.sessionPath}:${h.lineNo}:${h.blockNo}`;
-  }
   let focusedKey = $derived(
     focusedIdx >= 0 && focusedIdx < visibleHits.length ? hitKey(visibleHits[focusedIdx]) : null
   );
@@ -321,31 +318,6 @@
 
   function onDate(): void {
     setDateRange(fromISO, toISO);
-  }
-
-  function sourceBadge(source: string): { label: string; cls: string } {
-    switch (source) {
-      case 'user': return { label: 'You', cls: 'b-user' };
-      case 'assistant': return { label: 'Claude', cls: 'b-asst' };
-      case 'thinking': return { label: 'Thinking', cls: 'b-think' };
-      case 'tool_use': return { label: 'Tool', cls: 'b-tool' };
-      case 'tool_result': return { label: 'Result', cls: 'b-res' };
-      default: return { label: source, cls: 'b-user' };
-    }
-  }
-
-  interface Seg { t: string; hl: boolean }
-  function highlight(snippet: string, ranges: [number, number][]): Seg[] {
-    const chars = Array.from(snippet);
-    const segs: Seg[] = [];
-    let pos = 0;
-    for (const [s, e] of ranges) {
-      if (s > pos) segs.push({ t: chars.slice(pos, s).join(''), hl: false });
-      segs.push({ t: chars.slice(s, e).join(''), hl: true });
-      pos = e;
-    }
-    if (pos < chars.length) segs.push({ t: chars.slice(pos).join(''), hl: false });
-    return segs;
   }
 
   function scrollFocusedIntoView(): void {
@@ -890,8 +862,6 @@
   }
   .b-user { background: color-mix(in srgb, var(--accent-user) 20%, transparent); color: var(--text); }
   .b-asst { background: color-mix(in srgb, var(--accent-assistant, var(--accent-user)) 18%, transparent); color: var(--text); }
-  .b-think { background: color-mix(in srgb, var(--text-faint) 18%, transparent); }
-  .b-tool, .b-res { background: color-mix(in srgb, var(--accent-tool, var(--text-muted)) 18%, transparent); }
 
   .hit-snippet {
     font-size: 0.82rem; line-height: 1.4; color: var(--text-muted);

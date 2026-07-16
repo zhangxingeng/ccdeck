@@ -8,7 +8,7 @@
    * Opened at the click point (fixed, clamped on-screen) from a Resume button
    * or the per-message fork affordance, and dismissed on any outside click,
    * scroll, blur, Escape, or a fresh right-click — mirroring the app's existing
-   * CopyContextMenu / ProviderResumeMenu positioning pattern.
+   * CopyContextMenu positioning pattern.
    *
    * It presents three facts as rows, each a one-click copy:
    *   - the ready-to-paste resume command (`cd '<cwd>' && claude --resume '<id>'`)
