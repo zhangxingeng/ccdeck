@@ -2,7 +2,7 @@
   /**
    * +page.svelte — top-level SPA shell for CC Deck (Claude Code Control Center).
    *
-   * States: browse | viewer | appconfig | prompts — search lives inside browse
+   * States: browse | viewer | appconfig — search lives inside browse
    * (BrowseView.svelte). "appconfig" is CC Deck's own preferences.
    * Orchestrates: session loading, HTML/PDF export, resume-copy popover, theme.
    */
@@ -21,7 +21,6 @@
   import SessionView from '$lib/components/SessionView.svelte';
   import SessionEditor from '$lib/components/SessionEditor.svelte';
   import AppConfigView from '$lib/components/AppConfigView.svelte';
-  import PromptsView from '$lib/components/PromptsView.svelte';
   import ResumeMenu from '$lib/components/ResumeMenu.svelte';
 
   // Inline app.css for the standalone HTML export.
@@ -30,7 +29,7 @@
   // ── app state ─────────────────────────────────────────────────────────────
   // 'browse' is the home view — it merges what used to be separate Browse and
   // Search pages/views into one (see BrowseView.svelte).
-  let view = $state<'browse' | 'viewer' | 'appconfig' | 'prompts'>('browse');
+  let view = $state<'browse' | 'viewer' | 'appconfig'>('browse');
   let current = $state<Session | null>(null);
   let loading = $state(false);
   let loadError = $state<string | null>(null);
@@ -150,13 +149,6 @@
   // cwd/label to thread through.
   function goAppConfig(): void {
     view = 'appconfig';
-    loadError = null;
-  }
-
-  // Open the Prompt Library (issue #24) — its store keeps the compose draft
-  // alive across view switches, so this is a plain view swap.
-  function goPrompts(): void {
-    view = 'prompts';
     loadError = null;
   }
 
@@ -335,13 +327,10 @@ ${contentHtml}
 
   <div class="app-header__actions">
     {#if view === 'browse'}
-      <button class="btn btn--ghost btn--sm" onclick={goPrompts} type="button">
-        ✎ Prompts
-      </button>
       <button class="btn btn--ghost btn--sm" onclick={goAppConfig} type="button">
         ⚙ App Config
       </button>
-    {:else if view === 'appconfig' || view === 'prompts'}
+    {:else if view === 'appconfig'}
       <button class="btn btn--ghost btn--sm" onclick={backToBrowse} type="button">
         ← Back
       </button>
@@ -401,8 +390,6 @@ ${contentHtml}
     <div class="empty-state">Loading session...</div>
   {:else if view === 'browse'}
     <BrowseView onOpen={openSession} onJump={openHit} />
-  {:else if view === 'prompts'}
-    <PromptsView />
   {:else if view === 'appconfig'}
     <AppConfigView onClose={backToBrowse} />
   {:else if view === 'viewer' && current}

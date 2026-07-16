@@ -18,9 +18,6 @@ mod appconfig;
 // legacy ccdeck-owned state (backups, config) out of ~/.claude.
 mod datadir;
 
-// Prompt Library (issue #24): snippet store + hybrid match engine + commands.
-mod prompts;
-
 // ---------------------------------------------------------------------------
 // Return-type structs (must match the JS contract in ARCHITECTURE.md)
 // ---------------------------------------------------------------------------
@@ -1120,8 +1117,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_dialog::init())
-        .manage(prompts::state::PromptsState::new())
         .manage(BrowseState::default())
         .invoke_handler(tauri::generate_handler![
             find_projects_dir,
@@ -1139,16 +1134,6 @@ pub fn run() {
             search::state::index_status,
             appconfig::get_app_config,
             appconfig::set_app_config,
-            prompts::state::list_projects,
-            prompts::state::add_project,
-            prompts::state::set_project_color,
-            prompts::state::remove_project,
-            prompts::state::set_active_project,
-            prompts::state::list_snippets,
-            prompts::state::save_snippet,
-            prompts::state::delete_snippet,
-            prompts::state::match_snippets,
-            prompts::state::touch_snippet,
         ]);
 
     let search_enabled = search_state.is_ok();
@@ -1166,12 +1151,6 @@ pub fn run() {
                 state.indexer().run_index();
             });
         }
-        // Prompt Library: fetch the embedding model and index the active project
-        // in the background, silently. Semantic match is an improvement to
-        // ranking, never a prerequisite — lexical match works instantly and
-        // unconditionally, so this blocks nothing and a failure is logged rather
-        // than surfaced. There is no toggle and no progress UI by design.
-        prompts::state::spawn_background_index(&app.state::<prompts::state::PromptsState>());
         Ok(())
     });
 

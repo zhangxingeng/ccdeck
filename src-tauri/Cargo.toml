@@ -22,7 +22,6 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
-tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
@@ -40,31 +39,3 @@ rayon = "1"
 tantivy = "0.26"
 # Session-fork ids for "resume from here" (v4, randomly generated).
 uuid = { version = "1", features = ["v4"] }
-# Prompt Library semantic match (issue #24): ONNX text embeddings, opt-in.
-# default-features OFF is load-bearing: the defaults statically link a ~15-30MB
-# ONNX Runtime into every shipped binary. `ort-load-dynamic` instead loads
-# libonnxruntime at runtime from a file we download (pinned version + sha256)
-# only when the user clicks Download — non-opted users pay ~3-6MB of glue, not
-# the runtime. No hf-hub/image features: model files are fetched by our own
-# pinned-URL downloader, so their HTTP stacks would be dead weight.
-fastembed = { version = "5", default-features = false, features = ["ort-load-dynamic"] }
-# Direct dep only for `ort::init_from(<lib path>)` (fastembed doesn't
-# re-export it). Same exact pin as fastembed's own requirement, so cargo
-# unifies them into one crate; features are additive with fastembed's.
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic"] }
-# Downloader for the opt-in model + ONNX Runtime artifacts (embed_download).
-ureq = "3"
-# sha256 verification of every downloaded artifact BEFORE it is used or loaded
-# — the runtime dylib especially is native code; a checksum mismatch deletes
-# the file and reports error state, never loads.
-sha2 = "0.10"
-# Unpack the official Microsoft onnxruntime release archives (.tgz) to extract
-# just the shared library.
-flate2 = "1"
-tar = "0.4"
-
-# Windows ships onnxruntime as a .zip instead of a .tgz. Major 4 on purpose:
-# tauri-plugin-updater already pulls zip 4.x, so this unifies to one compiled
-# copy instead of shipping two zip majors in the Windows binary.
-[target.'cfg(windows)'.dependencies]
-zip = { version = "4", default-features = false, features = ["deflate"] }
