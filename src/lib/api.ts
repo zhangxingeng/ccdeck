@@ -44,13 +44,6 @@ export async function homeDir(): Promise<string | null> {
   return call<string | null>('home_dir');
 }
 
-/** Open a file with the OS default app (e.g. "View file" on a session's .jsonl). */
-export async function openSessionFile(path: string): Promise<void> {
-  if (!isTauri()) return; // no-op in browser-dev mode
-  const { openPath } = await import('@tauri-apps/plugin-opener');
-  await openPath(path);
-}
-
 // ── Browse loading: tier-1 stubs (instant) + tier-2 streamed enrichment ──────
 //
 // `list_sessions` now returns stat-only stubs so the list paints immediately;
