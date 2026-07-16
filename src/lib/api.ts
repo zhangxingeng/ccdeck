@@ -428,6 +428,14 @@ export async function addProject(name: string, path: string): Promise<Project> {
   return call<Project>('add_project', { name, path });
 }
 
+/** Set (or clear, with `color: null`) a project's color — round 2's restore of
+ *  the round-1 cut. `color` is a resolved hex string from the fixed swatch in
+ *  `ProjectContextMenu.svelte`; this call does not validate it. */
+export async function setProjectColor(path: string, color: string | null): Promise<Project> {
+  if (!isTauri()) return devSetProjectColor(path, color);
+  return call<Project>('set_project_color', { path, color });
+}
+
 /** Forget a project. **Never deletes files** — the user's prompts are their own,
  *  and the app is a viewer onto a folder it does not own. Re-adding the folder
  *  restores the project intact. */
@@ -624,6 +632,13 @@ function devAddProject(name: string, path: string): Project {
   devProjects.push(project);
   devStore[path] ??= [];
   devActive ??= path;
+  return { ...project };
+}
+
+function devSetProjectColor(path: string, color: string | null): Project {
+  const project = devProjects.find((p) => p.path === path);
+  if (!project) throw new Error(`not a known project: ${path}`);
+  project.color = color ?? undefined;
   return { ...project };
 }
 

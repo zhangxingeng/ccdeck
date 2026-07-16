@@ -1127,6 +1127,7 @@ pub fn run() {
             providers::provider_probe_keychain,
             prompts::state::list_projects,
             prompts::state::add_project,
+            prompts::state::set_project_color,
             prompts::state::remove_project,
             prompts::state::set_active_project,
             prompts::state::list_snippets,

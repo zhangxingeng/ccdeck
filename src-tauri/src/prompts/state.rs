@@ -1,9 +1,10 @@
 //! Managed state, hybrid fusion, and the Tauri commands for the Prompt Library.
 //!
-//! The command surface (0.13 contract), all async, `Result<T, String>`,
-//! snake_case: `list_projects` / `add_project` / `remove_project` /
-//! `set_active_project` / `list_snippets` / `save_snippet` / `delete_snippet` /
-//! `match_snippets` / `touch_snippet`.
+//! The command surface (0.13 contract, round 2 adds `set_project_color`), all
+//! async, `Result<T, String>`, snake_case: `list_projects` / `add_project` /
+//! `set_project_color` / `remove_project` / `set_active_project` /
+//! `list_snippets` / `save_snippet` / `delete_snippet` / `match_snippets` /
+//! `touch_snippet`.
 //!
 //! Embedding has **no command surface**. The model downloads and indexes itself
 //! in the background on first launch and never asks: lexical match is
@@ -97,6 +98,14 @@ pub async fn list_projects() -> Result<ProjectList, String> {
 #[tauri::command]
 pub async fn add_project(name: String, path: String) -> Result<Project, String> {
     appstate::add_project(&root()?, &name, Path::new(&path))
+}
+
+/// Set (or clear, with `color: null`) a project's color — round 2's restore of
+/// the round-1 cut. A fixed swatch on the frontend; this command does not
+/// validate the value.
+#[tauri::command]
+pub async fn set_project_color(path: String, color: Option<String>) -> Result<Project, String> {
+    appstate::set_project_color(&root()?, Path::new(&path), color)
 }
 
 /// Forget a project. **Never deletes files** — the user's prompts are their own.

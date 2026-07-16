@@ -13,14 +13,24 @@
  * Pure TypeScript — no DOM, no Tauri, no Svelte.
  */
 
-/** A project: a name and a folder. Nothing else — no id, no color, no pin.
+/** A project: a name, a folder, and (round 2) an optional color. Still no id, no
+ *  pin — that cut stands.
  *
  *  `path` is its identity: the snippets are simply the `.md` files inside it,
  *  so there is nothing to cross-reference and nothing that can drift out of
- *  sync with the filesystem. */
+ *  sync with the filesystem.
+ *
+ *  `color` is a resolved hex string (e.g. `"#0ea5e9"`), picked from a fixed
+ *  swatch sourced from the app's `--accent-*` CSS custom properties (see
+ *  `ProjectContextMenu.svelte`). It is stored as a literal hex, not the CSS
+ *  var name, so a stored value stays meaningful even if the app's token names
+ *  are renamed later. `undefined` means "no color set" — a fresh project, or
+ *  one added before this field existed — and renders with the old neutral
+ *  tab styling. */
 export interface Project {
   name: string;
   path: string;
+  color?: string;
 }
 
 /** What `list_projects` answers with. The active project is persisted by the

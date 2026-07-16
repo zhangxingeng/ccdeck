@@ -20,11 +20,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-/// A project: a name and a folder. Nothing else.
+/// A project: a name, a folder, and (round 2) an optional color. Still no id,
+/// no pin — that cut stands.
+///
+/// `color` is a resolved hex string picked from a fixed frontend swatch (see
+/// `ProjectContextMenu.svelte`); the backend treats it as an opaque string, the
+/// same way it treats a snippet's `content` — no validation, no palette lives
+/// server-side. `None` means "no color set".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
     pub path: PathBuf,
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 /// What `list_projects` answers with. The roster alone is not enough: the active
@@ -120,11 +128,20 @@ pub fn add_project(root: &Path, name: &str, path: &Path) -> Result<Project, Stri
     let path = path.canonicalize().map_err(|e| format!("{}: {e}", path.display()))?;
 
     let mut state = load(root)?;
-    let project = Project { name: name.to_string(), path: path.clone() };
     match state.projects.iter_mut().find(|p| p.path == path) {
         Some(existing) => existing.name = name.to_string(),
-        None => state.projects.push(project.clone()),
+        None => state.projects.push(Project {
+            name: name.to_string(),
+            path: path.clone(),
+            color: None,
+        }),
     }
+    let project = state
+        .projects
+        .iter()
+        .find(|p| p.path == path)
+        .expect("just inserted or found above")
+        .clone();
     // First project becomes active, or the user would have a roster and no
     // selection — a state the UI has no way to leave.
     if state.active.is_none() {
@@ -132,6 +149,28 @@ pub fn add_project(root: &Path, name: &str, path: &Path) -> Result<Project, Stri
     }
     save(root, &state)?;
     Ok(project)
+}
+
+/// Set (or clear, with `None`) a project's color. Round 2's restore of the
+/// round-1 cut — see the `Project` doc comment. The backend does not validate
+/// the value against the frontend's fixed swatch; it is an opaque string here,
+/// same as everywhere else this module treats "what the UI chose" as none of
+/// its business.
+pub fn set_project_color(
+    root: &Path,
+    path: &Path,
+    color: Option<String>,
+) -> Result<Project, String> {
+    let mut state = load(root)?;
+    let project = state
+        .projects
+        .iter_mut()
+        .find(|p| p.path == path)
+        .ok_or_else(|| format!("not a known project: {}", path.display()))?;
+    project.color = color;
+    let updated = project.clone();
+    save(root, &state)?;
+    Ok(updated)
 }
 
 /// Forget a project. **It never deletes files.**
@@ -223,7 +262,7 @@ mod tests {
     fn a_project_is_a_name_and_a_folder_and_the_first_one_becomes_active() {
         let (root, project) = fixture("add");
         let added = add_project(&root, "juror", &project).unwrap();
-        assert_eq!(added, Project { name: "juror".into(), path: project.clone() });
+        assert_eq!(added, Project { name: "juror".into(), path: project.clone(), color: None });
 
         let list = list_projects(&root).unwrap();
         assert_eq!(list.projects, vec![added]);
@@ -248,6 +287,58 @@ mod tests {
     fn a_project_folder_must_exist() {
         let (root, _) = fixture("missing");
         assert!(add_project(&root, "ghost", &root.join("nope")).is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn setting_a_color_persists_it_and_leaves_the_name_untouched() {
+        let (root, project) = fixture("color");
+        add_project(&root, "juror", &project).unwrap();
+
+        let updated = set_project_color(&root, &project, Some("#0ea5e9".to_string())).unwrap();
+        assert_eq!(updated.color.as_deref(), Some("#0ea5e9"));
+        assert_eq!(updated.name, "juror", "setting a color must not touch the name");
+
+        // Re-read from disk: this is what the launch-time restore would see.
+        let list = list_projects(&root).unwrap();
+        assert_eq!(list.projects[0].color.as_deref(), Some("#0ea5e9"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn clearing_a_color_sets_it_back_to_none() {
+        let (root, project) = fixture("color-clear");
+        add_project(&root, "juror", &project).unwrap();
+        set_project_color(&root, &project, Some("#d97706".to_string())).unwrap();
+
+        let cleared = set_project_color(&root, &project, None).unwrap();
+        assert_eq!(cleared.color, None);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_rename_preserves_the_existing_color() {
+        // add_project handles both add AND rename (path is the identity); a
+        // rename must not silently drop a color the user already picked.
+        let (root, project) = fixture("color-rename");
+        add_project(&root, "old name", &project).unwrap();
+        set_project_color(&root, &project, Some("#8b5cf6".to_string())).unwrap();
+
+        let renamed = add_project(&root, "new name", &project).unwrap();
+        assert_eq!(renamed.name, "new name");
+        assert_eq!(
+            renamed.color.as_deref(),
+            Some("#8b5cf6"),
+            "rename must not clear the color"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn setting_a_color_on_an_unrostered_path_errors() {
+        let (root, _) = fixture("color-unknown");
+        let unknown = root.join("ghost");
+        assert!(set_project_color(&root, &unknown, Some("#000".to_string())).is_err());
         fs::remove_dir_all(&root).unwrap();
     }
 

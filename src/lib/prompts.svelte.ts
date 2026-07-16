@@ -15,6 +15,7 @@ import {
   deleteSnippet as apiDeleteSnippet,
   listProjects,
   addProject as apiAddProject,
+  setProjectColor as apiSetProjectColor,
   removeProject as apiRemoveProject,
   setActiveProject as apiSetActiveProject,
   matchSnippets,
@@ -167,6 +168,17 @@ async function upsertProject(name: string, path: string): Promise<Project> {
   const i = prompts.projects.findIndex((p) => p.path === saved.path);
   if (i >= 0) prompts.projects[i] = saved;
   else prompts.projects.push(saved);
+  return saved;
+}
+
+/** Set (or clear, with `color: null`) a project's color — round 2's restore of
+ *  the round-1 cut (see `prompts/types.ts`). Like `renameProject`, this must
+ *  not touch the active tab: recoloring a project you are not working in is
+ *  not a request to switch to it. */
+export async function setProjectColor(path: string, color: string | null): Promise<Project> {
+  const saved = await apiSetProjectColor(path, color);
+  const i = prompts.projects.findIndex((p) => p.path === saved.path);
+  if (i >= 0) prompts.projects[i] = saved;
   return saved;
 }
 
