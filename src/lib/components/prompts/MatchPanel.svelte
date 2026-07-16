@@ -176,7 +176,6 @@
         onmouseleave={() => (expandedIdx = null)}
         onfocus={() => (expandedIdx = i)}
         onblur={() => (expandedIdx = null)}
-        title="Insert at cursor"
       >
         <span class="match-hit__name">
           {#each renderSpans(hit.snippet.name, spans.nameSpans) as seg}{#if seg.hl}<mark>{seg.t}</mark>{:else}{seg.t}{/if}{/each}
@@ -246,15 +245,20 @@
   }
   /* Hover/focus-reveal of the full body (§1: "hover reveals, click edits" applied
      to the library too) as a floating tooltip — same pattern as the compose
-     box's chip preview. Absolutely positioned so it overlays the list rather
-     than pushing rows below it down; only the hovered/focused row pays for it,
-     both here and in the {#if expandedIdx === i} above. */
+     box's chip preview. Absolutely positioned to the RIGHT of the row (not
+     below it) so it overlays the compose area instead of covering the rest of
+     the library list; only the hovered/focused row pays for it, both here and
+     in the {#if expandedIdx === i} above. (Requires the panel's scroll
+     ancestor to allow horizontal overflow — see `.prompts-view__panel` in
+     PromptsView.svelte, which deliberately does not set `overflow-y: auto`
+     for this reason: that would force `overflow-x` to clip too.) */
   .match-hit__body {
     position: absolute;
-    top: calc(100% + 0.3rem);
-    left: 0;
-    right: 0;
+    top: 0;
+    left: calc(100% + 0.4rem);
     z-index: 20;
+    width: max-content;
+    max-width: 22rem;
     padding: 0.5rem 0.65rem;
     border: 1px solid var(--border);
     border-radius: 0.4rem;

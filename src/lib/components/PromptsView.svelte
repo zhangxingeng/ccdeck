@@ -307,12 +307,15 @@
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
-    overflow-y: auto;
+    /* No overflow-y here on purpose: a hovered row's preview tooltip floats to
+       the RIGHT of the panel (MatchPanel.svelte), and `overflow-y: auto` would
+       force `overflow-x` to clip too, cutting the tooltip off. The page itself
+       scrolls if the library list runs long. */
   }
   .prompts-view__compose {
     flex: 1;
     display: flex;
-    min-width: 0;
+    min-width: 22rem; /* a variables column next door must not squeeze this thin */
     position: relative; /* anchors the placeholder popover */
   }
 

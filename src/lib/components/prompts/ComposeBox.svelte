@@ -528,8 +528,10 @@
   .compose__box :global(.chip) {
     position: relative; /* anchors .chip__preview */
     display: inline-flex;
+    flex-wrap: wrap; /* long name + many vars wrap inside the pill instead of overflowing it */
     align-items: center;
     gap: 0.3rem;
+    max-width: 100%;
     margin: 0 0.1rem;
     padding: 0.05rem 0.5rem;
     border-radius: 1rem;
@@ -539,7 +541,6 @@
     line-height: 1.5;
     cursor: pointer;
     user-select: none;
-    white-space: nowrap;
   }
   .compose__box :global(.chip:hover) {
     background: color-mix(in srgb, var(--accent-snippet) 22%, transparent);
@@ -550,6 +551,7 @@
   }
   .compose__box :global(.chip__name) {
     font-weight: 600;
+    overflow-wrap: break-word;
     color: color-mix(in srgb, var(--accent-snippet) 85%, var(--text));
   }
   /* The variables the chip's body contains — the only thing shown besides the
