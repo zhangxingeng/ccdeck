@@ -99,15 +99,20 @@
     </label>
   {/if}
 
-  <!-- Hover toolbar -->
-  <div class="msg-tools">
-    <button
-      class="msg-tools__btn"
-      onclick={onResumeFrom}
-      title="Fork from here, then copy its resume command"
-      type="button"
-    >⑂</button>
-  </div>
+  <!-- Fork-from-here, pinned in the RIGHT gutter (outside the bubble) mirroring
+       the select-mode checkbox's left gutter — it used to float top-right and
+       collide with the per-block delete ✕. Hidden in select mode, where
+       forking a single message makes no sense. -->
+  {#if !selectMode}
+    <div class="msg-tools">
+      <button
+        class="msg-tools__btn"
+        onclick={onResumeFrom}
+        title="Fork from here, then copy its resume command"
+        type="button"
+      >⑂</button>
+    </div>
+  {/if}
 
   <!-- Blocks: text blocks are editable; everything else renders read-only.
        Every block gets a delete/undelete affordance (soft delete). -->
@@ -202,13 +207,13 @@
     padding: 0.08rem 0.35rem; border-radius: 0.2rem;
   }
 
-  /* Hover toolbar, pinned to the message's top-right */
+  /* Fork affordance, pinned in the right gutter (outside the bubble) — the
+     mirror of .msg-select's left gutter (left: -1.35rem), so its clip behaviour
+     at the min window width matches the checkbox's. No box needed here: it sits
+     over the page background, not over message content. */
   .msg-tools {
-    position: absolute; top: 0.2rem; right: 0.2rem; z-index: 3;
-    display: flex; align-items: center; gap: 0.2rem;
-    padding: 0.15rem 0.25rem; border-radius: 0.4rem;
-    background: color-mix(in srgb, var(--bg-card) 92%, transparent);
-    border: 1px solid var(--border); backdrop-filter: blur(4px);
+    position: absolute; top: 0.3rem; right: -1.35rem; z-index: 3;
+    display: flex; align-items: center;
     opacity: 0; transition: opacity 0.1s;
   }
   .msg-group:hover .msg-tools, .msg-group:focus-within .msg-tools { opacity: 1; }

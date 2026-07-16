@@ -25,8 +25,8 @@ happened.
 ![A chat transcript with message metadata, a collapsible tool-call group, and a Bash tool result](project_docs/screenshots/chat-detail.png)
 
 Spot something you want to fix — or redact before sharing? Edit or delete any message in place.
-CC Deck silently keeps a backup of the previous state each time you save, with one-click restore,
-so editing history is never a one-way door.
+CC Deck silently keeps a backup of the previous state each time you save, so a mistaken edit is
+never a one-way door — the snapshot sits on disk, ready to restore by hand if you ever need it.
 
 ![Editing an assistant message's raw markdown source in place inside a transcript](project_docs/screenshots/edit-message.png)
 

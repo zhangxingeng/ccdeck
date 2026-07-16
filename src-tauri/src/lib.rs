@@ -631,10 +631,14 @@ fn snapshot(path: String) -> Result<BackupVersion, String> {
 }
 
 /// List the session's backup(s), newest first. Since [`snapshot_at`] keeps
-/// only a single backup slot, this returns at most one entry — the `Vec`
-/// return shape is kept as-is since the frontend's list rendering already
-/// handles it generically. See [`snapshot_at`] for why this is parameterized
-/// on `projects`/`backups_root`.
+/// only a single backup slot, this returns at most one entry.
+///
+/// Test-only since issue #38 retired the in-app restore surface (the
+/// `list_backups`/`restore_backup` commands are gone). The pre-save snapshot
+/// itself stays — this helper is how [`snapshot_at`]'s tests read a snapshot
+/// back to assert the single-slot behaviour. See [`snapshot_at`] for why it is
+/// parameterized on `projects`/`backups_root`.
+#[cfg(test)]
 fn list_backups_at(projects: &Path, backups_root: &Path, session_path: &str) -> Result<Vec<BackupVersion>, String> {
     let backup_root = backup_root_for(projects, backups_root, session_path)?;
 
@@ -672,27 +676,6 @@ fn list_backups_at(projects: &Path, backups_root: &Path, session_path: &str) -> 
     Ok(versions)
 }
 
-#[tauri::command]
-fn list_backups(session_path: String) -> Result<Vec<BackupVersion>, String> {
-    let projects = projects_dir_inner()
-        .ok_or_else(|| "Projects directory not found".to_string())?;
-    let found = list_backups_at(&projects, &datadir::data_root()?.join("backups"), &session_path)?;
-    if !found.is_empty() {
-        return Ok(found);
-    }
-    // Migration-failure fallback (contract: read whichever dir has the file):
-    // if the new root has nothing for this session but the legacy dir still
-    // exists, an old backup may be stranded there — surface it rather than
-    // reporting "no backup" for data that exists.
-    if let Some(home) = dirs::home_dir() {
-        let legacy = datadir::legacy_backups_dir(&home);
-        if legacy.is_dir() {
-            return list_backups_at(&projects, &legacy, &session_path);
-        }
-    }
-    Ok(found)
-}
-
 /// Overwrite the original .jsonl. By convention, a caller that's overwriting
 /// existing content calls `snapshot(path)` immediately before this (see
 /// SessionEditor.svelte's confirmSave/exitSave/confirmRestoreBackup) — this
@@ -715,12 +698,6 @@ fn write_session(
     // would catch it eventually, but this keeps results in step with Save).
     state.indexer().reindex_one(&path);
     Ok(())
-}
-
-/// Return raw contents of a backup file (caller decides what to do with it).
-#[tauri::command]
-fn restore_backup(backup_path: String) -> Result<String, String> {
-    fs::read_to_string(&backup_path).map_err(|e| e.to_string())
 }
 
 /// "Resume from here": copy lines `0..=upto_index` of the session at `path`
@@ -1133,8 +1110,6 @@ pub fn run() {
             read_session,
             write_session,
             snapshot,
-            list_backups,
-            restore_backup,
             fork_session,
             search::state::search,
             search::state::refresh_index,

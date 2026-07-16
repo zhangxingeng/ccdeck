@@ -29,8 +29,7 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
   return invoke<T>(cmd, args);
 }
 
-// In-memory backup store for browser-dev mode only.
-const devBackups: Record<string, BackupVersion[]> = {};
+// In-memory edited-content store for browser-dev mode only.
 const devContent: Record<string, string> = {};
 
 export async function findProjectsDir(): Promise<string | null> {
@@ -42,13 +41,6 @@ export async function findProjectsDir(): Promise<string | null> {
 export async function homeDir(): Promise<string | null> {
   if (!isTauri()) return '/dev/mock';
   return call<string | null>('home_dir');
-}
-
-/** Open a file with the OS default app (e.g. "View file" on a session's .jsonl). */
-export async function openSessionFile(path: string): Promise<void> {
-  if (!isTauri()) return; // no-op in browser-dev mode
-  const { openPath } = await import('@tauri-apps/plugin-opener');
-  await openPath(path);
 }
 
 // ── Browse loading: tier-1 stubs (instant) + tier-2 streamed enrichment ──────
@@ -140,20 +132,9 @@ export async function snapshot(path: string): Promise<BackupVersion> {
       path: `${path}.v1.bak`,
       size: (devContent[path] ?? mockSession).length,
     };
-    devBackups[path] = [v];
     return v;
   }
   return call<BackupVersion>('snapshot', { path });
-}
-
-export async function listBackups(sessionPath: string): Promise<BackupVersion[]> {
-  if (!isTauri()) return devBackups[sessionPath] ?? [];
-  return call<BackupVersion[]>('list_backups', { sessionPath });
-}
-
-export async function restoreBackup(backupPath: string): Promise<string> {
-  if (!isTauri()) return mockSession;
-  return call<string>('restore_backup', { backupPath });
 }
 
 // ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@
   import { getVersion } from '@tauri-apps/api/app';
   import { checkForUpdates, update as updateState } from '$lib/updater.svelte';
   import type { Session, SessionMeta, SearchHit } from '$lib/types';
-  import { readSession, openSessionFile } from '$lib/api';
+  import { readSession } from '$lib/api';
   import { parseJsonl, decodeProject } from '$lib/parser';
   import { buildSession } from '$lib/builder';
   import { extractSessionInfo } from '$lib/editDraft';
@@ -245,21 +245,6 @@ ${contentHtml}
     URL.revokeObjectURL(url);
   }
 
-  // ── View raw file ─────────────────────────────────────────────────────────
-  let fileOpenError = $state<string | null>(null);
-  let fileOpenErrorTimer: ReturnType<typeof setTimeout> | null = null;
-
-  async function viewFile(): Promise<void> {
-    if (!current) return;
-    try {
-      await openSessionFile(current.meta.sourcePath);
-    } catch (e) {
-      fileOpenError = e instanceof Error ? e.message : String(e);
-      if (fileOpenErrorTimer) clearTimeout(fileOpenErrorTimer);
-      fileOpenErrorTimer = setTimeout(() => { fileOpenError = null; fileOpenErrorTimer = null; }, 3500);
-    }
-  }
-
   // ── Resume: copyable-facts popover ──────────────────────────────────────────
   // The terminal launcher was removed (issue #34). The header Resume button now
   // opens a small popover of the session's copyable facts at the click point.
@@ -367,14 +352,6 @@ ${contentHtml}
       >
         Resume
       </button>
-      <button
-        class="btn btn--ghost btn--sm"
-        onclick={viewFile}
-        type="button"
-        title={current?.meta.sourcePath}
-      >
-        View File
-      </button>
     {/if}
     <button class="btn btn--ghost btn--sm" onclick={handleToggleTheme} type="button">
       {theme === 'dark' ? 'Dark' : 'Light'}
@@ -442,10 +419,6 @@ ${contentHtml}
   </button>
 </footer>
 
-<!-- ── View File error toast ──────────────────────────────────────────────── -->
-{#if fileOpenError}
-  <div class="toast" role="status">Couldn't open file: {fileOpenError}</div>
-{/if}
 {#if resumeMsg}
   <div class="toast" role="status">{resumeMsg}</div>
 {/if}

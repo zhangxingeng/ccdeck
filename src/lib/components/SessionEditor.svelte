@@ -3,7 +3,7 @@
    * SessionEditor.svelte — the single-page session view *is* the editor.
    *
    * This component is the orchestrator: it owns the byte-faithful edit Draft
-   * and the save/discard/restore-backup/exit flows, and turns the draft into a
+   * and the save/discard/exit flows, and turns the draft into a
    * display model (one chat bubble per renderable row). All rendering lives in
    * focused children: SessionMetaCard · MessageCell. The dirty indicator and
    * Save / Save as copy / Discard controls live in the top nav (+page.svelte),
@@ -469,6 +469,12 @@
   let resumeMenu = $state<{ x: number; y: number; cwd: string; id: string } | null>(null);
 
   async function forkAndShowResume(e: MouseEvent, key: string) {
+    // Stop the opening click here: ResumeMenu mounts with a
+    // `<svelte:window onclick={onClose}>` outside-click guard, and without this
+    // the very click that opened it bubbles to window and self-closes it before
+    // paint (the button looked dead). The header Resume button in +page.svelte
+    // guards the same way — mirror it, don't invent a second pattern.
+    e.stopPropagation();
     if (!draft) return;
     const row = draft.rows[key];
     if (!row) return;

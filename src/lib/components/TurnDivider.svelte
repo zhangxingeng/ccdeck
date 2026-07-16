@@ -32,6 +32,12 @@
 
 <div class="turn-divider" class:turn-divider--deleted={deleted} class:turn-divider--select={selectMode}>
   <span class="turn-divider__rule"></span>
+  <!-- A small node bubble centered on the rule: the bare hairline read as
+       decoration and didn't signal "a new turn/layer starts here". The bubble
+       anchors each turn boundary as a deliberate break (the ⌄ points at the
+       turn's content below) without intruding on the reading flow. -->
+  <span class="turn-divider__node" aria-hidden="true">⌄</span>
+  <span class="turn-divider__rule"></span>
   <div class="turn-divider__actions">
     {#if selectMode}
       <label class="turn-divider__check">
@@ -57,6 +63,20 @@
   }
   .turn-divider--deleted .turn-divider__rule {
     background: color-mix(in srgb, var(--accent-result-err) 45%, var(--border));
+  }
+  /* The turn-boundary node bubble. */
+  .turn-divider__node {
+    flex: 0 0 auto;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.15rem; height: 1.15rem; border-radius: 999px;
+    background: var(--bg-card); border: 1px solid var(--border-strong);
+    color: var(--text-faint); font-size: 0.66rem; line-height: 1;
+    /* nudge the ⌄ glyph to sit optically centered in the circle */
+    padding-bottom: 0.12rem;
+  }
+  .turn-divider--deleted .turn-divider__node {
+    border-color: color-mix(in srgb, var(--accent-result-err) 45%, var(--border-strong));
+    color: var(--accent-result-err);
   }
   .turn-divider__actions { display: flex; align-items: center; gap: 0.4rem; }
   .turn-divider__check {
