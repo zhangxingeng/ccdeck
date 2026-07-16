@@ -8,6 +8,7 @@ import type {
   SearchFilters,
   SearchSummary,
   IndexStatus,
+  SessionMeta,
 } from './types';
 import { searchSessions, indexStatus, refreshIndex, listSessions, homeDir } from './api';
 import { projectLabel } from './parser';
@@ -142,6 +143,24 @@ export function setDateRange(fromISO: string, toISO: string): void {
   scheduleSearch();
 }
 
+/** (Re)build the project-filter chip options from a session list.
+ *
+ *  Called once from `initSearch` with tier-1 stubs — where `cwd` is still empty,
+ *  so labels fall back to decoding `project_raw`, which is lossy for paths
+ *  containing literal `-`/`_` — and then again by BrowseView each time streamed
+ *  enrichment patches land, so the lossy labels self-heal into real-cwd labels
+ *  within a frame or two of first paint. */
+export function setProjectOptions(sessions: SessionMeta[], home: string | null): void {
+  const counts = new Map<string, number>();
+  for (const s of sessions) {
+    const label = projectLabel(s.cwd, s.project_raw, home);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  search.availableProjects = [...counts.entries()]
+    .map(([label, count]) => ({ label, count }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
 // ── lifecycle ────────────────────────────────────────────────────────────────
 
 /** Load the project list, kick a sweep, and start polling index status.
@@ -152,14 +171,7 @@ export async function initSearch(currentSessionPath?: string): Promise<void> {
   if (!search.currentSessionPath) search.sessionOnly = false;
   try {
     const [sessions, home] = await Promise.all([listSessions(), homeDir()]);
-    const counts = new Map<string, number>();
-    for (const s of sessions) {
-      const label = projectLabel(s.cwd, s.project_raw, home);
-      counts.set(label, (counts.get(label) ?? 0) + 1);
-    }
-    search.availableProjects = [...counts.entries()]
-      .map(([label, count]) => ({ label, count }))
-      .sort((a, b) => a.label.localeCompare(b.label));
+    setProjectOptions(sessions, home);
   } catch {
     // non-fatal; project filter just stays empty
   }

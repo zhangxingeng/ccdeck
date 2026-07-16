@@ -30,6 +30,7 @@
     loadMore,
     initSearch,
     disposeSearch,
+    setProjectOptions,
   } from '$lib/search.svelte';
 
   let {
@@ -79,6 +80,14 @@
   }
   /** Home directory, used to render project paths as "~/...". Null until loaded. */
   let homeDir = $state<string | null>(null);
+
+  // Keep the search store's project-filter chips in sync as enrichment streams
+  // real `cwd` values in — the stub-built labels initSearch produced are lossy
+  // for paths containing literal '-'/'_', and the store has no view of the
+  // patched session list except through this handoff.
+  $effect(() => {
+    if (sessions.length > 0) setProjectOptions(sessions, homeDir);
+  });
 
   /** Per-path title overrides applied after a successful rename. */
   let renamedTitles = $state<Record<string, string>>({});
