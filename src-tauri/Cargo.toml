@@ -40,14 +40,6 @@ rayon = "1"
 tantivy = "0.26"
 # Session-fork ids for "resume from here" (v4, randomly generated).
 uuid = { version = "1", features = ["v4"] }
-# Provider-profile API keys (issue #21) in the OS keychain: macOS Keychain,
-# Windows Credential Manager, Linux Secret Service (zbus). keyring v4's DEFAULT
-# features already select a real native backend per OS — verified against the
-# 4.1.4 source: `default = ["v1"]`, and `v1` enables apple/windows/zbus stores.
-# (This is NOT the v2/v3 hazard where zero backend features silently compiled a
-# no-op mock; v4 splits stores into separate crates wired up by `v1`.) So no
-# extra feature list is needed here — a plain dependency is correct.
-keyring = "4"
 # Prompt Library semantic match (issue #24): ONNX text embeddings, opt-in.
 # default-features OFF is load-bearing: the defaults statically link a ~15-30MB
 # ONNX Runtime into every shipped binary. `ort-load-dynamic` instead loads

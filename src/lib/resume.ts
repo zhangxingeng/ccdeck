@@ -2,6 +2,11 @@
  * "Resume from Claude Code" helpers — pure string logic, no DOM/Tauri.
  * The real Claude session id is the session file's basename (uuid.jsonl),
  * NOT the app's own SessionMeta.id (which is a projects-dir-relative path).
+ *
+ * v0.14 (issue #34) removed the terminal launcher. Resume no longer spawns a
+ * terminal or threads a configurable launch command / provider profile; it
+ * surfaces the session's facts as copyable text (project path, session id, and
+ * a ready-to-paste resume command) and the user runs it in their own terminal.
  */
 
 export function sessionIdFromPath(path: string): string {
@@ -9,70 +14,22 @@ export function sessionIdFromPath(path: string): string {
   return fname.replace(/\.jsonl$/, '');
 }
 
-function shellQuote(s: string): string {
+export function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 /**
- * Zero-config default launch command — must stay in lock-step with
- * `DEFAULT_LAUNCH_COMMAND` in `src-tauri/src/appconfig.rs`. Used when App Config's
- * `launchCommand` is empty/whitespace-only, mirroring the backend's
- * `effective_launch_command`.
+ * The single, ready-to-paste line a user runs in their own terminal to resume
+ * this session: `cd '<cwd>' && claude --resume '<id>'`. Both values are
+ * shell-quoted so a path or id with spaces/quotes can't break the line.
+ *
+ * `cd` first because `claude --resume` associates a session with its project
+ * directory — resuming from the wrong cwd won't find it. When the real cwd is
+ * unknown ('' — an old session with no recorded cwd) the `cd` is omitted and
+ * just `claude --resume '<id>'` is returned, with the caller free to show the
+ * path separately.
  */
-export const DEFAULT_LAUNCH_COMMAND = `claude --resume "$CCDECK_SESSION_ID"`;
-
-/**
- * The command a user would paste into their own terminal to resume this session.
- *
- * Faithfully mirrors the script the backend actually runs on Resume
- * (`build_resume_script` in `src-tauri/src/appconfig.rs`): it exports the three
- * `CCDECK_*` env vars and then runs the configured `launchCommand` verbatim,
- * rather than splicing values into a hardcoded `claude --resume <id>` shape.
- * This keeps the clipboard fallback accurate for custom / multi-line launch
- * commands (a tmux wrapper, a script, etc.), not just the default.
- *
- * `launchCommand` is passed in by the caller (already fetched from App Config)
- * so this helper stays pure — no Tauri dependency. Empty/whitespace-only ⇒
- * [`DEFAULT_LAUNCH_COMMAND`], matching the backend.
- *
- * `provider` (issue #21) is the optional selected provider profile. When set,
- * the provider's `ANTHROPIC_*` exports are emitted right after the `CCDECK_*`
- * ones and before `cd` — mirroring the backend script order. The API key is
- * NEVER available to the frontend, so `ANTHROPIC_AUTH_TOKEN` is emitted as a
- * MASKED placeholder (`'<paste your {name} key>'`) rather than a real secret:
- * copying a live key to the clipboard would contradict the write-only posture.
- * The no-provider path stays byte-identical to before.
- */
-export interface ResumeProviderInfo {
-  /** Profile name — used only to render the masked-key placeholder hint. */
-  name: string;
-  /** Anthropic-compatible base URL, exported as ANTHROPIC_BASE_URL. */
-  baseUrl: string;
-  /** Optional default model, exported as ANTHROPIC_MODEL when set. */
-  defaultModel?: string;
-}
-
-export function resumeCommand(
-  cwd: string,
-  sessionId: string,
-  sessionTitle: string,
-  launchCommand: string,
-  provider?: ResumeProviderInfo,
-): string {
-  const command = launchCommand.trim() === '' ? DEFAULT_LAUNCH_COMMAND : launchCommand;
-  const lines = [
-    `export CCDECK_SESSION_ID=${shellQuote(sessionId)}`,
-    `export CCDECK_SESSION_TITLE=${shellQuote(sessionTitle)}`,
-    `export CCDECK_CWD=${shellQuote(cwd)}`,
-  ];
-  if (provider) {
-    lines.push(`export ANTHROPIC_BASE_URL=${shellQuote(provider.baseUrl)}`);
-    // Masked, never the real key — the frontend has no access to it.
-    lines.push(`export ANTHROPIC_AUTH_TOKEN=${shellQuote(`<paste your ${provider.name} key>`)}`);
-    if (provider.defaultModel && provider.defaultModel.trim() !== '') {
-      lines.push(`export ANTHROPIC_MODEL=${shellQuote(provider.defaultModel)}`);
-    }
-  }
-  lines.push(`cd ${shellQuote(cwd)} &&`, command);
-  return lines.join('\n');
+export function resumeCommand(cwd: string, sessionId: string): string {
+  const resume = `claude --resume ${shellQuote(sessionId)}`;
+  return cwd.trim() === '' ? resume : `cd ${shellQuote(cwd)} && ${resume}`;
 }

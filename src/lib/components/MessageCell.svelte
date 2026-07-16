@@ -31,7 +31,6 @@
     onDeleteBlock,
     onUndeleteBlock,
     onResumeFrom,
-    onResumeFromContext,
   }: {
     row: DraftRow;
     entry: Entry;
@@ -42,10 +41,9 @@
     onBlockEdit: (ordinal: number, text: string) => void;
     onDeleteBlock: (blockIndex: number) => void;
     onUndeleteBlock: (blockIndex: number) => void;
-    onResumeFrom: () => void;
-    /** Right-click on the fork-and-resume button — opens the provider picker
-     *  (issue #21). Optional; default no-op keeps the native menu suppressed. */
-    onResumeFromContext?: (e: MouseEvent) => void;
+    /** Fork this session from here, then show its copyable resume facts at the
+     *  click point (issue #34). The event carries the position for the popover. */
+    onResumeFrom: (e: MouseEvent) => void;
   } = $props();
 
   // ── Derived shape ──────────────────────────────────────────────────────────
@@ -106,8 +104,7 @@
     <button
       class="msg-tools__btn"
       onclick={onResumeFrom}
-      oncontextmenu={(e) => onResumeFromContext?.(e)}
-      title="Fork &amp; resume from here — right-click to pick a provider"
+      title="Fork from here, then copy its resume command"
       type="button"
     >⑂</button>
   </div>

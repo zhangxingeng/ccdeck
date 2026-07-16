@@ -13,13 +13,12 @@
    * case/whole-word/regex mode — see issue #5).
    */
   import { onMount, onDestroy, tick } from 'svelte';
-  import type { SessionMeta, SearchHit, ProviderProfile } from '$lib/types';
-  import { listSessions, cleanupEmptySessions, homeDir as fetchHomeDir, resumeInTerminal, getAppConfig, listProviderProfiles } from '$lib/api';
+  import type { SessionMeta, SearchHit } from '$lib/types';
+  import { listSessions, cleanupEmptySessions, homeDir as fetchHomeDir } from '$lib/api';
   import { extractMeta, projectLabel, cleanTitle } from '$lib/parser';
   import { renameSession } from '$lib/sessionOps';
-  import { copyToClipboard } from '$lib/copy';
-  import { sessionIdFromPath, resumeCommand } from '$lib/resume';
-  import ProviderResumeMenu from './ProviderResumeMenu.svelte';
+  import { sessionIdFromPath } from '$lib/resume';
+  import ResumeMenu from './ResumeMenu.svelte';
   import {
     search,
     setQuery,
@@ -35,11 +34,9 @@
   let {
     onOpen,
     onJump,
-    onOpenSettings,
   }: {
     onOpen: (meta: SessionMeta) => void;
     onJump: (hit: SearchHit) => void;
-    onOpenSettings?: (cwd: string, label: string) => void;
   } = $props();
 
   // ── session list state ──────────────────────────────────────────────────────
@@ -456,55 +453,19 @@
   }
 
   // ── resume (from a list card, without opening the session first) ──────────
-  // `providerName` (issue #21) selects an alternate provider profile; omit it
-  // (plain left-click Resume) for the default account. The clipboard fallback
-  // reflects the chosen provider with a MASKED key placeholder.
-  async function doResume(sessionPath: string, cwd: string, title: string, providerName?: string) {
-    const id = sessionIdFromPath(sessionPath);
-    const { launchCommand } = await getAppConfig();
-    const profile = providerName ? resumeProfiles.find((p) => p.name === providerName) : undefined;
-    const providerInfo = profile
-      ? { name: profile.name, baseUrl: profile.baseUrl, defaultModel: profile.defaultModel }
-      : undefined;
-    await copyToClipboard(resumeCommand(cwd, id, title, launchCommand, providerInfo));
-    try {
-      await resumeInTerminal(cwd, id, title, providerName);
-      showToast(
-        providerName
-          ? `Opened with ${providerName} — command also copied to clipboard`
-          : 'Opened in a terminal — command also copied to clipboard'
-      );
-    } catch {
-      showToast(
-        providerName
-          ? `Could not open with ${providerName} — command copied to clipboard instead`
-          : 'Could not open a terminal — command copied to clipboard instead'
-      );
-    }
-  }
+  // The terminal launcher was removed (issue #34); the Resume button now opens
+  // a small popover of the session's copyable facts (project path, session id,
+  // ready-to-paste `claude --resume` command) at the click point. Left-click is
+  // the primary path; right-click opens the same menu.
+  let resumeMenu = $state<{ x: number; y: number; cwd: string; id: string } | null>(null);
 
-  // ── provider picker (right-click on Resume) ───────────────────────────────
-  let resumeMenu = $state<{ x: number; y: number; path: string; cwd: string; title: string } | null>(null);
-  let resumeProfiles = $state<ProviderProfile[]>([]);
-
-  async function openResumeMenu(e: MouseEvent, path: string, cwd: string, title: string) {
+  function openResumeMenu(e: MouseEvent, sessionPath: string, cwd: string) {
     e.preventDefault();
     e.stopPropagation();
-    try {
-      resumeProfiles = await listProviderProfiles();
-    } catch {
-      resumeProfiles = [];
-    }
-    resumeMenu = { x: e.clientX, y: e.clientY, path, cwd, title };
+    resumeMenu = { x: e.clientX, y: e.clientY, cwd, id: sessionIdFromPath(sessionPath) };
   }
   function closeResumeMenu() {
     resumeMenu = null;
-  }
-  async function pickResume(providerName: string | null) {
-    const m = resumeMenu;
-    if (!m) return;
-    closeResumeMenu();
-    await doResume(m.path, m.cwd, m.title, providerName ?? undefined);
   }
 </script>
 
@@ -589,15 +550,6 @@
       <div class="project-group">
         <div class="project-group__head">
           <div class="project-group__name" title={pg.project} data-copy-text={pg.project}>{pg.project}</div>
-          {#if onOpenSettings && pg.items[0]?.meta?.cwd}
-            <button
-              type="button"
-              class="project-group__settings"
-              title="Claude Code settings for this project"
-              aria-label="Claude Code settings for this project"
-              onclick={() => onOpenSettings?.(pg.items[0].meta!.cwd, pg.project)}
-            >⚙</button>
-          {/if}
         </div>
 
         {#each pg.items as sg (sg.path)}
@@ -631,10 +583,10 @@
                 {#if sg.meta}
                   <button
                     type="button" class="btn btn--ghost btn--sm resume-btn"
-                    onclick={(e) => { e.stopPropagation(); doResume(sg.path, sg.meta!.cwd, sg.title); }}
-                    oncontextmenu={(e) => openResumeMenu(e, sg.path, sg.meta!.cwd, sg.title)}
-                    aria-label="Resume this session in a terminal"
-                    title="claude --resume — right-click to pick a provider"
+                    onclick={(e) => { e.stopPropagation(); openResumeMenu(e, sg.path, sg.meta!.cwd); }}
+                    oncontextmenu={(e) => openResumeMenu(e, sg.path, sg.meta!.cwd)}
+                    aria-label="Copy this session's resume command"
+                    title="Copy the resume command, project path, or session id"
                   >Resume</button>
                 {/if}
                 <button
@@ -687,15 +639,6 @@
     <div class="project-group">
       <div class="project-group__head">
         <div class="project-group__name" title={pg.project} data-copy-text={pg.project}>{pg.project}</div>
-        {#if onOpenSettings && pg.items[0]?.meta.cwd}
-          <button
-            type="button"
-            class="project-group__settings"
-            title="Claude Code settings for this project"
-            aria-label="Claude Code settings for this project"
-            onclick={() => onOpenSettings?.(pg.items[0].meta.cwd, pg.project)}
-          >⚙</button>
-        {/if}
       </div>
 
       {#each pg.items as s (s.path)}
@@ -728,10 +671,10 @@
             </button>
             <button
               type="button" class="btn btn--ghost btn--sm resume-btn"
-              onclick={(e) => { e.stopPropagation(); doResume(s.path, s.meta.cwd, s.title); }}
-              oncontextmenu={(e) => openResumeMenu(e, s.path, s.meta.cwd, s.title)}
-              aria-label="Resume this session in a terminal"
-              title="claude --resume — right-click to pick a provider"
+              onclick={(e) => { e.stopPropagation(); openResumeMenu(e, s.path, s.meta.cwd); }}
+              oncontextmenu={(e) => openResumeMenu(e, s.path, s.meta.cwd)}
+              aria-label="Copy this session's resume command"
+              title="Copy the resume command, project path, or session id"
             >Resume</button>
             <button
               type="button" class="btn btn--ghost btn--sm rename-btn"
@@ -766,14 +709,14 @@
   </div>
 {/if}
 
-<!-- ── provider picker (right-click Resume) ─────────────────────────────────── -->
+<!-- ── resume copy popover ──────────────────────────────────────────────────── -->
 {#if resumeMenu}
-  <ProviderResumeMenu
+  <ResumeMenu
     x={resumeMenu.x}
     y={resumeMenu.y}
-    profiles={resumeProfiles}
-    verb="Resume"
-    onSelect={pickResume}
+    cwd={resumeMenu.cwd}
+    sessionId={resumeMenu.id}
+    onCopied={(what) => showToast(`${what} copied to clipboard`)}
     onClose={closeResumeMenu}
   />
 {/if}

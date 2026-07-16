@@ -2,30 +2,27 @@
   /**
    * +page.svelte — top-level SPA shell for CC Deck (Claude Code Control Center).
    *
-   * States: browse | viewer | appconfig | settings — search lives inside browse
-   * (BrowseView.svelte). "appconfig" is CC Deck's own preferences; "settings" is
-   * Claude Code's own settings.json, scoped to a project (or user/global — see
-   * settingsProjectCwd below).
-   * Orchestrates: session loading, HTML export, theme toggle.
+   * States: browse | viewer | appconfig | prompts — search lives inside browse
+   * (BrowseView.svelte). "appconfig" is CC Deck's own preferences.
+   * Orchestrates: session loading, HTML/PDF export, resume-copy popover, theme.
    */
   import { onMount, tick } from 'svelte';
   import { getVersion } from '@tauri-apps/api/app';
   import { checkForUpdates, update as updateState } from '$lib/updater.svelte';
   import type { Session, SessionMeta, SearchHit } from '$lib/types';
-  import { readSession, openSessionFile, resumeInTerminal, getAppConfig } from '$lib/api';
+  import { readSession, openSessionFile } from '$lib/api';
   import { parseJsonl, decodeProject } from '$lib/parser';
   import { buildSession } from '$lib/builder';
   import { extractSessionInfo } from '$lib/editDraft';
   import { getTheme, toggleTheme } from '$lib/theme';
   import { cleanFilename } from '$lib/markdown';
-  import { sessionIdFromPath, resumeCommand } from '$lib/resume';
-  import { copyToClipboard } from '$lib/copy';
+  import { sessionIdFromPath } from '$lib/resume';
   import BrowseView from '$lib/components/BrowseView.svelte';
   import SessionView from '$lib/components/SessionView.svelte';
   import SessionEditor from '$lib/components/SessionEditor.svelte';
   import AppConfigView from '$lib/components/AppConfigView.svelte';
-  import SettingsSearchView from '$lib/components/SettingsSearchView.svelte';
   import PromptsView from '$lib/components/PromptsView.svelte';
+  import ResumeMenu from '$lib/components/ResumeMenu.svelte';
 
   // Inline app.css for the standalone HTML export.
   import appCss from '../app.css?inline';
@@ -33,10 +30,7 @@
   // ── app state ─────────────────────────────────────────────────────────────
   // 'browse' is the home view — it merges what used to be separate Browse and
   // Search pages/views into one (see BrowseView.svelte).
-  let view = $state<'browse' | 'viewer' | 'appconfig' | 'settings' | 'prompts'>('browse');
-  // Settings view scope: null = user/global; otherwise a specific project's real cwd.
-  let settingsProjectCwd = $state<string | null>(null);
-  let settingsProjectLabel = $state('');
+  let view = $state<'browse' | 'viewer' | 'appconfig' | 'prompts'>('browse');
   let current = $state<Session | null>(null);
   let loading = $state(false);
   let loadError = $state<string | null>(null);
@@ -166,15 +160,6 @@
     loadError = null;
   }
 
-  // Open Settings (Claude Code's own settings.json): cwd=null for user/global;
-  // a real project cwd scopes it to that project's Local/Workspace/User tiers.
-  function goSettings(cwd: string | null, label = ''): void {
-    settingsProjectCwd = cwd;
-    settingsProjectLabel = label;
-    view = 'settings';
-    loadError = null;
-  }
-
   function backToBrowse(): void {
     view = 'browse';
     current = null;
@@ -283,9 +268,12 @@ ${contentHtml}
     }
   }
 
-  // ── Resume in claude --resume ───────────────────────────────────────────────
+  // ── Resume: copyable-facts popover ──────────────────────────────────────────
+  // The terminal launcher was removed (issue #34). The header Resume button now
+  // opens a small popover of the session's copyable facts at the click point.
   let resumeMsg = $state<string | null>(null);
   let resumeMsgTimer: ReturnType<typeof setTimeout> | null = null;
+  let resumeMenu = $state<{ x: number; y: number; cwd: string; id: string } | null>(null);
 
   function showResumeMsg(msg: string): void {
     resumeMsg = msg;
@@ -293,19 +281,45 @@ ${contentHtml}
     resumeMsgTimer = setTimeout(() => { resumeMsg = null; resumeMsgTimer = null; }, 3500);
   }
 
-  async function resumeSession(): Promise<void> {
+  function openResumeMenu(e: MouseEvent): void {
     if (!current) return;
-    const id = sessionIdFromPath(current.meta.sourcePath);
-    const cwd = current.meta.cwd;
-    const { launchCommand } = await getAppConfig();
-    await copyToClipboard(resumeCommand(cwd, id, current.meta.title, launchCommand));
+    e.preventDefault();
+    e.stopPropagation();
+    resumeMenu = {
+      x: e.clientX,
+      y: e.clientY,
+      cwd: current.meta.cwd,
+      id: sessionIdFromPath(current.meta.sourcePath),
+    };
+  }
+
+  // ── PDF export ──────────────────────────────────────────────────────────────
+  // Reuses the same clean read-only SessionView render as HTML export, revealed
+  // for print via an @media print stylesheet (app.css) that hides the app chrome
+  // so the OS "Save as PDF" produces a clean document. window.print() is the only
+  // path — no bundled renderer. See report note: on some Linux webviews (wry /
+  // webkit2gtk) window.print() can be a no-op; the HTML export remains the
+  // guaranteed fallback per issue #36.
+  let printing = $state(false);
+
+  async function exportPdf(): Promise<void> {
+    if (!current) return;
+    printing = true;
+    await tick();
     try {
-      await resumeInTerminal(cwd, id, current.meta.title);
-      showResumeMsg('Opened in a terminal — command also copied to clipboard');
-    } catch {
-      showResumeMsg('Could not open a terminal — command copied to clipboard instead');
+      window.print();
+    } finally {
+      // afterprint (below) also clears this; belt-and-suspenders for webviews
+      // that return synchronously without firing the event.
+      printing = false;
     }
   }
+
+  onMount(() => {
+    const done = () => { printing = false; };
+    window.addEventListener('afterprint', done);
+    return () => window.removeEventListener('afterprint', done);
+  });
 </script>
 
 <!-- ── header ──────────────────────────────────────────────────────────────── -->
@@ -324,13 +338,10 @@ ${contentHtml}
       <button class="btn btn--ghost btn--sm" onclick={goPrompts} type="button">
         ✎ Prompts
       </button>
-      <button class="btn btn--ghost btn--sm" onclick={() => goSettings(null)} type="button">
-        ⚙ Settings
-      </button>
       <button class="btn btn--ghost btn--sm" onclick={goAppConfig} type="button">
         ⚙ App Config
       </button>
-    {:else if view === 'appconfig' || view === 'settings' || view === 'prompts'}
+    {:else if view === 'appconfig' || view === 'prompts'}
       <button class="btn btn--ghost btn--sm" onclick={backToBrowse} type="button">
         ← Back
       </button>
@@ -355,11 +366,15 @@ ${contentHtml}
       <button class="btn btn--sm" onclick={exportHtml} type="button">
         Export HTML
       </button>
+      <button class="btn btn--sm" onclick={exportPdf} type="button">
+        Export PDF
+      </button>
       <button
         class="btn btn--ghost btn--sm"
-        onclick={resumeSession}
+        onclick={openResumeMenu}
+        oncontextmenu={openResumeMenu}
         type="button"
-        title="Open in a terminal (copies the resume command to the clipboard as a fallback)"
+        title="Copy the resume command, project path, or session id"
       >
         Resume
       </button>
@@ -385,13 +400,11 @@ ${contentHtml}
   {:else if loading}
     <div class="empty-state">Loading session...</div>
   {:else if view === 'browse'}
-    <BrowseView onOpen={openSession} onJump={openHit} onOpenSettings={goSettings} />
+    <BrowseView onOpen={openSession} onJump={openHit} />
   {:else if view === 'prompts'}
     <PromptsView />
   {:else if view === 'appconfig'}
     <AppConfigView onClose={backToBrowse} />
-  {:else if view === 'settings'}
-    <SettingsSearchView projectCwd={settingsProjectCwd} projectLabel={settingsProjectLabel} onClose={backToBrowse} />
   {:else if view === 'viewer' && current}
     <SessionEditor
       path={current.meta.sourcePath}
@@ -415,6 +428,18 @@ ${contentHtml}
   {/if}
 </main>
 
+<!-- Print-only clean render for Export PDF. Hidden on screen (.print-only), shown
+     only in @media print (app.css), where the app chrome is hidden — so the OS
+     "Save as PDF" captures just the conversation. Lazily mounted while printing
+     so we never pay to render the whole conversation twice during normal use. -->
+{#if printing && current}
+  <div class="print-only" aria-hidden="true">
+    <div class="container-main">
+      <SessionView session={current} />
+    </div>
+  </div>
+{/if}
+
 <!-- ── footer ──────────────────────────────────────────────────────────────── -->
 <footer class="app-footer">
   <a href="https://github.com/zhangxingeng/ccdeck" target="_blank" rel="noopener noreferrer">
@@ -436,6 +461,18 @@ ${contentHtml}
 {/if}
 {#if resumeMsg}
   <div class="toast" role="status">{resumeMsg}</div>
+{/if}
+
+<!-- ── resume copy popover ──────────────────────────────────────────────────── -->
+{#if resumeMenu}
+  <ResumeMenu
+    x={resumeMenu.x}
+    y={resumeMenu.y}
+    cwd={resumeMenu.cwd}
+    sessionId={resumeMenu.id}
+    onCopied={(what) => showResumeMsg(`${what} copied to clipboard`)}
+    onClose={() => (resumeMenu = null)}
+  />
 {/if}
 
 <style>

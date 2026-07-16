@@ -23,19 +23,14 @@
    *                 the editor to handle exit with a dirty-guard prompt.
    */
   import { onMount, onDestroy, tick } from 'svelte';
-  import type { Entry, ProviderProfile } from '$lib/types';
+  import type { Entry } from '$lib/types';
   import {
     readSession,
     writeSession,
     snapshot,
     forkSession,
-    resumeInTerminal,
-    getAppConfig,
-    listProviderProfiles,
   } from '$lib/api';
-  import { copyToClipboard } from '$lib/copy';
-  import { resumeCommand } from '$lib/resume';
-  import ProviderResumeMenu from './ProviderResumeMenu.svelte';
+  import ResumeMenu from './ResumeMenu.svelte';
   import { parseJsonl, extractMeta, extractCustomTitle } from '$lib/parser';
   import { renameSession } from '$lib/sessionOps';
   import {
@@ -466,63 +461,27 @@
     selectedUnits = new Set();
   }
 
-  // `providerName` (issue #21) forks-and-resumes against an alternate provider
-  // profile; omit it (plain left-click ⑂) for the default account. The
-  // clipboard fallback reflects the provider with a MASKED key placeholder.
-  async function doResumeFrom(key: string, providerName?: string) {
+  // Fork-from-here (issue #34): the terminal launcher is gone, so ⑂ forks the
+  // session at `key` (keeps lines 0..=index under a fresh id, unchanged on disk)
+  // and then opens the copy popover on the NEW forked session's facts at the
+  // click point — a ready-to-paste `claude --resume <new-id>` the user runs in
+  // their own terminal.
+  let resumeMenu = $state<{ x: number; y: number; cwd: string; id: string } | null>(null);
+
+  async function forkAndShowResume(e: MouseEvent, key: string) {
     if (!draft) return;
     const row = draft.rows[key];
     if (!row) return;
+    const { clientX: x, clientY: y } = e;
     try {
       const forked = await forkSession(path, row.originalIndex);
-      const cwd = sessionInfo?.cwd ?? '';
-      const { launchCommand } = await getAppConfig();
-      const profile = providerName ? resumeProfiles.find((p) => p.name === providerName) : undefined;
-      const providerInfo = profile
-        ? { name: profile.name, baseUrl: profile.baseUrl, defaultModel: profile.defaultModel }
-        : undefined;
-      await copyToClipboard(resumeCommand(cwd, forked.id, displayTitle, launchCommand, providerInfo));
-      try {
-        await resumeInTerminal(cwd, forked.id, displayTitle, providerName);
-        showToast(
-          providerName
-            ? `Forked session — opened with ${providerName}, command also copied to clipboard`
-            : 'Forked session — opened in a terminal, command also copied to clipboard'
-        );
-      } catch {
-        showToast(
-          providerName
-            ? `Forked session — could not open with ${providerName}, command copied to clipboard`
-            : 'Forked session — could not open a terminal, command copied to clipboard'
-        );
-      }
-    } catch (e) {
-      showToast(`Fork failed: ${e instanceof Error ? e.message : String(e)}`);
+      resumeMenu = { x, y, cwd: sessionInfo?.cwd ?? '', id: forked.id };
+    } catch (err) {
+      showToast(`Fork failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }
-
-  // ── provider picker (right-click on Fork & resume) ────────────────────────
-  let resumeMenu = $state<{ x: number; y: number; key: string } | null>(null);
-  let resumeProfiles = $state<ProviderProfile[]>([]);
-
-  async function openResumeMenu(e: MouseEvent, key: string) {
-    e.preventDefault();
-    e.stopPropagation();
-    try {
-      resumeProfiles = await listProviderProfiles();
-    } catch {
-      resumeProfiles = [];
-    }
-    resumeMenu = { x: e.clientX, y: e.clientY, key };
   }
   function closeResumeMenu() {
     resumeMenu = null;
-  }
-  async function pickResume(providerName: string | null) {
-    const m = resumeMenu;
-    if (!m) return;
-    closeResumeMenu();
-    await doResumeFrom(m.key, providerName ?? undefined);
   }
 
   // ── Title rename (immediate, direct file write — same as BrowseView) ───────
@@ -744,8 +703,7 @@
               onBlockEdit={(o, t) => doBlockEdit(item.key, o, t)}
               onDeleteBlock={(bi) => doDeleteBlock(item.key, bi)}
               onUndeleteBlock={(bi) => doUndeleteBlock(item.key, bi)}
-              onResumeFrom={() => doResumeFrom(item.key)}
-              onResumeFromContext={(e) => openResumeMenu(e, item.key)}
+              onResumeFrom={(e) => forkAndShowResume(e, item.key)}
             />
           {/if}
         {:else}
@@ -848,14 +806,15 @@
   </div>
 {/if}
 
-<!-- ── provider picker (right-click Fork & resume) ──────────────────────────── -->
+<!-- ── forked-session resume copy popover ───────────────────────────────────── -->
 {#if resumeMenu}
-  <ProviderResumeMenu
+  <ResumeMenu
     x={resumeMenu.x}
     y={resumeMenu.y}
-    profiles={resumeProfiles}
-    verb="Fork & resume"
-    onSelect={pickResume}
+    cwd={resumeMenu.cwd}
+    sessionId={resumeMenu.id}
+    heading="Forked — resume in your terminal"
+    onCopied={(what) => showToast(`${what} copied to clipboard`)}
     onClose={closeResumeMenu}
   />
 {/if}

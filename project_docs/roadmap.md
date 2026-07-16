@@ -773,6 +773,55 @@ The **`prompt-import` skill was retired** (deleted, with its `.claude/skills/` s
 ported: it existed to translate prose into the old JSON schema, and importing a Markdown prompt into
 a folder of Markdown prompts is `cp`.
 
+## Phase 18 — Core refocus: cut the unused surfaces; Resume becomes copyable facts + PDF export (targets v0.14.0, closes #34 #36)
+
+CC Deck refocuses on its two core jobs — **search** and **edit/share**. Three whole features nobody
+used were deleted (not deprecated — every unused surface is upkeep with no return), and the terminal
+launcher was replaced with the most flexible thing possible: show the user the facts and let them act
+in their own terminal.
+
+**Cut whole (no flags left behind):**
+
+- **Claude Code settings editor (#34, was Phases 2/12/13, #18/#20)** — `SettingsSearchView.svelte`,
+  the vendored `claude-code-settings.json` schema, `src-tauri/src/settings.rs` + its two commands, the
+  `settings` view state / header button / mount in `+page.svelte`, the read/write/conflict fns + types,
+  and both project-group ⚙ gear entry points. Claude Code's own `settings.json` is untouched — users
+  hand-edit it themselves. It only ever wrote the user's *own* files, so nothing ccdeck-owned is
+  orphaned by the cut.
+- **Provider profiles (#34, was Phase 11 / #21)** — `src-tauri/src/providers.rs` + its 6 commands, the
+  `keyring` crate dependency, `ProviderResumeMenu.svelte`, the providers section of `AppConfigView`,
+  the api.ts fns, and `ProviderProfile`/`KeyBackend` types. Stranded on-disk state (the profiles file
+  + OS-keychain entries + any `~/.claude/.ccstudio-providers-plaintext.json`) is harmless post-cut —
+  nothing reads it — so no migration ships; release notes should tell users they may delete the
+  plaintext key file.
+- **Terminal launcher (#34, was Phase 3/12 / #18)** — `resume_in_terminal` + the per-OS spawn
+  branches + `write_resume_script`/`shell_quote` in `lib.rs`, and the script builders
+  (`build_resume_script*`, `windows_escape`, `parse_args`, `is_auto`, `effective_launch_command`) +
+  the `terminal`/`launch_command` fields in `appconfig.rs`. **`AppConfig` load/save plumbing and
+  `update_check_on_launch` stay** — App Config shrinks to a one-toggle prefs page. No
+  `deny_unknown_fields`, so a released install's config carrying the now-stale `terminal` /
+  `launchCommand` keys still loads cleanly (round-trip test in `appconfig.rs`).
+
+**Replacement build:**
+
+- **Resume/fork → copyable facts.** Browse cards, the viewer header, and the per-message ⑂ fork all
+  open a small popover (`ResumeMenu.svelte`, house style from the deleted provider menu) presenting
+  three one-click-copy facts: the ready-to-paste `cd '<cwd>' && claude --resume '<id>'` command, the
+  project path, and the session id. Left-click opens it; right-click opens the same menu. Fork keeps
+  its on-disk mechanism (`fork_session`) and then shows the *new* session's facts the same way.
+  `resume.ts` shrank accordingly (no launch command, no provider, no env exports).
+- **PDF export (#36).** An "Export PDF" button beside Export HTML opens the webview print dialog on a
+  clean read-only `SessionView` render, revealed via an `@media print` stylesheet (app.css) that hides
+  the app chrome, so the OS "Save as PDF" produces a clean document. No bundled renderer. `window.print()`
+  can be a no-op on some Linux webviews (wry / webkit2gtk); the HTML export remains the guaranteed
+  fallback there.
+
+### Deferred, not dropped
+
+- **Live GUI verification of the new popover / fork-then-copy / PDF print dialog** — built and checked
+  (svelte-check, cargo, smoke, production build all green) but not driven in a real window; per project
+  convention the founder does the visual/print pass on their own machine, especially the OS Save-as-PDF.
+
 ## Verification performed (historical — Phase 7 snapshot, 2026-07-05)
 
 Counts and file names below reflect the tree as of the CC Deck rebrand (Phase 7); later phases

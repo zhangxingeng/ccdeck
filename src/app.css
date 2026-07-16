@@ -174,13 +174,6 @@ a { color: var(--accent-user); }
   color: var(--text-faint); padding: 0 0.25rem;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.project-group__settings {
-  flex-shrink: 0; opacity: 0; transition: opacity 0.1s;
-  background: transparent; border: none; color: var(--text-faint); cursor: pointer;
-  font-size: 0.78rem; line-height: 1; padding: 0.1rem 0.25rem; border-radius: 0.25rem;
-}
-.project-group:hover .project-group__settings { opacity: 1; }
-.project-group__settings:hover { color: var(--text); background: var(--bg-subtle); }
 .session-card {
   display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
   padding: 0.6rem 0.75rem; border-radius: 0.4rem; cursor: pointer;
@@ -322,4 +315,21 @@ a { color: var(--accent-user); }
 @media (max-width: 640px) {
   .container-main { padding: 1rem 0.85rem; }
   .app-header { padding: 0.6rem 0.85rem; }
+}
+
+/* Print — Export PDF (issue #36).
+   +page.svelte mounts a read-only SessionView inside `.print-only` while
+   printing; here we hide the live app chrome (header, footer, and the editor in
+   <main>) and reveal that clean render, so the OS "Save as PDF" captures only
+   the conversation. The `.print-only` node is display:none on screen and only
+   ever visible under print media. */
+.print-only { display: none; }
+@media print {
+  .app-header,
+  .app-footer,
+  main.container-main { display: none !important; }
+  .print-only { display: block !important; }
+  /* Let a full-bleed conversation use the whole page rather than the app's
+     narrow reading column. */
+  .print-only .container-main { max-width: none; padding: 0; }
 }

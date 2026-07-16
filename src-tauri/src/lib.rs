@@ -18,13 +18,6 @@ mod datadir;
 // Prompt Library (issue #24): snippet store + hybrid match engine + commands.
 mod prompts;
 
-// Claude Code's own settings.json (schema-driven read/merge/conflict/write across tiers).
-mod settings;
-
-// Named provider profiles (issue #21): keychain-backed API keys + ANTHROPIC_*
-// env injection for resuming against an alternate Anthropic-compatible provider.
-mod providers;
-
 // ---------------------------------------------------------------------------
 // Return-type structs (must match the JS contract in ARCHITECTURE.md)
 // ---------------------------------------------------------------------------
@@ -246,30 +239,6 @@ fn json_replace_str_value(line: &str, key_token: &str, new_value: &str) -> Strin
         }
     }
     line.to_string()
-}
-
-/// Single-quote `s` for embedding in a POSIX shell script. Shared by every
-/// resume-script call site (macOS, Linux, and the env-var exports both share)
-/// — see [`appconfig::build_resume_script`].
-pub(crate) fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-/// Write `content` to a fresh temp file named `ccstudio-resume-<session_id>.<ext>`,
-/// marking it executable on Unix (`0o755`) — mirrors the temp-script convention
-/// the macOS resume path originally used alone, now shared across every OS's
-/// resume script.
-fn write_resume_script(session_id: &str, ext: &str, content: &str) -> Result<PathBuf, String> {
-    let tmp = std::env::temp_dir().join(format!("ccstudio-resume-{session_id}.{ext}"));
-    fs::write(&tmp, content).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&tmp).map_err(|e| e.to_string())?.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&tmp, perms).map_err(|e| e.to_string())?;
-    }
-    Ok(tmp)
 }
 
 // ---------------------------------------------------------------------------
@@ -690,137 +659,6 @@ fn fork_session(path: String, upto_index: usize) -> Result<ForkResult, String> {
     })
 }
 
-/// Best-effort: open a terminal in `cwd` running the user's configured
-/// resume-launch command (App Config → Launch command; default reproduces
-/// the original `claude --resume <id>` behavior exactly), honouring the
-/// user's persisted terminal preference (App Config → Terminal). Platform-
-/// specific and inherently unreliable (depends on what's installed); callers
-/// should always pair this with a copy-to-clipboard fallback.
-///
-/// Every OS/terminal candidate shares one script body built by
-/// [`appconfig::build_resume_script`] (or its Windows counterpart) — this
-/// removes the old per-platform hand-built `claude --resume <id> <args>`
-/// strings and is the only way a multi-line custom `launch_command` works
-/// uniformly across `open -a`, `gnome-terminal --`, `konsole -e`, `wt`, etc.
-#[tauri::command]
-fn resume_in_terminal(
-    cwd: String,
-    session_id: String,
-    session_title: String,
-    provider_name: Option<String>,
-) -> Result<(), String> {
-    if session_id.is_empty()
-        || !session_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
-        return Err("Invalid session id".to_string());
-    }
-    if !Path::new(&cwd).is_dir() {
-        return Err(format!("Directory not found: {cwd}"));
-    }
-
-    // Resolve the selected provider's ANTHROPIC_* env pairs (issue #21). A
-    // missing/empty provider_name ⇒ no override (default account). A named
-    // provider that can't be resolved (unknown, or no key stored) errors here
-    // rather than silently launching against the default account.
-    let provider_env = match provider_name.as_deref() {
-        Some(name) if !name.is_empty() => providers::provider_env_for(name)?,
-        _ => Vec::new(),
-    };
-
-    let config = appconfig::load();
-    let auto = appconfig::is_auto(&config.terminal);
-
-    #[cfg(target_os = "macos")]
-    {
-        let script = appconfig::build_resume_script(&cwd, &session_id, &session_title, &config.launch_command, &provider_env);
-        // `.command` extension: what makes Terminal.app treat an `open -a`'d
-        // file as a script to run rather than a text file to display.
-        let tmp = write_resume_script(&session_id, "command", &script)?;
-        // Default terminal app is "Terminal"; an advanced preference can name
-        // another (e.g. "iTerm").
-        let app = if auto { "Terminal" } else { config.terminal.trim() };
-        std::process::Command::new("open")
-            .arg("-a")
-            .arg(app)
-            .arg(&tmp)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let script = appconfig::build_resume_script(&cwd, &session_id, &session_title, &config.launch_command, &provider_env);
-        let tmp = write_resume_script(&session_id, "sh", &script)?;
-
-        if auto {
-            let candidates: &[(&str, &[&str])] = &[
-                ("gnome-terminal", &["--"]),
-                ("ptyxis", &["--"]),
-                ("konsole", &["-e"]),
-                ("xfce4-terminal", &["-x"]),
-                ("alacritty", &["-e"]),
-                ("xterm", &["-e"]),
-                ("x-terminal-emulator", &["-e"]),
-            ];
-            for (term, prefix) in candidates {
-                let mut cmd = std::process::Command::new(term);
-                cmd.args(*prefix).arg("sh").arg(&tmp);
-                if cmd.spawn().is_ok() {
-                    return Ok(());
-                }
-            }
-            return Err("No supported terminal emulator found".to_string());
-        }
-
-        // Advanced: the preference is a terminal command template, e.g.
-        // "gnome-terminal --" or "konsole -e" — the first token is the program,
-        // the rest are args that precede the `sh <script>` invocation.
-        let tokens = appconfig::parse_args(&config.terminal);
-        let Some((program, prefix_args)) = tokens.split_first() else {
-            return Err("No terminal command configured".to_string());
-        };
-        let mut cmd = std::process::Command::new(program);
-        cmd.args(prefix_args).arg("sh").arg(&tmp);
-        return cmd
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| format!("Could not launch '{program}': {e}"));
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let script = appconfig::build_resume_script_windows(&cwd, &session_id, &session_title, &config.launch_command, &provider_env);
-        let tmp = write_resume_script(&session_id, "bat", &script)?;
-
-        if auto {
-            std::process::Command::new("cmd")
-                .args(["/C", "start", "Claude Resume", "cmd", "/K", "call"])
-                .arg(&tmp)
-                .spawn()
-                .map_err(|e| e.to_string())?;
-            return Ok(());
-        }
-
-        // Advanced: the preference is a terminal command template, e.g. "wt".
-        let tokens = appconfig::parse_args(&config.terminal);
-        let Some((program, prefix_args)) = tokens.split_first() else {
-            return Err("No terminal command configured".to_string());
-        };
-        let mut cmd = std::process::Command::new(program);
-        cmd.args(prefix_args).arg("cmd").arg("/K").arg("call").arg(&tmp);
-        return cmd
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| format!("Could not launch '{program}': {e}"));
-    }
-
-    #[allow(unreachable_code)]
-    Err("Unsupported platform".to_string())
-}
-
 #[cfg(test)]
 mod resume_tests {
     use super::*;
@@ -1111,20 +949,11 @@ pub fn run() {
             list_backups,
             restore_backup,
             fork_session,
-            resume_in_terminal,
             search::state::search,
             search::state::refresh_index,
             search::state::index_status,
-            settings::read_claude_settings,
-            settings::write_claude_settings,
             appconfig::get_app_config,
             appconfig::set_app_config,
-            providers::list_provider_profiles,
-            providers::save_provider_profile,
-            providers::delete_provider_profile,
-            providers::set_provider_key,
-            providers::provider_key_status,
-            providers::provider_probe_keychain,
             prompts::state::list_projects,
             prompts::state::add_project,
             prompts::state::set_project_color,

@@ -136,82 +136,14 @@ export interface BackupVersion {
 }
 
 // ---------------------------------------------------------------------------
-// Claude Code settings (mirrors src-tauri/src/settings.rs)
-// ---------------------------------------------------------------------------
-
-/** Precedence high -> low: local wins over project wins over user. */
-export type SettingsTier = 'local' | 'project' | 'user';
-
-/** One settings file tier as read from disk. */
-export interface SettingsTierData {
-  tier: SettingsTier;
-  path: string;
-  exists: boolean;
-  raw: string;
-  parsed: Record<string, unknown> | null;
-  parseError: string | null;
-}
-
-/** One tier's value for a key set in more than one tier. */
-export interface SettingsConflictValue {
-  tier: SettingsTier;
-  value: unknown;
-}
-
-/** A key set with differing values across tiers — the "what's set where" signal. */
-export interface SettingsConflict {
-  key: string;
-  tierValues: SettingsConflictValue[];
-  winner: SettingsTier;
-}
-
-/** Full picture returned by read_claude_settings: every tier + merge + conflicts. */
-export interface ClaudeSettings {
-  tiers: SettingsTierData[];
-  effective: Record<string, unknown>;
-  conflicts: SettingsConflict[];
-  projectCwd: string | null;
-}
-
-// ---------------------------------------------------------------------------
 // CC Deck's own app preferences (mirrors src-tauri/src/appconfig.rs)
 // ---------------------------------------------------------------------------
 
-/** CC Deck's own launch preferences, persisted at ~/.claude/.ccstudio-config.json.
- *  Never Claude Code's own settings.json — issue #18 removed the schema-driven
- *  editor for that; users hand-edit it themselves now. */
+/** CC Deck's own preferences, persisted at ~/.ccdeck/config.json. Never Claude
+ *  Code's own settings.json — the schema-driven editor for that was removed in
+ *  v0.14 (issue #34); users hand-edit it themselves. Shrunk to a single pref
+ *  now that the terminal launcher (terminal / launchCommand) is gone too. */
 export interface AppConfig {
-  /** "" or "auto" = auto-detect (default). Otherwise a terminal command template
-   *  (e.g. "gnome-terminal --", "konsole -e", "iTerm", "wt"). */
-  terminal: string;
-  /** Fully custom resume-launch command, run as a shell-script body (may be
-   *  multi-line). Empty = the default `claude --resume "$CCDECK_SESSION_ID"`.
-   *  Three env vars are exported before it runs: CCDECK_SESSION_ID,
-   *  CCDECK_SESSION_TITLE, CCDECK_CWD. */
-  launchCommand: string;
   /** Whether CC Deck checks for app updates automatically on launch. */
   updateCheckOnLaunch: boolean;
-}
-
-// ---------------------------------------------------------------------------
-// Provider profiles (issue #21 — mirrors src-tauri/src/providers.rs)
-// ---------------------------------------------------------------------------
-
-/** Where a profile's API key currently lives (the honest UI-badge signal).
- *  'none' = no key stored yet. Never carries the key itself. */
-export type KeyBackend = 'none' | 'keychain' | 'plaintext';
-
-/** A named alternate-provider profile (e.g. DeepSeek). The API key is NEVER
- *  part of this object — it lives only in the OS keychain (or the explicit
- *  plaintext fallback), keyed by `name`, backend-side. */
-export interface ProviderProfile {
-  /** User-visible name; also the keychain account key. Immutable once created
-   *  (the backend matches by name and updates baseUrl/defaultModel only). */
-  name: string;
-  /** Anthropic-compatible base URL, e.g. https://api.deepseek.com/anthropic. */
-  baseUrl: string;
-  /** Optional default model exported as ANTHROPIC_MODEL (e.g. deepseek-chat). */
-  defaultModel?: string;
-  /** Which store holds this profile's key — drives the 🔒/⚠/no-key badge. */
-  keyBackend: KeyBackend;
 }
