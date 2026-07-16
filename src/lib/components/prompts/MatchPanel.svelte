@@ -217,6 +217,7 @@
     gap: 0.35rem;
   }
   .match-hit {
+    position: relative; /* anchors .match-hit__body */
     display: block;
     text-align: left;
     font-family: inherit;
@@ -244,21 +245,30 @@
     white-space: nowrap;
   }
   /* Hover/focus-reveal of the full body (§1: "hover reveals, click edits" applied
-     to the library too). Collapsed by default — only the hovered/focused row
-     pays for it, both in layout and in the {#if expandedIdx === i} above. */
+     to the library too) as a floating tooltip — same pattern as the compose
+     box's chip preview. Absolutely positioned so it overlays the list rather
+     than pushing rows below it down; only the hovered/focused row pays for it,
+     both here and in the {#if expandedIdx === i} above. */
   .match-hit__body {
-    display: block;
-    margin-top: 0.3rem;
-    padding-top: 0.3rem;
-    border-top: 1px solid var(--border);
+    position: absolute;
+    top: calc(100% + 0.3rem);
+    left: 0;
+    right: 0;
+    z-index: 20;
+    padding: 0.5rem 0.65rem;
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
     font-family: var(--font-mono);
     font-size: 0.7rem;
     line-height: 1.5;
     color: var(--text-muted);
+    background: var(--bg-card);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
     white-space: pre-wrap;
     overflow-wrap: break-word;
     max-height: 12rem;
     overflow-y: auto;
+    cursor: auto;
   }
   /* Query-token matches — same accent the row's own hover/focus border uses, so
      the highlight reads as "this is why this row is here" rather than a

@@ -29,7 +29,7 @@
    * save — because repainting under the user's own keystrokes would destroy their
    * caret.
    */
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { prompts, composeSetDoc, composeSetCaret, clearPendingCaret } from '$lib/prompts.svelte';
   import {
     toRenderNodes,
@@ -216,10 +216,18 @@
 
   /** Repaint only when the doc changed from OUTSIDE the box (an insert, a popup
    *  save, a delete). `renderNonce` is bumped by exactly those paths — reacting to
-   *  `doc` itself would repaint on every keystroke and take the caret with it. */
+   *  `doc` itself would repaint on every keystroke and take the caret with it.
+   *
+   *  `render()` reads `prompts.doc` (via `toRenderNodes` and `chipAt`), and a
+   *  Svelte 5 `$effect` tracks every reactive read that happens synchronously
+   *  during its run, not just the ones named above the call — so without
+   *  `untrack`, this effect ALSO reran on every `prompts.doc` write, i.e. every
+   *  keystroke (`syncFromDom` → `composeSetDoc`), repainting the box and
+   *  yanking the caret to wherever the browser guessed. That's what caused
+   *  typing to appear to jump to the start of the box. */
   $effect(() => {
     void prompts.renderNonce;
-    render();
+    untrack(render);
     void tick().then(placeCaretAfterInsert);
   });
 
