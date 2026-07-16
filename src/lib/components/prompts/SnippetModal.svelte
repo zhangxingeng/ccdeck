@@ -9,6 +9,10 @@
     name?: string;
     /** Prefilled body — the chip's content, or the typed text being saved. */
     content: string;
+    /** Whether the chip has a session-only edit that diverged it from its saved
+     *  file. Only meaningful when `cid` is present — a chip that doesn't exist
+     *  yet cannot have diverged from anything. Absent/false = in sync. */
+    dirty?: boolean;
   }
 </script>
 
@@ -22,18 +26,29 @@
    * places to edit one thing, different consequences, no signal which was which.
    * The founder's complaint, exactly: "editing one thing should be only one place."
    *
-   * So chips are not editable in the box, and it all happens here, behind three
-   * actions that each say plainly what they do:
+   * So chips are not editable in the box, and it all happens here, behind actions
+   * split into two groups by blast radius (round 2, plan §5) plus a neutral Cancel:
    *
-   *   Save      Writes <name>.md. The same name updates; a NEW name creates a new
+   *   LEFT — touches the library, writes a file to disk:
+   *   Update    Writes <name>.md. The same name updates; a NEW name creates a new
    *             snippet. That IS the whole "Save as new" mechanism — the filename
    *             is the identity, so a second button could only add ambiguity.
-   *   Use once  Applies the edit to THIS chip in THIS prompt. Nothing is written to
-   *             the library. This is what makes "never editable in place" a
-   *             simplification rather than a cage: tweak a prompt for one use
-   *             without polluting the library with a near-duplicate.
    *   Delete    Removes the file. The chip becomes plain typed text — deleting a
    *             library entry must not gut the prompt you are halfway through.
+   *             Only shown editing a chip whose file already exists.
+   *
+   *   RIGHT — touches only this prompt, session-only, nothing written to disk:
+   *   Save      Applies the edit to THIS chip in THIS prompt (round 1's `Use once`,
+   *             renamed — from the user's seat they ARE just saving their edit).
+   *             This is what makes "never editable in place" a simplification
+   *             rather than a cage: tweak a prompt for one use without polluting
+   *             the library with a near-duplicate. It marks the chip `dirty`
+   *             (diverged from its saved file) — ABSENT, not disabled, when there
+   *             is no chip yet to apply it to (opened from the library's `+`).
+   *
+   * The right/left split is the whole point: right-hand buttons affect the prompt
+   * you are composing, left-hand buttons affect the library. That distinction was
+   * invisible when all three sat in one row.
    *
    * The variable fills below are the SAME global cells as the list under the compose
    * box; this popup just shows the subset THIS body uses. That is not a second place
@@ -68,6 +83,10 @@
   const cid = untrack(() => context.cid);
   const fromChip = cid !== undefined;
   const originalName = untrack(() => context.name ?? '');
+  /** Whether the chip we opened on has a session-only edit not yet written to its
+   *  file. Read once at open, same as the rest of the opening context — this popup
+   *  doesn't need to react to it changing mid-edit. */
+  const dirty = untrack(() => context.dirty ?? false);
 
   let name = $state(untrack(() => context.name ?? ''));
   let content = $state(untrack(() => context.content));
@@ -88,7 +107,9 @@
     fromChip && name.trim() !== '' && name.trim() !== originalName
   );
 
-  async function save(): Promise<void> {
+  /** Left group. Writes the file to disk — the same button as round 1's `Save`,
+   *  renamed to say what it does now that a peer `Save` means something else. */
+  async function update(): Promise<void> {
     const trimmed = name.trim();
     if (!trimmed) {
       error = 'A snippet needs a name.';
@@ -99,7 +120,8 @@
     try {
       const saved = await saveSnippet(project, trimmed, content);
       // The chip now reflects the snippet it actually is: the same one (updated), or
-      // the new one it was just saved as.
+      // the new one it was just saved as. Writing the file is what resolves the
+      // divergence a session-only edit left behind, so the chip is clean again.
       if (cid) composeSaveChip(cid, saved.name, saved.content);
       onClose();
     } catch (e) {
@@ -108,8 +130,10 @@
     }
   }
 
-  /** This chip, this prompt. Nothing touches the library. */
-  function useOnce(): void {
+  /** Right group. This chip, this prompt, nothing touches the library — round 1's
+   *  `Use once`, renamed (the founder's naming: from the user's seat they ARE just
+   *  saving their edit). Only reachable when `fromChip`, so `cid` is always set. */
+  function save(): void {
     if (!cid) return;
     composeUseOnce(cid, content);
     onClose();
@@ -157,6 +181,11 @@
 >
   <div class="modal snippet-modal" tabindex="-1" {@attach focusTrap}>
     <h3 id="snippet-modal-title">{fromChip ? 'Edit snippet' : 'Save as snippet'}</h3>
+    {#if fromChip}
+      <p class="snippet-modal__status" class:snippet-modal__status--dirty={dirty}>
+        {dirty ? 'Draft — not saved to file' : 'Up to date with the library'}
+      </p>
+    {/if}
 
     <label class="snippet-modal__field">
       <span>Name</span>
@@ -216,32 +245,51 @@
     {/if}
 
     <div class="modal__actions snippet-modal__actions">
-      {#if fromChip}
+      <!-- Left: touches the library, writes a file to disk. -->
+      <div class="snippet-modal__group">
+        {#if fromChip}
+          <button
+            type="button"
+            class="btn btn--ghost btn--sm btn--danger"
+            disabled={busy}
+            onclick={remove}
+          >
+            {confirmingDelete ? 'Really delete?' : 'Delete'}
+          </button>
+        {/if}
         <button
           type="button"
-          class="btn btn--ghost btn--sm btn--danger"
+          class="btn btn--sm"
+          class:btn--ghost={fromChip}
+          class:btn--primary={!fromChip}
           disabled={busy}
-          onclick={remove}
+          onclick={update}
         >
-          {confirmingDelete ? 'Really delete?' : 'Delete'}
+          Update
         </button>
-      {/if}
+      </div>
       <span class="snippet-modal__spacer"></span>
-      <button type="button" class="btn btn--ghost btn--sm" onclick={onClose}>Cancel</button>
-      {#if fromChip}
-        <button
-          type="button"
-          class="btn btn--ghost btn--sm"
-          disabled={busy}
-          onclick={useOnce}
-          title="Use this edit in this prompt only — nothing is written to the library"
-        >
-          Use once
-        </button>
-      {/if}
-      <button type="button" class="btn btn--primary btn--sm" disabled={busy} onclick={save}>
-        Save
-      </button>
+      <!-- Right: touches only this prompt, session-only — the low-friction default
+           a user reaches for while composing. `Save` is ABSENT (not disabled) when
+           there's no chip yet for a session-only edit to apply to. When it's absent,
+           `Update` is the only real action left in the dialog and takes the primary
+           weight itself, rather than the dialog reading as unfinished with no
+           emphasis on its one action; when `Save` is present it's the low-friction
+           default, so `Update` steps back to ghost. -->
+      <div class="snippet-modal__group">
+        <button type="button" class="btn btn--ghost btn--sm" onclick={onClose}>Cancel</button>
+        {#if fromChip}
+          <button
+            type="button"
+            class="btn btn--primary btn--sm"
+            disabled={busy}
+            onclick={save}
+            title="Save this edit to this prompt only — nothing is written to the library"
+          >
+            Save
+          </button>
+        {/if}
+      </div>
     </div>
   </div>
 </div>
@@ -249,6 +297,18 @@
 <style>
   .snippet-modal {
     max-width: 560px;
+  }
+
+  /* Sync status vs. the library file — informational, not a warning: a dirty
+     chip is an ordinary, expected state (that's the whole point of session-only
+     Save), not an error. */
+  .snippet-modal__status {
+    margin: 0.15rem 0 0;
+    font-size: 0.66rem;
+    color: var(--text-faint);
+  }
+  .snippet-modal__status--dirty {
+    color: color-mix(in srgb, var(--accent-template) 80%, var(--text));
   }
 
   .snippet-modal__field {
@@ -347,5 +407,12 @@
   }
   .snippet-modal__spacer {
     flex: 1;
+  }
+  /* The two blast-radius groups: gap inside a group is tighter than the gap the
+     spacer opens up between them, so the grouping reads before you read a label. */
+  .snippet-modal__group {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
   }
 </style>

@@ -75,7 +75,7 @@
   function openChip(cid: string): void {
     const chip = chipAt(prompts.doc, cid);
     if (chip === undefined) return; // deleted out from under the click
-    modalContext = { cid, name: chip.name, content: chip.content };
+    modalContext = { cid, name: chip.name, content: chip.content, dirty: chip.dirty };
   }
 
   /** The library's `+` button: create a new snippet from scratch. Blank context

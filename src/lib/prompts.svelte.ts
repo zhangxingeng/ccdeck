@@ -341,20 +341,23 @@ export function composeInsertSnippet(name: string, content: string): void {
   prompts.renderNonce++;
 }
 
-/** `Use once`: this chip, this prompt, nothing written to the library. The escape
- *  hatch that makes "a chip is never editable in place" tolerable rather than a
- *  cage — tweak a prompt without polluting the library. */
+/** The popup's session-only `Save` (round 1's `Use once`): this chip, this prompt,
+ *  nothing written to the library. The escape hatch that makes "a chip is never
+ *  editable in place" tolerable rather than a cage — tweak a prompt without
+ *  polluting the library. Marks the chip `dirty`: it now diverges from the file
+ *  its name still points at, until the popup's `Update` writes that file. */
 export function composeUseOnce(cid: string, content: string): void {
-  prompts.doc = replaceChipContent(prompts.doc, cid, content);
+  prompts.doc = replaceChipContent(prompts.doc, cid, content, true);
   prompts.renderNonce++;
 }
 
-/** The popup saved this chip under `name`. Same name → the file was updated and
- *  the chip just reflects it; a new name → a new file, and the chip retargets to
- *  the snippet it now actually is. One transform covers both, which is exactly why
- *  "Save as new" no longer needs a button of its own. */
+/** The popup's `Update` saved this chip's file under `name`. Same name → the file
+ *  was updated and the chip just reflects it; a new name → a new file, and the
+ *  chip retargets to the snippet it now actually is. One transform covers both,
+ *  which is exactly why "Save as new" no longer needs a button of its own.
+ *  Clears `dirty`: writing the file is what resolves any session-only divergence. */
 export function composeSaveChip(cid: string, name: string, content: string): void {
-  prompts.doc = retargetChip(prompts.doc, cid, name, content);
+  prompts.doc = retargetChip(prompts.doc, cid, name, content, false);
   prompts.renderNonce++;
 }
 
