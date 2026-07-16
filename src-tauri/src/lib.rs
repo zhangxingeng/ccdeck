@@ -1,9 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
+use tauri::ipc::Channel;
+use tauri::{Manager, State};
 
 // Search: SQLite-backed extracted-text cache (built up over milestones 1–12).
 mod search;
@@ -22,15 +25,33 @@ mod prompts;
 // Return-type structs (must match the JS contract in ARCHITECTURE.md)
 // ---------------------------------------------------------------------------
 
+/// Tier-1 browse metadata: everything obtainable from a directory walk plus a
+/// single `stat` per file, with **no file-content read**. `list_sessions`
+/// returns these so the browse list can paint immediately in recency order
+/// (`mtime`); the expensive content-derived fields arrive afterward, streamed
+/// per file by [`enrich_sessions`], so a large history never blocks first paint.
 #[derive(Serialize)]
-pub struct SessionMeta {
-    pub id: String,              // stable id = relative path from projects dir
-    pub path: String,            // absolute path to the .jsonl
-    pub project_raw: String,     // the encoded project dir name
-    pub mtime: u64,              // unix seconds
-    pub size: u64,               // bytes
-    pub preview: Vec<String>,    // first ≤50 lines of the file
-    // Cheap stats computed in one pass over the file content
+pub struct SessionStub {
+    pub id: String,          // stable id = relative path from projects dir
+    pub path: String,        // absolute path to the .jsonl
+    pub project_raw: String, // the encoded project dir name
+    pub mtime: u64,          // unix seconds (file modified time) — the recency sort key
+    pub size: u64,           // bytes
+}
+
+/// Tier-2 browse metadata: the content-derived fields for one session, streamed
+/// to the frontend by [`enrich_sessions`] as each file is scanned. Keyed by
+/// `path` — the frontend patches the matching [`SessionStub`] in place. Field
+/// names stay snake_case to match what the browse view already consumes.
+///
+/// When `cleaned` is true the file was an empty/untitled/stale junk session and
+/// has just been deleted (see [`is_cleanup_eligible`]); every other field is
+/// then meaningless and the frontend drops the stub rather than patching it.
+#[derive(Serialize)]
+pub struct SessionEnrichment {
+    pub path: String,            // key: which stub this patches
+    pub cleaned: bool,           // true = file was just deleted as junk; drop the stub
+    pub preview: Vec<String>,    // first ≤50 lines — the JS side runs extractMeta on these
     pub line_count: u64,         // non-empty lines
     pub user_count: u64,         // lines whose type == "user"
     pub assistant_count: u64,    // lines whose type == "assistant"
@@ -39,9 +60,47 @@ pub struct SessionMeta {
     pub first_ts: String,        // first timestamp value seen ("" if none)
     pub last_ts: String,         // last timestamp value seen ("" if none)
     pub cwd: String,             // first-seen "cwd" value ("" if none) — the real project path
-    pub custom_title: String,    // last-seen "customTitle" value ("" if none) — a real Claude Code
-                                  // rename (ours or the CLI's own /rename), wherever it occurs in
-                                  // the file. Last-wins so a later rename supersedes an earlier one.
+    pub custom_title: String,    // last-seen "customTitle" value ("" if none), scanned across the
+                                  // whole file — a real Claude Code rename, wherever it occurs.
+}
+
+impl SessionEnrichment {
+    /// A "this file was just cleaned up — drop its stub" signal for `path`.
+    fn cleaned(path: String) -> Self {
+        Self {
+            path,
+            cleaned: true,
+            preview: Vec::new(),
+            line_count: 0,
+            user_count: 0,
+            assistant_count: 0,
+            subagent_count: 0,
+            models: Vec::new(),
+            first_ts: String::new(),
+            last_ts: String::new(),
+            cwd: String::new(),
+            custom_title: String::new(),
+        }
+    }
+}
+
+/// Streaming summary returned when [`enrich_sessions`] finishes (or a newer
+/// call supersedes it).
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct EnrichSummary {
+    pub enriched: u64,
+    pub cleaned: u64,
+    pub cancelled: bool,
+}
+
+/// Per-app browse state: a generation counter so a newer `enrich_sessions`
+/// call (a remount) supersedes an in-flight one — mirrors `SearchState`'s
+/// cancellation counter. Behind an `Arc` so the blocking walk keeps it after
+/// the command future returns.
+#[derive(Default)]
+pub struct BrowseState {
+    generation: Arc<AtomicU64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -83,6 +142,88 @@ fn projects_dir_inner() -> Option<PathBuf> {
 
 fn unix_secs(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+}
+
+/// Walk every immediate sub-directory of the projects dir and collect the path
+/// of each session `*.jsonl` that is NOT `agent-*.jsonl`. Skips the `subagents`
+/// and `tool-results` dirs. This is the single directory walk shared by
+/// [`list_sessions`] (which then just `stat`s each) and [`enrich_sessions`]
+/// (which reads + scans each) — one skip/filter rule, not two copies that can
+/// drift apart (they did, historically: `list_sessions` and the old
+/// `cleanup_empty_sessions` each hand-rolled the same walk).
+fn collect_session_files(projects: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(top_entries) = fs::read_dir(projects) else {
+        return out;
+    };
+    for top in top_entries.flatten() {
+        let project_path = top.path();
+        if !project_path.is_dir() {
+            continue;
+        }
+        let dir_name = match project_path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if dir_name == "subagents" || dir_name == "tool-results" {
+            continue;
+        }
+        let Ok(inner) = fs::read_dir(&project_path) else {
+            continue;
+        };
+        for jentry in inner.flatten() {
+            let file_path = jentry.path();
+            let Some(fname) = file_path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !fname.ends_with(".jsonl") || fname.starts_with("agent-") {
+                continue;
+            }
+            out.push(file_path);
+        }
+    }
+    out
+}
+
+/// Count subagent `agent-*.jsonl` files in the `subagents/` dir sibling to a
+/// session file (0 if there is none). Extracted from the old inline
+/// `list_sessions` logic — it needs a `read_dir`, so it now belongs to the
+/// tier-2 enrichment rather than the cheap first-paint scan.
+fn count_subagents(session_path: &Path) -> u64 {
+    let parent = session_path.parent().unwrap_or(Path::new(""));
+    let subagents_dir = parent.join("subagents");
+    if !subagents_dir.is_dir() {
+        return 0;
+    }
+    fs::read_dir(&subagents_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| {
+                    let fname = e.file_name();
+                    let s = fname.to_string_lossy();
+                    s.starts_with("agent-") && s.ends_with(".jsonl")
+                })
+                .count() as u64
+        })
+        .unwrap_or(0)
+}
+
+/// Whether an empty/untitled/stale session file should be auto-deleted during
+/// enrichment. Wraps [`is_cleanup_eligible`] with the mtime guard the old
+/// `cleanup_empty_sessions` enforced: a file whose mtime couldn't be read
+/// (`None`) is **never** deleted — we never remove something we can't prove is
+/// stale. Pure, so the guard stays unit-testable without the filesystem.
+fn should_cleanup(
+    stats: &SessionScanStats,
+    mtime: Option<u64>,
+    now_secs: u64,
+    recency_window_secs: u64,
+) -> bool {
+    match mtime {
+        Some(m) => is_cleanup_eligible(stats, m, now_secs, recency_window_secs),
+        None => false,
+    }
 }
 
 /// Replace path separators and any non-alphanumeric character with '_'.
@@ -258,58 +399,121 @@ fn home_dir() -> Option<String> {
     dirs::home_dir().map(|p| p.to_string_lossy().into_owned())
 }
 
-/// Walk every immediate sub-directory of the projects dir.  For each *.jsonl
-/// that is NOT named agent-*.jsonl, emit one SessionMeta.
-/// Skips dirs named "subagents" and "tool-results".
+/// Tier-1 browse scan: one directory walk plus a single `stat` per session
+/// file, **no content reads**, so the browse list paints immediately. The
+/// content-derived fields (turn counts, models, title, timestamps) arrive
+/// afterward, streamed per file by [`enrich_sessions`]. Returned in filesystem
+/// order; the frontend sorts by `mtime` (recency).
 #[tauri::command]
-fn list_sessions() -> Result<Vec<SessionMeta>, String> {
-    let projects = projects_dir_inner()
-        .ok_or_else(|| "Projects directory not found".to_string())?;
+fn list_sessions() -> Result<Vec<SessionStub>, String> {
+    let projects =
+        projects_dir_inner().ok_or_else(|| "Projects directory not found".to_string())?;
 
-    let mut sessions: Vec<SessionMeta> = Vec::new();
-
-    let top_entries = fs::read_dir(&projects).map_err(|e| e.to_string())?;
-    for top in top_entries.flatten() {
-        let project_path = top.path();
-        if !project_path.is_dir() {
+    let mut stubs: Vec<SessionStub> = Vec::new();
+    for file_path in collect_session_files(&projects) {
+        let Ok(meta) = fs::metadata(&file_path) else {
             continue;
-        }
-        let dir_name = match project_path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
         };
-        if dir_name == "subagents" || dir_name == "tool-results" {
-            continue;
-        }
+        // The encoded project dir name is the session file's parent dir name.
+        let project_raw = file_path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        // Relative path from projects root — this is the stable session id.
+        let id = file_path
+            .strip_prefix(&projects)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| {
+                file_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
 
-        let inner = match fs::read_dir(&project_path) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for jentry in inner.flatten() {
-            let file_path = jentry.path();
-            let fname = match file_path.file_name().and_then(|n| n.to_str()) {
-                Some(n) => n.to_string(),
-                None => continue,
-            };
-            if !fname.ends_with(".jsonl") {
-                continue;
-            }
-            if fname.starts_with("agent-") {
-                continue;
-            }
+        stubs.push(SessionStub {
+            id,
+            path: file_path.to_string_lossy().into_owned(),
+            project_raw,
+            mtime: meta.modified().map(unix_secs).unwrap_or(0),
+            size: meta.len(),
+        });
+    }
 
-            let meta = match fs::metadata(&file_path) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            let mtime = meta.modified().map(unix_secs).unwrap_or(0);
-            let size = meta.len();
+    Ok(stubs)
+}
+
+/// Tier-2 browse scan: stream the content-derived metadata for every session as
+/// each file is read, and fold the junk-cleanup pass into the *same* walk — one
+/// read per file does both jobs, where `list_sessions` + the old
+/// `cleanup_empty_sessions` used to walk and full-read the whole corpus twice
+/// before the list even loaded. Files are processed newest-first (mtime desc)
+/// so the cards the user is looking at fill in first.
+///
+/// Cleanup: an empty, untitled, stale session (see [`is_cleanup_eligible`], its
+/// 15-minute recency guard intact) is deleted and streamed as a `cleaned`
+/// signal so the frontend drops its stub; every other file is streamed as a
+/// full enrichment.
+///
+/// A newer `enrich_id` (a remount) supersedes an in-flight walk. Navigating
+/// away does NOT cancel it, so a normal app session still completes one full
+/// cleanup pass — the deletion is off the first-paint path but not tied to
+/// scroll position (see project_docs/roadmap.md for the behavior-change note).
+#[tauri::command]
+async fn enrich_sessions(
+    state: State<'_, BrowseState>,
+    enrich_id: u64,
+    on_meta: Channel<SessionEnrichment>,
+) -> Result<EnrichSummary, String> {
+    let generation = state.generation.clone();
+    generation.store(enrich_id, Ordering::SeqCst);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let projects =
+            projects_dir_inner().ok_or_else(|| "Projects directory not found".to_string())?;
+        let now = unix_secs(SystemTime::now());
+        let cancelled = || generation.load(Ordering::SeqCst) != enrich_id;
+        let mut summary = EnrichSummary::default();
+
+        // Stat once up front so we can process newest-first — the top-of-list
+        // (most recent) cards then enrich before the user scrolls past them.
+        // A file whose mtime can't be read sorts to the bottom AND is never
+        // eligible for cleanup below (see `should_cleanup`).
+        let mut files: Vec<(PathBuf, Option<u64>)> = collect_session_files(&projects)
+            .into_iter()
+            .map(|p| {
+                let mtime = fs::metadata(&p)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .map(unix_secs);
+                (p, mtime)
+            })
+            .collect();
+        files.sort_by_key(|(_, mtime)| std::cmp::Reverse(mtime.unwrap_or(0)));
+
+        for (file_path, mtime) in files {
+            if cancelled() {
+                summary.cancelled = true;
+                break;
+            }
 
             let content = fs::read_to_string(&file_path).unwrap_or_default();
-            let preview: Vec<String> = content.lines().take(50).map(|l| l.to_string()).collect();
+            let stats = scan_session_lines(&content);
+            let path = file_path.to_string_lossy().into_owned();
 
-            // --- Cheap one-pass stats ---
+            // Cleanup fold-in: delete genuinely-empty, untitled, cold files and
+            // tell the frontend to drop the stub, instead of enriching them.
+            if should_cleanup(&stats, mtime, now, CLEANUP_RECENCY_WINDOW_SECS) {
+                if fs::remove_file(&file_path).is_ok() {
+                    summary.cleaned += 1;
+                    let _ = on_meta.send(SessionEnrichment::cleaned(path));
+                }
+                continue;
+            }
+
+            let preview: Vec<String> = content.lines().take(50).map(|l| l.to_string()).collect();
+            let subagent_count = count_subagents(&file_path);
             let SessionScanStats {
                 line_count,
                 user_count,
@@ -319,42 +523,11 @@ fn list_sessions() -> Result<Vec<SessionMeta>, String> {
                 last_ts,
                 cwd,
                 custom_title,
-            } = scan_session_lines(&content);
+            } = stats;
 
-            // Count subagent *.jsonl files (not .meta.json) in the sibling subagents/ dir.
-            let subagent_count: u64 = {
-                let parent = file_path.parent().unwrap_or(Path::new(""));
-                let subagents_dir = parent.join("subagents");
-                if subagents_dir.is_dir() {
-                    fs::read_dir(&subagents_dir)
-                        .map(|entries| {
-                            entries
-                                .flatten()
-                                .filter(|e| {
-                                    let fname = e.file_name();
-                                    let s = fname.to_string_lossy();
-                                    s.starts_with("agent-") && s.ends_with(".jsonl")
-                                })
-                                .count() as u64
-                        })
-                        .unwrap_or(0)
-                } else {
-                    0
-                }
-            };
-
-            // Relative path from projects root — this is the stable session id.
-            let rel = file_path
-                .strip_prefix(&projects)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| fname.clone());
-
-            sessions.push(SessionMeta {
-                id: rel,
-                path: file_path.to_string_lossy().into_owned(),
-                project_raw: dir_name.clone(),
-                mtime,
-                size,
+            let _ = on_meta.send(SessionEnrichment {
+                path,
+                cleaned: false,
                 preview,
                 line_count,
                 user_count,
@@ -366,82 +539,13 @@ fn list_sessions() -> Result<Vec<SessionMeta>, String> {
                 cwd,
                 custom_title,
             });
-        }
-    }
-
-    Ok(sessions)
-}
-
-/// Auto-clean junk session files: zero-turn, untitled, and stale `*.jsonl`
-/// under the projects dir. The frontend calls this once from the browse-list
-/// scan (BrowseView's onMount, just before `list_sessions`), so cleanup runs
-/// at app start and on every return to the browse view. Uses the exact same
-/// walk/skip rules as `list_sessions` (same dir filters, same `agent-*` skip)
-/// and the shared `scan_session_lines`, gated by [`is_cleanup_eligible`] so
-/// only genuinely-empty, untitled, cold files are removed — never real content.
-/// Returns the number of files deleted. Best-effort: a file whose metadata or
-/// mtime can't be read, or that fails to delete, is simply skipped.
-#[tauri::command]
-fn cleanup_empty_sessions() -> Result<u32, String> {
-    let projects = projects_dir_inner()
-        .ok_or_else(|| "Projects directory not found".to_string())?;
-    let now = unix_secs(SystemTime::now());
-    let mut removed: u32 = 0;
-
-    let top_entries = fs::read_dir(&projects).map_err(|e| e.to_string())?;
-    for top in top_entries.flatten() {
-        let project_path = top.path();
-        if !project_path.is_dir() {
-            continue;
-        }
-        let dir_name = match project_path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        if dir_name == "subagents" || dir_name == "tool-results" {
-            continue;
+            summary.enriched += 1;
         }
 
-        let inner = match fs::read_dir(&project_path) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for jentry in inner.flatten() {
-            let file_path = jentry.path();
-            let fname = match file_path.file_name().and_then(|n| n.to_str()) {
-                Some(n) => n.to_string(),
-                None => continue,
-            };
-            if !fname.ends_with(".jsonl") {
-                continue;
-            }
-            if fname.starts_with("agent-") {
-                continue;
-            }
-
-            let meta = match fs::metadata(&file_path) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            // Skip (keep) any file whose mtime we can't read — never delete
-            // something we can't prove is stale.
-            let mtime = match meta.modified().ok().map(unix_secs) {
-                Some(m) => m,
-                None => continue,
-            };
-
-            let content = fs::read_to_string(&file_path).unwrap_or_default();
-            let stats = scan_session_lines(&content);
-
-            if is_cleanup_eligible(&stats, mtime, now, CLEANUP_RECENCY_WINDOW_SECS)
-                && fs::remove_file(&file_path).is_ok()
-            {
-                removed += 1;
-            }
-        }
-    }
-
-    Ok(removed)
+        Ok(summary)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Return raw UTF-8 contents of a session .jsonl file.
@@ -915,6 +1019,86 @@ mod cleanup_tests {
         };
         assert!(!is_cleanup_eligible(&with_title, ancient, NOW, WINDOW));
     }
+
+    /// The `should_cleanup` wrapper enforces the old `cleanup_empty_sessions`
+    /// mtime guard now that cleanup runs inside enrichment: a file whose mtime
+    /// couldn't be read (`None`) is NEVER deleted, even if it is otherwise a
+    /// stale, empty, untitled junk file. We never remove what we can't prove
+    /// is stale.
+    #[test]
+    fn should_cleanup_never_deletes_when_mtime_unknown() {
+        let empty = SessionScanStats { line_count: 3, ..Default::default() };
+        // With a known, stale mtime it IS eligible…
+        assert!(should_cleanup(&empty, Some(NOW - WINDOW - 60), NOW, WINDOW));
+        // …but with an unreadable mtime it must be spared.
+        assert!(!should_cleanup(&empty, None, NOW, WINDOW));
+        // And real content is spared regardless of the mtime being known.
+        let with_user = SessionScanStats { user_count: 1, ..Default::default() };
+        assert!(!should_cleanup(&with_user, Some(NOW - WINDOW - 60), NOW, WINDOW));
+    }
+}
+
+#[cfg(test)]
+mod browse_scan_tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "ccdeck-browse-test-{tag}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// The shared walker returns only real session `*.jsonl` files: it skips
+    /// `agent-*.jsonl`, non-jsonl files, the `subagents`/`tool-results`
+    /// top-level dirs, and never descends into a project's own `subagents/`.
+    #[test]
+    fn collect_session_files_applies_the_skip_rules() {
+        let projects = scratch("collect");
+
+        let proj = projects.join("-home-user-app");
+        fs::create_dir_all(proj.join("subagents")).unwrap();
+        fs::write(proj.join("sess-1.jsonl"), "{}\n").unwrap(); // kept
+        fs::write(proj.join("agent-abc.jsonl"), "{}\n").unwrap(); // skip: agent-*
+        fs::write(proj.join("notes.txt"), "x").unwrap(); // skip: not .jsonl
+        fs::write(proj.join("subagents").join("agent-x.jsonl"), "{}\n").unwrap(); // not descended
+
+        // A whole top-level dir named `subagents` is skipped wholesale.
+        let special = projects.join("subagents");
+        fs::create_dir_all(&special).unwrap();
+        fs::write(special.join("sess-2.jsonl"), "{}\n").unwrap();
+
+        let names: Vec<String> = collect_session_files(&projects)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["sess-1.jsonl".to_string()]);
+
+        fs::remove_dir_all(&projects).unwrap();
+    }
+
+    /// `count_subagents` counts only `agent-*.jsonl` files in the sibling
+    /// `subagents/` dir — not `.meta.json` sidecars — and is 0 with no dir.
+    #[test]
+    fn count_subagents_counts_agent_jsonl_only() {
+        let proj = scratch("subagents");
+        let sess = proj.join("sess.jsonl");
+        fs::write(&sess, "{}").unwrap();
+
+        // No subagents dir yet → 0.
+        assert_eq!(count_subagents(&sess), 0);
+
+        let sad = proj.join("subagents");
+        fs::create_dir_all(&sad).unwrap();
+        fs::write(sad.join("agent-1.jsonl"), "{}").unwrap();
+        fs::write(sad.join("agent-2.jsonl"), "{}").unwrap();
+        fs::write(sad.join("agent-1.meta.json"), "{}").unwrap(); // not counted
+        assert_eq!(count_subagents(&sess), 2);
+
+        fs::remove_dir_all(&proj).unwrap();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -938,11 +1122,12 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(prompts::state::PromptsState::new())
+        .manage(BrowseState::default())
         .invoke_handler(tauri::generate_handler![
             find_projects_dir,
             home_dir,
             list_sessions,
-            cleanup_empty_sessions,
+            enrich_sessions,
             read_session,
             write_session,
             snapshot,

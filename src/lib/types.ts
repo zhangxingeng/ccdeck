@@ -64,15 +64,11 @@ export interface Session {
   };
 }
 
-/** Returned by Rust list_sessions; JS side uses preview for extractMeta. */
-export interface SessionMeta {
-  id: string;
-  path: string;
-  project_raw: string;
-  mtime: number;
-  size: number;
-  preview: string[];  // first ~50 raw JSONL lines
-  // Cheap stats computed server-side in one pass over the file
+/** The content-derived fields for one session — shared by the tier-2 wire
+ *  payload (`SessionEnrichment`) and the merged browse row (`SessionMeta`).
+ *  All require a full-file read, so they arrive lazily, after first paint. */
+interface SessionContent {
+  preview: string[];        // first ~50 raw JSONL lines — the JS side runs extractMeta on these
   line_count: number;       // non-empty lines
   user_count: number;       // lines whose type == "user"
   assistant_count: number;  // lines whose type == "assistant"
@@ -83,6 +79,41 @@ export interface SessionMeta {
   cwd: string;              // first-seen "cwd" value ("" if none) — the real project path
   custom_title: string;     // last-seen "customTitle" value ("" if none), scanned across the
                             // whole file — a real Claude Code rename, wherever it occurs
+}
+
+/** Tier-1 wire shape from `list_sessions` — stat-only, no content read, so the
+ *  browse list can paint immediately in `mtime` (recency) order. */
+export interface SessionStub {
+  id: string;
+  path: string;
+  project_raw: string;
+  mtime: number;
+  size: number;
+}
+
+/** Tier-2 wire shape streamed by `enrich_sessions`, one per session, keyed by
+ *  `path`. `cleaned: true` means the file was an empty/untitled/stale junk
+ *  session that was just deleted — every content field is then meaningless and
+ *  the frontend drops the stub instead of patching it. */
+export interface SessionEnrichment extends SessionContent {
+  path: string;
+  cleaned: boolean;
+}
+
+/** Summary resolved by `enrich_sessions` when its streaming walk finishes (or
+ *  a newer call supersedes it). */
+export interface EnrichSummary {
+  enriched: number;
+  cleaned: number;
+  cancelled: boolean;
+}
+
+/** A browse-list row: a `SessionStub` plus the content fields, which start
+ *  empty and are patched in as `enrich_sessions` streams them. `enriched`
+ *  flags whether the content fields are real yet, so a card can show a light
+ *  placeholder line (size + mtime date) until its enrichment arrives. */
+export interface SessionMeta extends SessionStub, SessionContent {
+  enriched: boolean;
 }
 
 // ---------------------------------------------------------------------------

@@ -13,8 +13,9 @@
    * case/whole-word/regex mode — see issue #5).
    */
   import { onMount, onDestroy, tick } from 'svelte';
-  import type { SessionMeta, SearchHit } from '$lib/types';
-  import { listSessions, cleanupEmptySessions, homeDir as fetchHomeDir } from '$lib/api';
+  import type { SessionMeta, SessionEnrichment, SearchHit } from '$lib/types';
+  import { listSessions, enrichSessions, homeDir as fetchHomeDir } from '$lib/api';
+  import { applyEnrichment } from '$lib/browseLoad';
   import { extractMeta, projectLabel, cleanTitle } from '$lib/parser';
   import { renameSession } from '$lib/sessionOps';
   import { sessionIdFromPath } from '$lib/resume';
@@ -40,9 +41,42 @@
   } = $props();
 
   // ── session list state ──────────────────────────────────────────────────────
+  /** Reactive display list. Built from tier-1 stubs on load, then patched in
+   *  place as tier-2 enrichment streams in. */
   let sessions = $state<SessionMeta[]>([]);
+  /** Non-reactive source of truth keyed by path — enrichment patches land here
+   *  and are flushed to `sessions` on a throttle, so a burst of thousands of
+   *  stream messages triggers at most one derived recompute per frame rather
+   *  than one per message (which would be O(n²) over the whole list). */
+  let sessionMap = new Map<string, SessionMeta>();
+  let flushScheduled = false;
   let loadError = $state<string | null>(null);
   let loading = $state(true);
+
+  /** How many browse cards to render at once (recency-first). "Load more" bumps
+   *  it — bounds the DOM regardless of how large the history is. */
+  const BROWSE_PAGE = 100;
+  let browseLimit = $state(BROWSE_PAGE);
+  /** Bumped per enrichment run so a remount's walk supersedes an in-flight one
+   *  (the Rust side compares this generation and stops the stale walk). */
+  let enrichSeq = 0;
+
+  /** Coalesce pending enrichment patches into a single `sessions` reassignment
+   *  on the next frame. */
+  function scheduleFlush(): void {
+    if (flushScheduled) return;
+    flushScheduled = true;
+    requestAnimationFrame(() => {
+      flushScheduled = false;
+      sessions = [...sessionMap.values()];
+    });
+  }
+
+  /** Fold one streamed enrichment into `sessionMap` (via the pure, tested
+   *  `applyEnrichment`) and flush to the display list if it changed anything. */
+  function onEnrichment(e: SessionEnrichment): void {
+    if (applyEnrichment(sessionMap, e)) scheduleFlush();
+  }
   /** Home directory, used to render project paths as "~/...". Null until loaded. */
   let homeDir = $state<string | null>(null);
 
@@ -83,25 +117,39 @@
     focusedIdx = -1;
     browseFocusedIdx = -1;
   });
+  // Reset the browse window whenever the query or project filter changes, so a
+  // "Load more" state never carries across into a different result set.
+  $effect(() => {
+    search.query;
+    search.projects;
+    browseLimit = BROWSE_PAGE;
+  });
 
   let isSearching = $derived(search.query.trim() !== '');
 
   // ── lifecycle ───────────────────────────────────────────────────────────────
   onMount(async () => {
     try {
-      // Auto-clean junk (zero-turn, untitled, stale) sessions before listing so
-      // the browse list never accumulates them. Best-effort — a failure here
-      // must not block loading the list, so it's swallowed.
-      try {
-        await cleanupEmptySessions();
-      } catch {
-        // ignore — cleanup is opportunistic
-      }
-      sessions = await listSessions();
+      // Tier 1: stat-only stubs — paints the list immediately in recency order,
+      // no content reads.
+      const stubs = await listSessions();
+      sessionMap = new Map(stubs.map((s) => [s.path, s]));
+      sessions = stubs;
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
+    }
+    // Tier 2: stream the content-derived fields (titles, turn counts, models,
+    // timestamps) in the background, newest-first so visible cards fill in
+    // first. This walk also does the junk-cleanup pass (a `cleaned` payload
+    // drops the stub) — cleanup is no longer a second full walk blocking paint.
+    // Best-effort: a failure just leaves cards in their stub state.
+    if (!loadError) {
+      const gen = ++enrichSeq;
+      enrichSessions(gen, onEnrichment).catch(() => {
+        // ignore — enrichment is opportunistic; stubs remain usable
+      });
     }
     // Best-effort: falls back to decoded project names if this fails.
     try {
@@ -169,13 +217,20 @@
     return search.projects.length === 0 || search.projects.includes(project);
   }
 
-  // ── browse mode (no query): every session, grouped by project ───────────────
-  // Recency-ordered by file mtime (desc) — list_sessions returns unsorted, and
-  // the sort dropdown was removed with the source/tool filters (#35).
+  // ── browse mode (no query): every session, newest-first, grouped by project ─
+  // Fixed mtime-desc (mtime is a tier-1 stub field, so ordering is correct at
+  // first paint with zero enrichment); the sort dropdown was removed with the
+  // source/tool filters (#35). Capped to `browseLimit` and grouped for display;
+  // "Load more" reveals older sessions.
+  let browseSortedAll = $derived.by<EnrichedSession[]>(() =>
+    enriched
+      .filter((e) => projectAllowed(e.project))
+      .slice()
+      .sort((a, b) => b.meta.mtime - a.meta.mtime)
+  );
+  let browseHasMore = $derived(browseSortedAll.length > browseLimit);
   let browseGroups = $derived.by(() =>
-    groupByProject(
-      enriched.filter((e) => projectAllowed(e.project)).sort((a, b) => b.meta.mtime - a.meta.mtime)
-    )
+    groupByProject(browseSortedAll.slice(0, browseLimit))
   );
 
   // Flat, display-order view of browseGroups — what browse-mode Up/Down/Enter walks.
@@ -404,6 +459,15 @@
     if (dateStr) parts.push(dateStr);
     const mdl = fmtModel((meta.models && meta.models.length > 0 ? meta.models[0] : '') || model);
     if (mdl) parts.push(mdl);
+    return parts.join(' · ');
+  }
+
+  /** Stats line for a not-yet-enriched stub — only the stat-cheap fields (size
+   *  and the file's mtime as a date) are known until enrichment streams in. */
+  function stubStats(meta: SessionMeta): string {
+    const parts = [humanSize(meta.size)];
+    const dateStr = meta.mtime ? fmtDate(new Date(meta.mtime * 1000).toISOString()) : '';
+    if (dateStr) parts.push(dateStr);
     return parts.join(' · ');
   }
 
@@ -666,8 +730,15 @@
             </div>
           {:else}
             <button class="session-card__open" type="button" onclick={() => onOpen(s.meta)}>
-              <span class="session-card__title" title={s.title} data-copy-text={s.title}>{s.title}</span>
-              <span class="session-card__stats">{sessionStats(s.meta, s.model, s.date)}</span>
+              {#if s.meta.enriched}
+                <span class="session-card__title" title={s.title} data-copy-text={s.title}>{s.title || 'Untitled session'}</span>
+                <span class="session-card__stats">{sessionStats(s.meta, s.model, s.date)}</span>
+              {:else}
+                <!-- Tier-1 stub: size + mtime date are known; title/turn stats
+                     stream in a moment later (visible cards enrich first). -->
+                <span class="session-card__title session-card__title--loading">Loading…</span>
+                <span class="session-card__stats">{stubStats(s.meta)}</span>
+              {/if}
             </button>
             <button
               type="button" class="btn btn--ghost btn--sm resume-btn"
@@ -686,6 +757,12 @@
       {/each}
     </div>
   {/each}
+
+  {#if browseHasMore}
+    <button class="load-more" onclick={() => (browseLimit += BROWSE_PAGE)} type="button">
+      Load more sessions…
+    </button>
+  {/if}
 {/if}
 
 <!-- ── double-confirm rename modal ──────────────────────────────────────────── -->
@@ -835,6 +912,9 @@
     background: none; border: 0; padding: 0; cursor: pointer; font-family: inherit; color: inherit; text-align: left;
   }
   .session-card__stats { font-size: 0.73rem; color: var(--text-muted); line-height: 1.4; white-space: normal; word-break: break-word; opacity: 0.85; }
+  /* Un-enriched stub: a faint placeholder title until the streamed content
+     arrives (usually within a frame or two for visible, newest-first cards). */
+  .session-card__title--loading { color: var(--text-faint); font-style: italic; }
   .rename-btn, .resume-btn { flex-shrink: 0; opacity: 0; transition: opacity 0.1s; }
   .session-card:hover .rename-btn, .session-card:hover .resume-btn,
   .group:hover .rename-btn, .group:hover .resume-btn, .group:hover .open-btn { opacity: 1; }

@@ -23,18 +23,41 @@ find_projects_dir() -> string | null
     // Resolution order: env CLAUDE_CONFIG_DIR + "/projects",
     //   then <home>/.claude/projects. <home> per-OS (dirs crate).
 
-list_sessions() -> SessionMeta[]
-    // Walk each immediate subdir of the projects dir (each = one project).
-    // Skip dirs named "subagents", "tool-results". For every *.jsonl that is
-    // NOT named "agent-*.jsonl", return one SessionMeta.
-    SessionMeta {
-      id: string,              // stable id = relative path from projects dir
-      path: string,            // absolute path to the .jsonl
-      project_raw: string,     // the encoded project dir name
-      mtime: number,           // unix seconds (file modified time)
-      size: number,            // bytes
-      preview: string[],       // first up to 50 lines of the file (for JS metadata extraction)
-      // Cheap stats — computed in one pass over the full file content:
+// Browse loading is two-tier so a large history never blocks first paint
+// (issue #37). Tier 1 is a cheap stat-only list; tier 2 streams the
+// content-derived fields in the background AND folds in the junk-cleanup pass.
+
+list_sessions() -> SessionStub[]
+    // TIER 1 — one directory walk + a single stat per file, NO content read.
+    // Walk each immediate subdir of the projects dir (each = one project),
+    // skip dirs named "subagents"/"tool-results", and for every *.jsonl NOT
+    // named "agent-*.jsonl" emit one stub. Returned in filesystem order; the
+    // frontend sorts by mtime (recency) and paints immediately.
+    SessionStub {
+      id: string,          // stable id = relative path from projects dir
+      path: string,        // absolute path to the .jsonl
+      project_raw: string, // the encoded project dir name
+      mtime: number,       // unix seconds (file modified time) — the recency sort key
+      size: number,        // bytes
+    }
+
+enrich_sessions(enrichId: number, onMeta: Channel<SessionEnrichment>) -> EnrichSummary
+    // TIER 2 — a background streaming scan (Tauri v2 Channel, same house
+    // pattern as `search`). Walks the SAME session files newest-first (mtime
+    // desc, so the cards in view fill in first), reads + scans each once, and
+    // pushes one SessionEnrichment per file. `enrichId` lets a newer call (a
+    // remount) supersede an in-flight walk; navigating away does not cancel it,
+    // so a normal session still completes one full pass.
+    //
+    // This walk also does the junk-cleanup pass (see below), so there is no
+    // separate `cleanup_empty_sessions` command — the old one re-walked and
+    // full-read the whole corpus a SECOND time before the list even loaded.
+    SessionEnrichment {
+      path: string,            // key: which stub this patches
+      cleaned: boolean,        // true = file was empty/untitled/stale and was just
+                               //   deleted; every field below is then meaningless and
+                               //   the frontend drops the stub instead of patching it.
+      preview: string[],       // first up to 50 lines (for JS metadata extraction)
       line_count: number,      // non-empty lines in the file
       user_count: number,      // lines whose "type" == "user"
       assistant_count: number, // lines whose "type" == "assistant"
@@ -42,7 +65,19 @@ list_sessions() -> SessionMeta[]
       models: string[],        // distinct message.model values, first-seen order
       first_ts: string,        // first "timestamp" value seen ("" if none)
       last_ts: string,         // last "timestamp" value seen ("" if none)
+      cwd: string,             // first-seen "cwd" value ("" if none) — the real project path
+      custom_title: string,    // last-seen "customTitle" (whole-file scan; "" if none)
     }
+    EnrichSummary { enriched: number, cleaned: number, cancelled: boolean }
+    // Cleanup rule (unchanged from the old command): a file is auto-deleted
+    // only if it has zero user AND zero assistant lines, no custom title, and
+    // is stale (mtime older than a 15-min recency window — the guard that keeps
+    // a live CLI's freshly-opened session from being deleted out from under it).
+    // A file whose mtime can't be read is never deleted.
+    //
+    // The frontend (api.ts) inflates each stub into a `SessionMeta` row with
+    // empty content fields, then patches those fields from the stream. Browse
+    // renders newest-first and windowed (100 at a time, "Load more").
 
 read_session(path) -> string
     // Raw UTF-8 contents of the .jsonl file.

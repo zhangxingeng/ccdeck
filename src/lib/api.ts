@@ -5,6 +5,9 @@
  */
 import type {
   SessionMeta,
+  SessionStub,
+  SessionEnrichment,
+  EnrichSummary,
   BackupVersion,
   SearchFilters,
   SearchHit,
@@ -13,6 +16,7 @@ import type {
   AppConfig,
 } from './types';
 import type { Snippet, MatchHit, Project, ProjectList } from './prompts/types';
+import { stubToMeta } from './browseLoad';
 
 // Bundled mock fixtures for browser-dev mode (Vite ?raw import).
 import mockSession from '../../tests/mock_data/session.jsonl?raw';
@@ -48,39 +52,70 @@ export async function openSessionFile(path: string): Promise<void> {
   await openPath(path);
 }
 
+// ── Browse loading: tier-1 stubs (instant) + tier-2 streamed enrichment ──────
+//
+// `list_sessions` now returns stat-only stubs so the list paints immediately;
+// the content-derived fields stream in afterward via `enrich_sessions`. Both
+// tiers share one dev fixture (mock_fidelity: one rich exemplar, siblings
+// derived) so the browser-dev mock can't contradict the real backend.
+
+const MOCK_SESSION_PATH = '/dev/mock/session.jsonl';
+
+const mockStub: SessionStub = {
+  id: 'demo-project/session.jsonl',
+  path: MOCK_SESSION_PATH,
+  project_raw: '-home-dev-demo-project',
+  mtime: 1751300000,
+  size: mockSession.length,
+};
+
+/** The enrichment the real backend would stream for `mockStub`, derived from
+ *  the same fixture so the two can't drift. */
+const mockEnrichment: SessionEnrichment = {
+  path: MOCK_SESSION_PATH,
+  cleaned: false,
+  preview: mockSession.split('\n').slice(0, 50),
+  line_count: mockSession.split('\n').filter((l) => l.trim().length > 0).length,
+  user_count: 3,
+  assistant_count: 3,
+  subagent_count: 1,
+  models: ['claude-sonnet-4-6'],
+  first_ts: '2025-06-01T10:00:00.000Z',
+  last_ts: '2025-06-01T10:05:00.000Z',
+  cwd: '/dev/mock/demo-project',
+  custom_title: '',
+};
+
+/** Tier-1: stat-only session rows, painted immediately in recency order. The
+ *  content fields are empty until `enrichSessions` streams them in. */
 export async function listSessions(): Promise<SessionMeta[]> {
-  if (!isTauri()) {
-    return [
-      {
-        id: 'demo-project/session.jsonl',
-        path: '/dev/mock/session.jsonl',
-        project_raw: '-home-dev-demo-project',
-        mtime: 1751300000,
-        size: mockSession.length,
-        preview: mockSession.split('\n').slice(0, 50),
-        line_count: mockSession.split('\n').filter((l) => l.trim().length > 0).length,
-        user_count: 3,
-        assistant_count: 3,
-        subagent_count: 1,
-        models: ['claude-sonnet-4-6'],
-        first_ts: '2025-06-01T10:00:00.000Z',
-        last_ts: '2025-06-01T10:05:00.000Z',
-        cwd: '/dev/mock/demo-project',
-        custom_title: '',
-      },
-    ];
-  }
-  return call<SessionMeta[]>('list_sessions');
+  const stubs = isTauri()
+    ? await call<SessionStub[]>('list_sessions')
+    : [mockStub];
+  return stubs.map(stubToMeta);
 }
 
 /**
- * Auto-clean zero-turn, untitled, stale session files, returning how many were
- * removed. Called from the browse-list scan just before `listSessions` so junk
- * never accumulates in the list. No-op in browser-dev mode (no real files).
+ * Tier-2: stream content-derived metadata for every session as each file is
+ * scanned, so a large history never blocks first paint. Each `SessionEnrichment`
+ * is delivered to `onMeta` as it arrives (via a Tauri v2 Channel); a `cleaned`
+ * payload means that file was auto-removed as junk and its stub should be
+ * dropped. `enrichId` lets a newer call (a remount) supersede an in-flight one.
+ * The promise resolves with a summary when the walk finishes or is superseded.
+ * In browser-dev mode a small stand-in emits the single mock session.
  */
-export async function cleanupEmptySessions(): Promise<number> {
-  if (!isTauri()) return 0;
-  return call<number>('cleanup_empty_sessions');
+export async function enrichSessions(
+  enrichId: number,
+  onMeta: (e: SessionEnrichment) => void
+): Promise<EnrichSummary> {
+  if (!isTauri()) {
+    onMeta(mockEnrichment);
+    return { enriched: 1, cleaned: 0, cancelled: false };
+  }
+  const { invoke, Channel } = await import('@tauri-apps/api/core');
+  const channel = new Channel<SessionEnrichment>();
+  channel.onmessage = onMeta;
+  return invoke<EnrichSummary>('enrich_sessions', { enrichId, onMeta: channel });
 }
 
 export async function readSession(path: string): Promise<string> {
