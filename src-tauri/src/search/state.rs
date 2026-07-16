@@ -221,21 +221,11 @@ fn cached_session_paths(conn: &Connection) -> Result<HashSet<String>, String> {
     Ok(set)
 }
 
-/// Does a cold-path (not-yet-indexed) block pass the source/date/tool-name
-/// filters? (Project and session path are filtered per-file, not here — see
-/// the cold-tier loop below.) Mirrors the warm-tier filter semantics built
-/// into the tantivy query itself.
-fn passes_cold_filters(source: &str, text: &str, ts: Option<i64>, filters: &SearchFilters) -> bool {
-    if let Some(tool_name) = &filters.tool_name {
-        if source != "tool_use" {
-            return false;
-        }
-        if text != tool_name.as_str() && !text.starts_with(&format!("{tool_name}\n")) {
-            return false;
-        }
-    } else if !filters.sources.is_empty() && !filters.sources.iter().any(|s| s == source) {
-        return false;
-    }
+/// Does a cold-path (not-yet-indexed) block pass the date-range filter?
+/// (Project and session path are filtered per-file, not here — see the
+/// cold-tier loop below.) Since search narrowed to messages (#35), date is the
+/// only per-block filter left; it mirrors the warm-tier `RangeQuery` on `ts`.
+fn passes_date_filter(ts: Option<i64>, filters: &SearchFilters) -> bool {
     if let Some(from) = filters.from {
         if !matches!(ts, Some(t) if t >= from) {
             return false;
@@ -347,7 +337,7 @@ pub async fn search(
                     summary.truncated = true;
                     break;
                 }
-                if !passes_cold_filters(&b.source, &b.text, b.ts, &filters) {
+                if !passes_date_filter(b.ts, &filters) {
                     continue;
                 }
                 if let Some((snippet, match_ranges, matched)) = query::cold_match(&b.text, &tokens) {

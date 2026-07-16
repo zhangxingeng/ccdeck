@@ -1,14 +1,19 @@
 //! Extract searchable text from a session JSONL, mirroring the entry/block
 //! classification semantics of `src/lib/parser.ts` (`parseJsonl` +
-//! `extractContentBlocks`). `block_no` does **not** line up with the editor's
-//! block numbering: this extractor still counts across all four historical
-//! block types (thinking/text/tool_use/tool_result), while the frontend
-//! (post the Phase-A render-trim, see `ARCHITECTURE.md`) only ever produces
-//! `'text'` blocks. Nothing in the app relies on `block_no` for cross-
-//! referencing or positioning today — jump-to-hit navigates by `uuid` alone,
-//! and `line_no`/`block_no` are only ever used as dedup-key strings — but a
-//! future feature reaching for real block-level positioning should not
-//! assume the two numbering schemes agree.
+//! `extractContentBlocks`).
+//!
+//! **Messages only (v3, issue #35):** we index only what was *said* — `user`
+//! and `assistant` **text** blocks. Thinking, tool_use, and tool_result blocks
+//! are deliberately not extracted: they're the bulk of the corpus (tool_result
+//! bodies especially) and users search for conversation, not tool noise. So a
+//! block's `source` is now always `"user"` or `"assistant"`.
+//!
+//! `block_no` counts only the text blocks this extractor emits, so within one
+//! message it's the index among *rendered* text blocks — which now lines up
+//! with the frontend (post the Phase-A render-trim, see `ARCHITECTURE.md`, it
+//! also only produces `'text'` blocks). Nothing relies on that alignment for
+//! positioning today — jump-to-hit navigates by `uuid` alone, and
+//! `line_no`/`block_no` are only ever used as dedup-key strings.
 //!
 //! The output is a flat list of [`ExtractedBlock`]s — one per searchable
 //! content block — which the indexer stages into the tantivy full-text index
@@ -56,7 +61,8 @@ pub struct ExtractedBlock {
     pub uuid: String,
     /// Message timestamp as epoch milliseconds, if parseable (for date filtering).
     pub ts: Option<i64>,
-    /// 'user' | 'assistant' | 'thinking' | 'tool_use' | 'tool_result'.
+    /// `"user"` or `"assistant"` — the speaker (drives the You/Claude hit badge).
+    /// No longer any of thinking/tool_use/tool_result: those aren't indexed.
     pub source: String,
     /// The extracted plain text to search.
     pub text: String,
@@ -85,59 +91,11 @@ fn is_internal_echo_arr(arr: &[Value]) -> bool {
     }
 }
 
-/// Recursively collect readable scalars from a tool-input JSON value, so a file
-/// path or command buried inside a tool call is searchable. Object scalars are
-/// rendered as `key: value` so field names are searchable too.
-fn flatten_json(v: &Value, out: &mut Vec<String>) {
-    match v {
-        Value::String(s) => out.push(s.clone()),
-        Value::Number(n) => out.push(n.to_string()),
-        Value::Bool(b) => out.push(b.to_string()),
-        Value::Array(a) => {
-            for item in a {
-                flatten_json(item, out);
-            }
-        }
-        Value::Object(o) => {
-            for (k, val) in o {
-                match val {
-                    Value::String(s) => out.push(format!("{k}: {s}")),
-                    Value::Number(n) => out.push(format!("{k}: {n}")),
-                    Value::Bool(b) => out.push(format!("{k}: {b}")),
-                    _ => {
-                        out.push(k.clone());
-                        flatten_json(val, out);
-                    }
-                }
-            }
-        }
-        Value::Null => {}
-    }
-}
-
-/// tool_result text: join the `text` parts of an array content, or use a plain
-/// string content directly. Mirrors parser.ts (which only handled arrays) but
-/// additionally indexes string-form results so they're searchable.
-fn extract_tool_result_text(content: Option<&Value>) -> String {
-    match content {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(arr)) => {
-            let parts: Vec<&str> = arr
-                .iter()
-                .filter(|item| item.get("type").and_then(Value::as_str) == Some("text"))
-                .filter_map(|item| item.get("text").and_then(Value::as_str))
-                .collect();
-            parts.join("\n")
-        }
-        _ => String::new(),
-    }
-}
-
-/// Port of `extractContentBlocks`. `text_source` is the entry type ('user' or
-/// 'assistant') used for plain text blocks; thinking/tool_use/tool_result carry
-/// their own source. `block_no` is the index in this extractor's *own* output
-/// block list (all four block types advance it) — see the module doc for why
-/// that no longer matches the frontend's block numbering.
+/// Port of `extractContentBlocks`, narrowed to **text blocks only** (v3, issue
+/// #35): `text_source` (`"user"` or `"assistant"`) is the block's source.
+/// Thinking, tool_use, and tool_result blocks are skipped entirely — we index
+/// conversation, not tool noise. `block_no` is the index among the text blocks
+/// this extractor emits (see the module doc — it's a dedup key, not a position).
 fn extract_content_blocks(arr: &[Value], text_source: &str) -> Vec<(i64, String, String)> {
     let mut out = Vec::new();
     let mut block_no: i64 = 0;
@@ -145,37 +103,9 @@ fn extract_content_blocks(arr: &[Value], text_source: &str) -> Vec<(i64, String,
         if !b.is_object() {
             continue;
         }
-        let btype = b.get("type").and_then(Value::as_str).unwrap_or("");
-        let produced: Option<(String, String)> = match btype {
-            "thinking" => {
-                let t = b.get("thinking").and_then(Value::as_str).unwrap_or("");
-                Some(("thinking".to_string(), t.to_string()))
-            }
-            "text" => {
-                let t = b.get("text").and_then(Value::as_str).unwrap_or("");
-                Some((text_source.to_string(), t.to_string()))
-            }
-            "tool_use" => {
-                let name = b.get("name").and_then(Value::as_str).unwrap_or("unknown");
-                let mut parts = Vec::new();
-                if let Some(input) = b.get("input") {
-                    flatten_json(input, &mut parts);
-                }
-                let text = if parts.is_empty() {
-                    name.to_string()
-                } else {
-                    format!("{name}\n{}", parts.join("\n"))
-                };
-                Some(("tool_use".to_string(), text))
-            }
-            "tool_result" => {
-                let text = extract_tool_result_text(b.get("content"));
-                Some(("tool_result".to_string(), text))
-            }
-            _ => None,
-        };
-        if let Some((source, text)) = produced {
-            out.push((block_no, source, text));
+        if b.get("type").and_then(Value::as_str) == Some("text") {
+            let t = b.get("text").and_then(Value::as_str).unwrap_or("");
+            out.push((block_no, text_source.to_string(), t.to_string()));
             block_no += 1;
         }
     }
@@ -292,11 +222,13 @@ mod tests {
     );
 
     #[test]
-    fn extracts_expected_blocks() {
+    fn extracts_only_message_text_blocks() {
         let blocks = extract_blocks(FIXTURE);
 
-        // Expected: user string (l2), thinking+text+tool_use (l3), tool_result (l4) = 5.
-        assert_eq!(blocks.len(), 5, "got: {blocks:#?}");
+        // Messages only (v3): user string (l2) + assistant *text* (l3) = 2.
+        // The l3 thinking + tool_use blocks and the l4 tool_result are all
+        // skipped now, so they contribute nothing.
+        assert_eq!(blocks.len(), 2, "got: {blocks:#?}");
 
         // user message
         assert_eq!(blocks[0].source, "user");
@@ -306,25 +238,21 @@ mod tests {
         assert_eq!(blocks[0].text, "find the bug in parser");
         assert_eq!(blocks[0].ts, Some(1_782_986_400_000)); // 2026-07-02T10:00:00Z
 
-        // assistant thinking / text / tool_use — block_no 0,1,2 in order
-        assert_eq!(blocks[1].source, "thinking");
+        // assistant text — block_no 0 (the skipped thinking block no longer
+        // advances the counter, so text is now the first emitted block).
+        assert_eq!(blocks[1].source, "assistant");
+        assert_eq!(blocks[1].line_no, 3);
         assert_eq!(blocks[1].block_no, 0);
-        assert_eq!(blocks[1].text, "let me look");
+        assert_eq!(blocks[1].uuid, "a1");
+        assert_eq!(blocks[1].text, "I'll read the file");
 
-        assert_eq!(blocks[2].source, "assistant");
-        assert_eq!(blocks[2].block_no, 1);
-        assert_eq!(blocks[2].text, "I'll read the file");
-
-        assert_eq!(blocks[3].source, "tool_use");
-        assert_eq!(blocks[3].block_no, 2);
-        assert!(blocks[3].text.contains("Read"));
-        assert!(blocks[3].text.contains("/src/parser.ts"));
-
-        // tool_result from the user entry
-        assert_eq!(blocks[4].source, "tool_result");
-        assert_eq!(blocks[4].line_no, 4);
-        assert_eq!(blocks[4].block_no, 0);
-        assert_eq!(blocks[4].text, "line 42: off by one");
+        // Nothing thinking/tool-shaped leaks into the index.
+        assert!(
+            blocks
+                .iter()
+                .all(|b| b.source == "user" || b.source == "assistant"),
+            "only user/assistant sources are indexed"
+        );
     }
 
     #[test]

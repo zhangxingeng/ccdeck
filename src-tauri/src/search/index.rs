@@ -101,11 +101,9 @@ pub struct SearchSchema {
     pub line_no: Field,
     pub block_no: Field,
     pub uuid: Field,
+    /// `"user"` or `"assistant"` — display-only now (drives the You/Claude hit
+    /// badge). No longer a query filter, so it's `STORED` without indexing.
     pub source: Field,
-    /// First line of tool_use text (the tool's name), or "" for non-tool_use
-    /// blocks. A dedicated field so the `tool_name` filter is an exact-term
-    /// match instead of emulating a `LIKE 'name\n%'` prefix scan.
-    pub tool_name: Field,
     pub text: Field,
 }
 
@@ -118,8 +116,9 @@ impl SearchSchema {
         let line_no = b.add_i64_field("line_no", STORED);
         let block_no = b.add_i64_field("block_no", STORED);
         let uuid = b.add_text_field("uuid", STRING | STORED);
-        let source = b.add_text_field("source", STRING | STORED);
-        let tool_name = b.add_text_field("tool_name", STRING | STORED);
+        // Display-only (the You/Claude hit badge) — stored, not indexed, since
+        // the source filter was removed when search narrowed to messages (#35).
+        let source = b.add_text_field("source", STORED);
         // Same shape as the `TEXT` constant (tokenized, `WithFreqsAndPositions`,
         // stored) but naming our own tokenizer instead of "default" — see
         // `TEXT_TOKENIZER`/`MAX_TOKEN_LEN` above.
@@ -140,7 +139,6 @@ impl SearchSchema {
             block_no,
             uuid,
             source,
-            tool_name,
             text,
         }
     }
@@ -265,16 +263,6 @@ fn parse_file(path: &Path, home: Option<&Path>) -> Option<FilePayload> {
     })
 }
 
-/// First line of a tool_use block's text is the tool name (see `extract.rs`'s
-/// `"{name}\n{flattened input}"` shape); everything else has no tool name.
-fn tool_name_of<'a>(source: &str, text: &'a str) -> &'a str {
-    if source == "tool_use" {
-        text.split('\n').next().unwrap_or("")
-    } else {
-        ""
-    }
-}
-
 /// Stage one file's blocks into the tantivy writer (delete-then-add) and
 /// upsert its fingerprint in `session_files`. Does NOT commit either side —
 /// callers batch many files into one commit for throughput; see
@@ -289,7 +277,6 @@ fn stage_payload(
     writer
         .delete_term(Term::from_field_text(schema.session_path, &p.session_path));
     for b in &p.blocks {
-        let tool_name = tool_name_of(&b.source, &b.text);
         let mut document = TantivyDocument::default();
         document.add_text(schema.session_path, &p.session_path);
         document.add_text(schema.project, &p.project);
@@ -300,7 +287,6 @@ fn stage_payload(
         document.add_i64(schema.block_no, b.block_no);
         document.add_text(schema.uuid, &b.uuid);
         document.add_text(schema.source, &b.source);
-        document.add_text(schema.tool_name, tool_name);
         document.add_text(schema.text, &b.text);
         writer
             .add_document(document)
@@ -547,8 +533,8 @@ mod tests {
 
         let stats = build_index_parallel(&mut conn, &mut writer, &schema, &base, Some(home)).unwrap();
         assert_eq!(stats.sessions, 1);
-        assert_eq!(stats.blocks, 3); // user text + assistant text + tool_use
-        assert_eq!(doc_count(&index), 3);
+        assert_eq!(stats.blocks, 2); // user text + assistant text (tool_use not indexed)
+        assert_eq!(doc_count(&index), 2);
 
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM session_files", [], |r| r.get(0))
@@ -599,8 +585,57 @@ mod tests {
         build_index_parallel(&mut conn, &mut writer, &schema, &base, None).unwrap();
         build_index_parallel(&mut conn, &mut writer, &schema, &base, None).unwrap(); // second pass must not duplicate
 
-        assert_eq!(doc_count(&index), 3, "delete-then-add must not double docs");
+        assert_eq!(doc_count(&index), 2, "delete-then-add must not double docs");
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The v3 schema-shape change (dropped `tool_name`, `source` STRING→STORED)
+    /// must yield a different `schema_fingerprint` than the pre-#35 shape — that
+    /// delta is exactly what makes `state.rs`'s effective version mismatch an
+    /// existing install's stored marker, so `db::ensure_engine_version` wipes
+    /// and forces one automatic rebuild (verified via a live-vs-live hash
+    /// compare, not a hardcoded hash — `DefaultHasher` isn't stable across
+    /// toolchains). If someone reverts the schema to the old shape, this fails.
+    #[test]
+    fn schema_fingerprint_differs_from_old_shape() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn fingerprint_of(schema: &Schema) -> String {
+            let json = serde_json::to_string(schema).unwrap_or_default();
+            let mut hasher = DefaultHasher::new();
+            json.hash(&mut hasher);
+            format!("{:x}", hasher.finish())
+        }
+
+        // Reconstruct the pre-#35 schema shape: an extra `tool_name` field and
+        // `source` indexed as STRING (not STORED-only).
+        let old_shape = {
+            let mut b = Schema::builder();
+            b.add_text_field("session_path", STRING | STORED);
+            b.add_text_field("project", STRING | STORED);
+            b.add_i64_field("ts", INDEXED | STORED | FAST);
+            b.add_i64_field("line_no", STORED);
+            b.add_i64_field("block_no", STORED);
+            b.add_text_field("uuid", STRING | STORED);
+            b.add_text_field("source", STRING | STORED);
+            b.add_text_field("tool_name", STRING | STORED);
+            let text_indexing = TextFieldIndexing::default()
+                .set_tokenizer(TEXT_TOKENIZER)
+                .set_index_option(IndexRecordOption::WithFreqsAndPositions);
+            let text_options = TextOptions::default()
+                .set_indexing_options(text_indexing)
+                .set_stored();
+            b.add_text_field("text", text_options);
+            b.build()
+        };
+
+        assert_ne!(
+            schema_fingerprint(),
+            fingerprint_of(&old_shape),
+            "the narrowed schema must fingerprint differently, or existing \
+             installs won't auto-rebuild into it"
+        );
     }
 }

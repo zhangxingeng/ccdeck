@@ -36,13 +36,12 @@ const FUZZY_DISTANCE: u8 = 1;
 const MIN_FUZZY_TOKEN_LEN: usize = 3;
 const SNIPPET_MAX_CHARS: usize = 240;
 
-/// Query-time filters. Empty `sources`/`projects` mean "no restriction".
+/// Query-time filters. Empty `projects` means "no restriction". Narrowed to
+/// date + project (+ the `session_path` scope) when search became
+/// messages-only (#35) — the old `sources`/`tool_name` filters are gone.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchFilters {
-    /// Low-level block sources: user, assistant, thinking, tool_use, tool_result.
-    #[serde(default)]
-    pub sources: Vec<String>,
     /// Inclusive epoch-ms lower bound on the block timestamp.
     pub from: Option<i64>,
     /// Inclusive epoch-ms upper bound.
@@ -50,11 +49,6 @@ pub struct SearchFilters {
     /// Home-relative project labels to include.
     #[serde(default)]
     pub projects: Vec<String>,
-    /// Restrict to `tool_use` blocks for this exact tool name (e.g. "Bash",
-    /// "Edit"). Overrides `sources` for matching purposes: a hit must be a
-    /// `tool_use` block for this tool regardless of what's in `sources`.
-    #[serde(default)]
-    pub tool_name: Option<String>,
     /// Restrict results to this one session file (the "current session only" filter).
     #[serde(default)]
     pub session_path: Option<String>,
@@ -156,19 +150,6 @@ pub fn build_query(
     let text_query = should_group(token_clauses);
 
     let mut must: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, text_query)];
-
-    if let Some(tool_name) = &filters.tool_name {
-        must.push((Occur::Must, term_query(schema.tool_name, tool_name)));
-    } else if !filters.sources.is_empty() {
-        let group = should_group(
-            filters
-                .sources
-                .iter()
-                .map(|s| term_query(schema.source, s))
-                .collect(),
-        );
-        must.push((Occur::Must, group));
-    }
 
     if !filters.projects.is_empty() {
         let group = should_group(
@@ -475,12 +456,6 @@ mod tests {
         doc.add_i64(schema.block_no, 0);
         doc.add_text(schema.uuid, "u1");
         doc.add_text(schema.source, source);
-        let tool_name = if source == "tool_use" {
-            text.split('\n').next().unwrap_or("")
-        } else {
-            ""
-        };
-        doc.add_text(schema.tool_name, tool_name);
         doc.add_text(schema.text, text);
         writer.add_document(doc).unwrap();
     }
@@ -569,7 +544,10 @@ mod tests {
     }
 
     #[test]
-    fn filters_narrow_by_source_and_project() {
+    fn project_filter_narrows_results() {
+        // Source is no longer a filter (search is messages-only now, #35), so
+        // only the project filter is exercised here. `source` still rides along
+        // on each hit for the You/Claude badge — asserted below.
         let (index, schema) = tmp_index("filters");
         let mut writer = index.writer(15_000_000).unwrap();
         add_block(&writer, &schema, "/a.jsonl", "~/app", "user", "investigate the bug report");
@@ -582,15 +560,14 @@ mod tests {
 
         let tokens = tokenize(&index, "bug").unwrap();
 
-        let filters = SearchFilters {
-            sources: vec!["assistant".into()],
-            ..Default::default()
-        };
-        let query = build_query(&index, &schema, "bug", &filters).unwrap().unwrap();
-        let (total, hits) = search_warm(&searcher, &schema, &query, &tokens, 10).unwrap();
-        assert_eq!(total, 1);
-        assert_eq!(hits[0].source, "assistant");
+        // No filter: all three blocks match "bug".
+        let query = build_query(&index, &schema, "bug", &SearchFilters::default())
+            .unwrap()
+            .unwrap();
+        let (total, _) = search_warm(&searcher, &schema, &query, &tokens, 10).unwrap();
+        assert_eq!(total, 3);
 
+        // Project filter narrows to the ~/lib session only.
         let filters = SearchFilters {
             projects: vec!["~/lib".into()],
             ..Default::default()
@@ -599,6 +576,7 @@ mod tests {
         let (total, hits) = search_warm(&searcher, &schema, &query, &tokens, 10).unwrap();
         assert_eq!(total, 1);
         assert_eq!(hits[0].project, "~/lib");
+        assert_eq!(hits[0].source, "user", "source is still returned for the badge");
     }
 
     #[test]
