@@ -1,7 +1,7 @@
 {
   "name": "claude-code-studio",
   "version": "0.13.2",
-  "description": "CC Deck — an offline desktop control center for Claude Code: browse history, edit settings, and launch it your way.",
+  "description": "CC Deck — an offline desktop companion for Claude Code: search your history, edit it, and share it.",
   "type": "module",
   "packageManager": "pnpm@11.9.0",
   "scripts": {

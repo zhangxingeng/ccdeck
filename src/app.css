@@ -50,11 +50,6 @@
   --highlight: #ffe566;
   --highlight-foreground: #1e293b;
 
-  /* Tool-input JSON syntax highlighting (jt = "json token") */
-  --jt-str: #16a34a;
-  --jt-num: #2563eb;
-  --jt-bool: #9333ea;
-
   --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
 }
@@ -73,10 +68,6 @@
 
   --highlight: #ffd60a;
   --highlight-foreground: #1e293b;
-
-  --jt-str: #4ade80;
-  --jt-num: #60a5fa;
-  --jt-bool: #c084fc;
 }
 
 * { box-sizing: border-box; }
@@ -235,15 +226,8 @@ a { color: var(--accent-user); }
   line-height: 1.45; white-space: pre-wrap; word-break: break-word; max-height: 22em; overflow-y: auto; margin: 0;
 }
 
-/* JSON syntax token colors (see src/lib/jsonHighlight.ts) */
-.jt-key { color: var(--accent-tool); }
-.jt-str { color: var(--jt-str); }
-.jt-num { color: var(--jt-num); }
-.jt-bool { color: var(--jt-bool); }
-.jt-null { color: var(--text-faint); }
-
 /* Tool input: collapsed to key-name chips, click opens the popover with the
-   full highlighted JSON (Block.svelte). */
+   full input (Block.svelte). */
 .tool-input-chips {
   display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; width: 100%;
   padding: 0.4rem 0.55rem; background: var(--bg-subtle); border: 1px solid var(--border);
